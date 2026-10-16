@@ -1,0 +1,3 @@
+Extract observable facts from the following observation. Separate uncertainty from facts; do not invent unseen details.
+Observation:
+{input}

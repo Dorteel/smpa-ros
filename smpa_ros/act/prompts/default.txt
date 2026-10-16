@@ -1,0 +1,3 @@
+Translate this plan into a proposed command description. Flag missing robot capabilities or parameters. Do not claim execution occurred.
+Plan:
+{input}

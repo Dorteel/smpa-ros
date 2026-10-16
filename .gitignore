@@ -208,6 +208,15 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# ROS 2 build artifacts and local model weights.
+/install/
+/log/
+/weights/
+/world_model/*
+!/world_model/.gitkeep
+*.safetensors
+*.gguf
+
 # PyPI configuration file
 .pypirc
 

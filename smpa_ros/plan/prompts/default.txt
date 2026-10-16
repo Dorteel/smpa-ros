@@ -1,0 +1,3 @@
+Propose a short action plan from this world state. If a goal or required information is missing, request clarification.
+World state:
+{input}

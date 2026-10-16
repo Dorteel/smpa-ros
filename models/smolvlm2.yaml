@@ -1,0 +1,4 @@
+name: smolvlm2
+model_id: HuggingFaceTB/SmolVLM2-2.2B-Instruct
+parameters: 2.2B
+vram_gb: null
