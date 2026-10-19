@@ -215,6 +215,8 @@ tempCodeRunnerFile.py
 /models/llm/
 /models/vlm/
 /models/coding/
+/models/vision/
+/third_party/
 /models/download_report.json*
 *.incomplete
 *.part

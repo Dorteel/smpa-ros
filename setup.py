@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/models', glob('models/*.yaml')),
         ('share/' + package_name + '/config', ['config/pipeline.yaml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,5 +26,7 @@ setup(
         'hello = smpa_ros.hello:main',
         'sense = smpa_ros.sense.service:main',
         'loop = smpa_ros.loop:main',
+        'visual_jev = smpa_ros.visual_jev.service:main',
+        'visual_jev_camera = smpa_ros.visual_jev.camera:main',
     ]},
 )

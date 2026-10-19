@@ -1,0 +1,12 @@
+models:
+  visual-jev-4b:
+    name: visual-jev-4b
+    backend: visual_jev
+    source_repository: https://github.com/guanxuyu-sv/Visual-Jev
+    source_revision: a392eaedfa41adae348f9767b55c0f54b3a13b57
+    base_model:
+      model_id: Qwen/Qwen3-VL-4B-Instruct
+      path: vision/visual-jev-4b/base_model
+    adapter:
+      model_id: guanxuyu/visual-jev-4b-answer-sft
+      path: vision/visual-jev-4b/adapter

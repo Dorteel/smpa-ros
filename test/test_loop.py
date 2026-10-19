@@ -1,4 +1,7 @@
 from unittest.mock import MagicMock
+from datetime import datetime
+
+from PIL import Image as PILImage
 
 import pytest
 import rclpy
@@ -36,11 +39,18 @@ def test_camera_sense_markdown(tmp_path, fails):
             with pytest.raises(RuntimeError, match='model failed'):
                 capture_once(loop, config, tmp_path, executor, timeout=5)
             assert not list(tmp_path.glob('*.md'))
+            assert not list(tmp_path.iterdir())
         else:
             path = capture_once(loop, config, tmp_path, executor, timeout=5)
             assert path.name.endswith('_sense_output.md')
             assert path.read_bytes() == text.encode('utf-8')
             assert list(tmp_path.glob('*.md')) == [path]
+            with PILImage.open(path.with_suffix('.png')) as saved:
+                assert saved.size == (1, 1)
+                assert saved.getpixel((0, 0)) == (255, 0, 0)
+            datetime.strptime(path.name.removesuffix('_sense_output.md'),
+                              '%Y-%m-%d_%H-%M-%S_%fZ')
+            assert set(tmp_path.iterdir()) == {path, path.with_suffix('.png')}
         backend.describe.assert_called_once()
         assert backend.describe.call_args.args[1] == 'Describe the scene.'
     finally:

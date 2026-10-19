@@ -1,5 +1,128 @@
 # Minimal robot cognition
 
+## Visual Jev: image → forced-choice probabilities
+
+`smpa_ros` now exposes `/visual_jev/evaluate` using
+`smpa_ros_interfaces/srv/EvaluateVisualDecision`. The request carries an image,
+public context, a question, and 2–16 distinct nonempty choices. The response has
+success/error fields, labels in request order, probabilities, and the selected
+answer. Failures are returned explicitly. The defaults in the one-frame client
+ask whether an image contains something interesting, with choices `yes` and `no`.
+These are probabilities relative to the supplied choices, not calibrated
+interestingness measurements.
+
+The wrapper calls the released `VDM.prepare_group()` and `VDM.run_independent()`
+and follows the official example's probability readout. It does not replace the
+decision algorithm, generate an intermediate description, train, or merge away
+the adapter. `backend.vdm`, `backend.model` (PEFT), `backend.last_output`, and
+`backend.last_logits` remain available; transformer blocks and hooks are accessible
+through `backend.vdm.vl_model.language_model`.
+
+This checkout previously had no central registry or launch file. The new
+`models/model_library.yaml` adds Visual Jev without moving the existing
+`llm/`, `vlm/`, or `coding/` directories or changing the existing model YAML files.
+Its base and adapter live under `models/vision/visual-jev-4b/`; all model files and
+the local third-party checkout are Git-ignored. The downloader reuses compatible
+cached/library files by revision rather than duplicating weights.
+
+### Source, dependencies, and model downloads
+
+Run from the repository root. The official code revision inspected for this
+integration is pinned below; the source is not copied into this ROS package.
+
+```bash
+git clone https://github.com/guanxuyu-sv/Visual-Jev.git third_party/Visual-Jev
+git -C third_party/Visual-Jev checkout a392eaedfa41adae348f9767b55c0f54b3a13b57
+source .venv/bin/activate
+python -m pip install --no-deps peft==0.21.0
+python scripts/download_models.py --visual-jev
+```
+
+If the checkout or dependency already exists, reuse it. The existing environment
+already supplies PyTorch, Transformers, Pillow, Accelerate, and Safetensors;
+PEFT was the only missing inference dependency. Full upstream reproduction pins
+are in `third_party/Visual-Jev/code/requirements.txt`; do not replace a working
+CUDA installation just to install benchmark/data-analysis dependencies.
+Both downloads completed: base revision `ebb281ec70b05090aa6165b016eac8ec08e71b17`
+and adapter revision `7a3f1bb0d8f7bfbbd8514d968ab7de3518849c8d`. Re-running the
+downloader resumes/verifies these files. The initial eleven-model batch remains
+the default when `--visual-jev` is omitted.
+
+### Hardware and loading
+
+The released loader accepts device/dtype but no quantization configuration. The
+official quickstart advertises CUDA/MPS; the underlying VDM implementation also
+accepts CPU tensors. This wrapper offers explicit CPU float32 or CUDA BF16, with
+no automatic substitution or fallback. It checks available memory before loading:
+32 GiB available RAM for CPU, or 9 GiB free VRAM for CUDA (conservative headroom
+over the project's reported 8.4 GiB one-question BF16 peak). These guards are not
+guarantees for arbitrary prompt lengths. Inputs default to the released 200704
+pixel budget. Neither GGUF nor an unvalidated quantized adapter path is provided.
+
+The development GPU was identified as an RTX 3070 Laptop, 8192 MiB total and
+2576 MiB free at inspection. It does not meet this CUDA loading guard. CPU
+available RAM was approximately 49 GiB. CUDA availability differs inside the
+sandbox, so no GPU inference or Visual Jev GPU peak memory was measured here.
+The real CPU integration run initialized in 8.29 seconds, reached a peak process
+RSS of 26287.5 MiB (25.7 GiB), and returned probabilities `[0.83986, 0.16014]`
+for `[yes, no]` on the official bottle photograph through ROS transport.
+The 32 GiB CPU guard includes headroom over that measured process peak.
+
+### Build, launch, request, and capture
+
+```bash
+source /opt/ros/jazzy/setup.bash
+colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
+source install/setup.bash
+OMP_NUM_THREADS=4 ros2 launch smpa_ros llm.launch.py service:=visual_jev model:=visual-jev-4b device:=cpu python:="$PWD/.venv/bin/python"
+```
+
+The new launch selector starts exactly one node. Its default `service:=sense`
+preserves the existing Sense behavior; `model:=smolvlm2` selects that Sense YAML.
+Visual Jev does not start Sense, Ollama, or another language-model service.
+`model_root` and `source_dir` launch arguments override absolute local paths.
+For CUDA on a machine meeting the memory guard, explicitly use `device:=cuda`.
+
+In a second terminal, source ROS and `install/setup.bash`, then send a minimal
+one-pixel request to check service communication:
+
+```bash
+ros2 service call /visual_jev/evaluate smpa_ros_interfaces/srv/EvaluateVisualDecision "{image: {height: 1, width: 1, encoding: rgb8, step: 3, data: [255, 0, 0]}, context: '', question: 'Does this image contain something interesting that deserves further investigation?', choices: ['yes', 'no']}"
+```
+
+For one actual camera frame, use `camera_topic` from the installed pipeline YAML:
+
+```bash
+ros2 run smpa_ros visual_jev_camera
+# Or supply the topic, arbitrary question, choices, and context:
+ros2 run smpa_ros visual_jev_camera --topic /tiago/camera/color/image_raw --question 'Is there a person?' --choices yes no --context 'Robot observation'
+```
+
+The client subscribes once, unsubscribes after its first frame, prints the answer
+and probabilities, and exits. Stop the service with Ctrl+C.
+
+### Tests
+
+```bash
+./test.sh --unit
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 ./test.sh --integration
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 ./test.sh --all
+```
+
+Unit tests never initialize/download large models. Integration uses the local
+base/adapter and the official bottle photograph, sending it through a ROS image
+publisher, service, and one-frame client. It defaults explicitly to CPU; set
+`SMPA_VISUAL_JEV_DEVICE=cuda` only for a supported GPU. It skips with a reason if
+the adapter or PEFT is missing, and does not download anything. The physical
+camera is not required for this reproducible transport test. Executors, nodes,
+subscriptions, clients, and temporary build products are cleaned up.
+Validation completed here: 36 unit tests passed; the standalone integration run
+passed; the combined run passed all 37 tests without skips. The live ROS graph
+had no camera topic, so a physical-camera experiment was not executed.
+
+References: [official source and hardware results](https://github.com/guanxuyu-sv/Visual-Jev),
+[released adapter](https://huggingface.co/guanxuyu/visual-jev-4b-answer-sft).
+
 ## Persistent local model library
 
 The standalone `scripts/download_models.py` manages exactly eleven public models
@@ -237,8 +360,16 @@ service parameter can still override model selection explicitly.
 
 The loop waits for `/sense`, subscribes with sensor-data QoS, takes one image,
 unsubscribes, requests a description, and saves the response verbatim. It creates
-`world_model/YYYY-MM-DD_HH-MM-SS_microseconds_sense_output.md` under the current
-directory, then exits. Run from the repository root to use its world_model folder.
+two files under `world_model/`, then exits:
+
+- `YYYY-MM-DD_HH-MM-SS_microsecondsZ_sense_output.md`: the unchanged VLM response.
+- The same basename with `.png`: the received camera frame at its original size,
+  converted to RGB and saved losslessly (before Sense's inference resizing).
+
+The filename timestamp is image receipt time; `Z` means UTC. Parse it with
+`datetime.strptime(timestamp, '%Y-%m-%d_%H-%M-%S_%fZ').replace(tzinfo=timezone.utc)`.
+Service round-trip timing remains available in the ROS logs. Run from the
+repository root to use its world_model folder.
 Generated outputs are ignored in Git. There is no interpretation or world-state
 update. Service errors and timeouts raise without producing a Markdown file.
 `--timeout` defaults to 120 seconds per waiting phase; `--output-dir` can override

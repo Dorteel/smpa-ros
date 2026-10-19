@@ -139,11 +139,14 @@ def test_anonymous_gated_repository_is_not_downloaded(downloader, tmp_path, monk
     assert not calls
 
 
-def test_cache_links_are_not_copied_onto_themselves(downloader, tmp_path, monkeypatch):
+@pytest.mark.parametrize('adapter', [False, True])
+def test_cache_links_are_not_copied_onto_themselves(downloader, tmp_path, monkeypatch, adapter):
     cache = tmp_path / 'cache'
     cache.mkdir()
     contents = {'config.json': b'{}', 'tokenizer.json': b'{}',
                 'model.safetensors': b'cached weights', 'preprocessor_config.json': b'{}'}
+    if adapter:
+        contents = {'adapter_config.json': b'{}', 'adapter_model.safetensors': b'cached weights'}
     for name, data in contents.items():
         (cache / name).write_bytes(data)
     calls = []
@@ -165,13 +168,14 @@ def test_cache_links_are_not_copied_onto_themselves(downloader, tmp_path, monkey
         HfHubHTTPError=AccessError,
     ))
     results = Queue()
-    model = downloader.MODELS[5]
+    model = downloader.VISUAL_JEV_MODELS[1] if adapter else downloader.MODELS[5]
     downloader.download(model, tmp_path, results)
     assert results.get() == {'revision': 'cached-revision'}
     assert results.get()['status'] == 'completed'
     assert not calls
-    target = tmp_path / model[0] / model[1] / 'model.safetensors'
-    assert target.samefile(cache / 'model.safetensors')
+    name = 'adapter_model.safetensors' if adapter else 'model.safetensors'
+    target = tmp_path / model[0] / model[1] / name
+    assert target.samefile(cache / name)
 
 
 def test_timeout_preserves_known_revision(downloader, tmp_path, monkeypatch):

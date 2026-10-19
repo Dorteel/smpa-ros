@@ -25,6 +25,10 @@ MODELS = [
     ('coding', 'qwen2.5_coder_1.5b', 'Qwen/Qwen2.5-Coder-1.5B-Instruct'),
     ('coding', 'qwen2.5_coder_7b', 'Qwen/Qwen2.5-Coder-7B-Instruct'),
 ]
+VISUAL_JEV_MODELS = [
+    ('vision', 'visual-jev-4b/base_model', 'Qwen/Qwen3-VL-4B-Instruct'),
+    ('vision', 'visual-jev-4b/adapter', 'guanxuyu/visual-jev-4b-answer-sft'),
+]
 ROOT = Path(__file__).resolve().parents[1] / 'models'
 GIB = 1024 ** 3
 RESERVE = 5 * GIB
@@ -100,21 +104,31 @@ def download(model, root, results):
                     and file.rfilename.endswith(('.json', '.safetensors', '.model',
                                                  '.txt', '.tiktoken', '.jinja'))]
         names = {file.rfilename for file in siblings}
-        if 'config.json' not in names or not any(name.endswith('.safetensors') for name in names):
+        is_adapter = repo == 'guanxuyu/visual-jev-4b-answer-sft'
+        config_name = 'adapter_config.json' if is_adapter else 'config.json'
+        if config_name not in names or not any(name.endswith('.safetensors') for name in names):
             raise ValueError('Missing model config or safetensors weights')
-        if not any(name in names for name in ('tokenizer.json', 'tokenizer.model')):
+        if not is_adapter and not any(name in names for name in ('tokenizer.json', 'tokenizer.model')):
             raise ValueError('Missing tokenizer')
-        if category == 'vlm' and not any(name in names for name in
+        if (category == 'vlm' or (category == 'vision' and not is_adapter)) and not any(name in names for name in
                                        ('preprocessor_config.json', 'processor_config.json')):
             raise ValueError('Missing processor configuration')
         directory.mkdir(parents=True, exist_ok=True)
         needed = 0
         reused = set()
+        report_path = root / 'download_report.json'
+        previous = json.loads(report_path.read_text()).get('models', []) if report_path.exists() else []
         for file in siblings:
             if file.size is None:
                 raise ValueError(f'Unknown file size: {file.rfilename}')
             target = directory / file.rfilename
             cached = try_to_load_from_cache(repo, file.rfilename, revision=info.sha)
+            if not isinstance(cached, str):
+                for item in previous:
+                    candidate = Path(item['local_dir']) / file.rfilename
+                    if item['repo_id'] == repo and item.get('revision') == info.sha and candidate.is_file():
+                        cached = str(candidate)
+                        break
             if not target.exists() and isinstance(cached, str):
                 source = Path(cached).resolve()
                 if source.stat().st_size == file.size:
@@ -207,7 +221,8 @@ def record_attempt(model, result, root, records, report):
     return record
 
 
-def run(root=ROOT, retries=2, timeout=1800):
+def run(root=ROOT, retries=2, timeout=1800, models=None):
+    models = MODELS if models is None else models
     root.mkdir(parents=True, exist_ok=True)
     report = root / 'download_report.json'
     records = {}
@@ -216,11 +231,11 @@ def run(root=ROOT, retries=2, timeout=1800):
             records = {item['repo_id']: item for item in json.loads(report.read_text())['models']}
         except (ValueError, KeyError, TypeError):
             print('Previous report is unreadable; checking models again.', flush=True)
-    print(f'SMPA ROS MODEL DOWNLOADER\nModels scheduled: {len(MODELS)}', flush=True)
-    for index, model in enumerate(MODELS, 1):
+    print(f'SMPA ROS MODEL DOWNLOADER\nModels scheduled: {len(models)}', flush=True)
+    for index, model in enumerate(models, 1):
         category, folder, repo = model
         directory = root / category / folder
-        print(f'\n[{index}/{len(MODELS)}] {repo}\nCategory: {category}\n'
+        print(f'\n[{index}/{len(models)}] {repo}\nCategory: {category}\n'
               f'Destination: {directory}', flush=True)
         previous = records.get(repo, {})
         interrupted = False
@@ -245,19 +260,19 @@ def run(root=ROOT, retries=2, timeout=1800):
         except Exception as error:
             result.update(status='failed', error=f'{type(error).__name__}: {error}')
         result = record_attempt(model, result, root, records, report)
-        print(f"[{index}/{len(MODELS)}] {result['status'].upper()}"
+        print(f"[{index}/{len(models)}] {result['status'].upper()}"
               f" — {result['error'] or directory}", flush=True)
-        completed = sum(item['status'] == 'completed' for item in records.values())
-        print(f'Completed: {completed}/{len(MODELS)}; remaining to attempt: '
-              f'{len(MODELS) - index}', flush=True)
+        completed = sum(records.get(item[2], {}).get('status') == 'completed' for item in models)
+        print(f'Completed: {completed}/{len(models)}; remaining to attempt: '
+              f'{len(models) - index}', flush=True)
         if interrupted or shutil.disk_usage(root).free < CRITICAL:
             print('Stopping safely; rerun to resume.', flush=True)
             break
-    print(f'\nSMPA ROS MODEL LIBRARY\nTotal models: {len(MODELS)}', flush=True)
+    print(f'\nSMPA ROS MODEL LIBRARY\nTotal models: {len(models)}', flush=True)
     for status in ('completed', 'skipped', 'failed'):
         items = [item for repo, item in records.items()
-                 if repo in {model[2] for model in MODELS} and item['status'] == status]
-        print(f'{status.upper()}: {len(items)}/{len(MODELS)}', flush=True)
+                 if repo in {model[2] for model in models} and item['status'] == status]
+        print(f'{status.upper()}: {len(items)}/{len(models)}', flush=True)
         for item in items:
             print(f"  {item['name']}: {item['error'] or item['revision']}", flush=True)
     print(f'Library location: {root.resolve()}', flush=True)
@@ -268,6 +283,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--retries', type=int, default=2, help='Retries per failed model')
     parser.add_argument('--timeout', type=float, default=1800, help='Seconds per attempt')
+    parser.add_argument('--visual-jev', action='store_true', help='Download only the Visual Jev base and adapter')
     options = parser.parse_args()
     if options.retries < 0 or options.timeout <= 0:
         parser.error('retries must be nonnegative and timeout must be positive')
@@ -276,7 +292,8 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupt)
-    run(retries=options.retries, timeout=options.timeout)
+    run(retries=options.retries, timeout=options.timeout,
+        models=VISUAL_JEV_MODELS if options.visual_jev else None)
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 """One camera-to-Sense capture, plus the existing text-cycle helper."""
 
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from importlib.resources import files
 from pathlib import Path
@@ -19,6 +19,7 @@ from smpa_ros_interfaces.srv import DescribeScene
 import yaml
 
 from smpa_ros.backends.base import Backend
+from smpa_ros.sense.service import image_to_pil
 
 
 def run_cycle(observation: str, *, sense: Backend, model: Backend,
@@ -41,7 +42,7 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
 
 def capture_once(node: Node, config: dict, output_dir: Path,
                  executor: SingleThreadedExecutor, timeout: float = 120) -> Path:
-    """Receive one frame, request its description, and write the exact response."""
+    """Save one frame and its exact description with a shared UTC timestamp."""
     prompt = files('smpa_ros.sense').joinpath(
         'prompts/' + config['prompt'] + '.txt',
     ).read_text(encoding='utf-8').strip()
@@ -55,7 +56,7 @@ def capture_once(node: Node, config: dict, output_dir: Path,
 
         def receive(image: Image) -> None:
             if not image_future.done():
-                image_future.set_result(image)
+                image_future.set_result((image, datetime.now(timezone.utc)))
 
         node.get_logger().info(f"Subscribing to camera topic: {config['camera_topic']}")
         subscription = node.create_subscription(
@@ -69,24 +70,31 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         node.get_logger().info(f'Image received after {perf_counter() - started:.2f}s')
         node.destroy_subscription(subscription)
         subscription = None
+        image, received_at = image_future.result()
         started = perf_counter()
         response_future = client.call_async(
-            DescribeScene.Request(image=image_future.result(), prompt=prompt),
+            DescribeScene.Request(image=image, prompt=prompt),
         )
         node.get_logger().info('Request sent to /sense')
         executor.spin_until_future_complete(response_future, timeout_sec=timeout)
         if not response_future.done():
             raise TimeoutError(f'/sense response timed out after {timeout:g}s')
         response = response_future.result()
-        node.get_logger().info(f'/sense response received after {perf_counter() - started:.2f}s')
+        finished = perf_counter()
+        node.get_logger().info(f'/sense response received after {finished - started:.2f}s')
         if response.error:
             raise RuntimeError(response.error)
         output_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')
+        # UTC receipt time identifies the image and description pair.
+        timestamp = received_at.strftime('%Y-%m-%d_%H-%M-%S_%fZ')
         path = output_dir / f'{timestamp}_sense_output.md'
+        image_path = path.with_suffix('.png')
         # Exclusive creation prevents an existing observation from being overwritten.
+        with image_path.open('xb') as output:
+            image_to_pil(image).save(output, format='PNG')
         with path.open('x', encoding='utf-8', newline='') as output:
             output.write(response.description)
+        node.get_logger().info(f'Image saved: {image_path.resolve()}')
         node.get_logger().info(f'Markdown file saved: {path.resolve()}')
         return path
     except Exception as error:
