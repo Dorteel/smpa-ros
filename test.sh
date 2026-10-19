@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -eo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+mode="${1:---unit}"
+case "$mode" in
+    --unit) selector='not integration' ;;
+    --integration) selector='integration' ;;
+    --all) selector='integration or not integration' ;;
+    *) echo 'Usage: ./test.sh [--unit|--integration|--all]' >&2; exit 2 ;;
+esac
+colcon_command=(colcon)
+if [[ "$mode" != --unit ]]; then
+    colcon_command=("$PWD/.venv/bin/python" "$(command -v colcon)")
+fi
 
 ros_setup="/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 if [[ ! -f "$ros_setup" ]]; then
@@ -13,16 +24,17 @@ source "$ros_setup"
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
 export ROS_LOG_DIR="$work_dir/ros_logs"
-colcon --log-base "$work_dir/log" build --paths "$PWD" "$PWD/smpa_ros_interfaces" \
+"${colcon_command[@]}" --log-base "$work_dir/log" build --paths "$PWD" "$PWD/smpa_ros_interfaces" \
     --packages-select smpa_ros_interfaces smpa_ros --build-base "$work_dir/build" \
     --install-base "$work_dir/install"
 source "$work_dir/install/setup.bash"
 test_status=0
-colcon --log-base "$work_dir/log" test --paths "$PWD" "$PWD/smpa_ros_interfaces" \
+"${colcon_command[@]}" --log-base "$work_dir/log" test --paths "$PWD" "$PWD/smpa_ros_interfaces" \
     --packages-select smpa_ros --build-base "$work_dir/build" \
     --event-handlers console_direct+ \
+    --python-testing pytest \
     --install-base "$work_dir/install" --return-code-on-test-failure \
-    --pytest-args test || test_status=$?
+    --pytest-args test -m "$selector" || test_status=$?
 colcon test-result --test-result-base "$work_dir/build" --verbose
 if (( test_status != 0 )); then
     exit "$test_status"
@@ -60,4 +72,5 @@ timeout --kill-after=2s 10s ros2 run smpa_ros hello > "$work_dir/hello.log" 2>&1
 cat "$work_dir/hello.log"
 grep -Fq 'Hello ROS 2!' "$work_dir/hello.log"
 timeout --kill-after=2s 10s ros2 run smpa_ros loop --help > /dev/null
+timeout --kill-after=2s 10s ros2 launch smpa_ros speech.launch.py --show-args > /dev/null
 echo 'Build, tests, installed assets, hello output, and loop command checks passed.'

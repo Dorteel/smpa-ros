@@ -1,0 +1,12 @@
+# Goal
+string language
+float32 max_duration
+---
+# Result
+bool success
+string transcription
+string error_message
+---
+# Feedback
+string state
+float32 elapsed_seconds

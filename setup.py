@@ -13,6 +13,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/models', glob('models/*.yaml')),
         ('share/' + package_name + '/config', ['config/pipeline.yaml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,5 +26,8 @@ setup(
         'hello = smpa_ros.hello:main',
         'sense = smpa_ros.sense.service:main',
         'loop = smpa_ros.loop:main',
+        'listen = smpa_ros.speech.actions:listen_main',
+        'talk = smpa_ros.speech.actions:talk_main',
+        'listener_talker = smpa_ros.speech.demo:main',
     ]},
 )

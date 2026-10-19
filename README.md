@@ -293,3 +293,72 @@ The download-free `./test.sh` now also sends a mock camera frame through `/sense
 and verifies the saved Markdown bytes, plus failure behavior with no output file.
 Actual camera/VLM inference requires the hardware, ROS camera publisher, and
 cached weights; mock tests do not establish VLM quality or GPU memory fit.
+
+### Local speech actions (CPU)
+
+`/speech/listen` uses Faster-Whisper; `/speech/talk` uses Piper. Models load once
+per server, independently of ROS in `backends/speech.py`. Their local paths are
+registered in `models/model_library.yaml`; downloaded weights are ignored by Git.
+Existing vision configuration and interfaces are unchanged.
+
+From the repository root, install the optional audio dependencies and models:
+
+```bash
+sudo apt-get install libportaudio2
+python3 -m venv --system-site-packages .venv  # if .venv does not already exist
+.venv/bin/python -m pip install -r requirements-speech.txt
+.venv/bin/python - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download('Systran/faster-whisper-base',
+                  local_dir='models/speech/faster-whisper-base',
+                  allow_patterns=['model.bin', '*.json', 'vocabulary.*'])
+PY
+.venv/bin/python -m piper.download_voices en_US-lessac-medium --download-dir models/speech/piper
+source /opt/ros/jazzy/setup.bash
+colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
+source install/setup.bash
+ros2 launch smpa_ros speech.launch.py python:="$PWD/.venv/bin/python"
+```
+
+The launch defaults to OS audio devices. Set `input_device:=...` and
+`output_device:=...` to a PortAudio device name or index; `model_root:=...` selects
+an absolute local models directory. Run launch from this repository root by
+default. Neither server downloads models at startup.
+
+In another terminal, source ROS and the same install, then run goals sequentially:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ros2 action send_goal /speech/listen smpa_ros_interfaces/action/Listen "{language: en, max_duration: 10.0}" --feedback
+ros2 action send_goal /speech/talk smpa_ros_interfaces/action/Talk "{text: 'Hello, I am ready.'}" --feedback
+ros2 run smpa_ros listener_talker
+```
+
+Alternatively add `demo:=true` to launch. The demo awaits each terminal action
+result before sending the next goal and says `I heard {transcription}`. Ctrl+C
+cancels its active goal. Both servers share an exclusive audio lock, so even
+independent clients cannot listen and talk simultaneously. Use the same
+`audio_lock` launch argument for servers that share physical audio devices.
+
+Listening starts capture on acceptance, uses a simple RMS speech threshold, and
+stops after 0.8 seconds of silence or the requested duration (at most 30 seconds
+by default). Empty speech, device errors, and recording timeouts abort the goal.
+This threshold may need adjustment in noisy rooms through the listener's
+`speech_threshold` and `silence_seconds` ROS parameters. Feedback reports
+waiting/recording/transcribing or synthesizing/playing; playback progress measures
+submitted audio frames and reaches 1 only after playback drains. Cancellation
+aborts an open audio stream promptly. Native model decoding/synthesis can only
+observe cancellation between segments/chunks; the audio lock stays held until
+that work returns. Canceled results have the ROS canceled state and success=false.
+
+```bash
+./test.sh                 # isolated build and hardware/model-free tests
+./test.sh --integration   # local CPU models, prerecorded speech, simulated devices
+./test.sh --all           # both suites
+```
+
+The integration test generates a prerecorded utterance with Piper, captures it
+through a simulated input device, transcribes it with Faster-Whisper, and runs the
+demo response through Piper and a simulated output device. This tests genuine
+inference without microphones, speakers, network access, or GPU resources.

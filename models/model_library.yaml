@@ -1,0 +1,13 @@
+models:
+  faster-whisper-base:
+    backend: faster_whisper
+    model_id: Systran/faster-whisper-base
+    path: speech/faster-whisper-base
+    device: cpu
+    compute_type: int8
+  piper-lessac-medium:
+    backend: piper
+    model_id: rhasspy/piper-voices
+    voice: en_US-lessac-medium
+    path: speech/piper/en_US-lessac-medium.onnx
+    device: cpu

@@ -212,6 +212,7 @@ tempCodeRunnerFile.py
 /install/
 /log/
 /weights/
+/models/speech/
 /models/llm/
 /models/vlm/
 /models/coding/

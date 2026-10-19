@@ -1,0 +1,5 @@
+faster-whisper==1.2.1
+piper-tts==1.8.0
+sounddevice==0.5.6
+# PyAV 19 removed metadata_errors, still used by Faster-Whisper 1.2.1.
+av==16.1.0
