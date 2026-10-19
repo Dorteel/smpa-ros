@@ -1,5 +1,60 @@
 # Minimal robot cognition
 
+## Persistent local model library
+
+The standalone `scripts/download_models.py` manages exactly eleven public models
+under `models/llm/`, `models/vlm/`, and `models/coding/`. Existing root model YAML
+files and ROS model-loading behavior are unchanged. Library directories and
+`models/download_report.json` are Git-ignored, including metadata and partial
+downloads. No existing weights were tracked when this library was added.
+
+From the repository root, use the existing environment:
+
+```bash
+source .venv/bin/activate
+python scripts/download_models.py
+```
+
+Run the same command to resume interruptions or retry skipped/failed models.
+Previously completed files are size/checksum-verified and reused. The downloader
+checks anonymous repository access, pins the exact revision, and downloads root
+Hugging Face inference files through `snapshot_download(local_dir=...)`; it omits
+alternate checkpoint formats and subfolder copies. Valid matching cache files
+are hard-linked where possible, or symlinked across filesystems, without deleting
+or copying the existing cache. Preserve that cache when symlinks are used.
+
+Downloads run sequentially, starting with Qwen3-0.6B. Hub progress bars show actual
+transfers. The first model also undergoes local-only Transformers config and
+tokenizer loading; no GPU or inference is required. Weight checksums are checked
+when provided by Hub metadata. Same-size corrupt files are not treated as complete.
+
+Defaults: two retries (three attempts total), a 30-minute deadline per attempt,
+20-second metadata/transfer timeouts, a 5 GiB free-space reserve, and a safe stop
+below 2 GiB free. Adjust only retry/deadline limits if needed:
+
+```bash
+python scripts/download_models.py --retries 1 --timeout 3600
+```
+
+Failures do not stop the batch; gated/private/missing repositories are skipped.
+Partial files remain resumable. Ctrl+C/SIGTERM records the interrupted attempt and
+stops; sudden power loss/SIGKILL cannot save the current attempt, but the last
+atomic report remains valid and partial Hub files remain available. Each report
+entry includes status, reason, revision, file manifest, and allocated local disk
+bytes (linked weights share storage with the cache). A failed/skipped model may
+have partial files; only `completed` means verification succeeded.
+
+```bash
+./test.sh
+git status --short
+git check-ignore -v models/llm/qwen3_0.6b/model.safetensors
+```
+
+The download-control tests use mocks and require no downloads. Dependencies
+`huggingface_hub` and `transformers` are already in the existing `.venv`; nothing
+is installed globally. Hugging Face's local-folder metadata enables resumable
+[downloads](https://huggingface.co/docs/huggingface_hub/guides/download).
+
 ## ROS logging
 
 Sense logs startup, selected model/backend, weight loading, readiness, and request

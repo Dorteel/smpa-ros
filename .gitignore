@@ -212,6 +212,12 @@ tempCodeRunnerFile.py
 /install/
 /log/
 /weights/
+/models/llm/
+/models/vlm/
+/models/coding/
+/models/download_report.json*
+*.incomplete
+*.part
 /world_model/*
 !/world_model/.gitkeep
 *.safetensors

@@ -29,8 +29,10 @@ if (( test_status != 0 )); then
 fi
 
 # Run outside the source tree to verify that prompts/configs were installed.
+export SMPA_TEST_PIPELINE_CONFIG="$PWD/config/pipeline.yaml"
 cd "$work_dir"
 python3 - <<'PY'
+import os
 from importlib.resources import files
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
@@ -40,8 +42,7 @@ import yaml
 assert files('smpa_ros.sense').joinpath('prompts/describe_scene.txt').read_text().strip() == 'Describe the scene.'
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
 pipeline = yaml.safe_load((registry.parent / 'config/pipeline.yaml').read_text())
-assert pipeline == {'camera_topic': '/TLO/Camera/Color/ImageRaw',
-                    'model': 'smolvlm2', 'prompt': 'describe_scene'}
+assert pipeline == yaml.safe_load(Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).read_text())
 for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):
     config = yaml.safe_load((registry / (name + '.yaml')).read_text())
     assert config['name'] == name and config['model_id'] and config['vram_gb'] is None
