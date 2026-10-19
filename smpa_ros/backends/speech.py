@@ -37,7 +37,7 @@ class FasterWhisperBackend(AudioBackend):
         self.silence_seconds = silence_seconds
         self.threshold = threshold
 
-    def listen(self, language, max_duration, cancel, feedback):
+    def listen(self, language, max_duration, cancel, feedback, on_audio=None):
         import numpy as np
         import sounddevice as sd
 
@@ -89,8 +89,12 @@ class FasterWhisperBackend(AudioBackend):
         if not heard_speech:
             raise TimeoutError('No speech detected before max_duration')
         # Capture is closed before the model starts, even on transcription errors.
+        audio = np.concatenate(frames)
+        if on_audio is not None:
+            on_audio(audio)
+        check_cancel(cancel)
         feedback('transcribing', monotonic() - started)
-        return self.transcribe(np.concatenate(frames), language, cancel)
+        return self.transcribe(audio, language, cancel)
 
     def transcribe(self, audio, language, cancel):
         check_cancel(cancel)

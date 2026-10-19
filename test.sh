@@ -73,4 +73,4 @@ cat "$work_dir/hello.log"
 grep -Fq 'Hello ROS 2!' "$work_dir/hello.log"
 timeout --kill-after=2s 10s ros2 run smpa_ros loop --help > /dev/null
 timeout --kill-after=2s 10s ros2 launch smpa_ros speech.launch.py --show-args > /dev/null
-echo 'Build, tests, installed assets, hello output, and loop command checks passed.'
+echo 'Build, tests (including audio persistence), installed assets, hello output, and loop command checks passed.'

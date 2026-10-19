@@ -362,3 +362,60 @@ The integration test generates a prerecorded utterance with Piper, captures it
 through a simulated input device, transcribes it with Faster-Whisper, and runs the
 demo response through Piper and a simulated output device. This tests genuine
 inference without microphones, speakers, network access, or GPU resources.
+
+### Persistent Listen observations
+
+Every successful Listen action now writes both microphone audio and recognized
+text before returning success:
+
+```text
+world_model/audio/2026-10-20T012400_123456Z_<unique suffix>/
+├── recording.wav
+└── transcript.md
+```
+
+The UTC timestamp is generated at capture completion; the suffix guarantees
+exclusive session directories. `recording.wav` contains exactly the float32
+samples passed to Faster-Whisper: 16,000 Hz, one channel, uncompressed IEEE
+float32 PCM in a standard WAV container (format tag 3). Float WAV avoids integer
+quantization; use a float-WAV-capable player such as ffplay. Python's standard
+`wave` reader supports integer PCM only, so it cannot read this float format.
+The linked Markdown records the language, model, format, UTC timestamp, status,
+and actual transcription. Audio is written and flushed before transcription;
+Markdown is atomically replaced and flushed before action success. Transcription
+failures retain audio with `Status: incomplete`. Cancellation during transcription
+also retains an incomplete observation; cancellation before completed capture
+creates no observation. Storage errors abort the action rather than reporting
+successful persistence. Talk audio is never stored as a microphone observation.
+
+`config/pipeline.yaml` now defines the absolute `world_model_dir`, initially this
+repository's existing world_model directory. Both the vision loop (unless
+`--output-dir` is supplied) and Listen use it, independent of their working
+directory. Update that setting if the repository moves, then rebuild to refresh
+the installed configuration. The listener also accepts a `world_model_dir` ROS
+parameter override, for example:
+
+```bash
+.venv/bin/python -c 'from smpa_ros.speech.actions import listen_main; listen_main()' \
+  --ros-args -p world_model_dir:="$PWD/world_model"
+```
+
+After sourcing the build and starting the speech servers as above:
+
+```bash
+ros2 action send_goal /speech/listen smpa_ros_interfaces/action/Listen \
+  "{language: en, max_duration: 10.0}" --feedback
+find world_model/audio -name transcript.md -print -exec cat {} \;
+find world_model/audio -name recording.wav -print
+# Set this to one of the printed paths to hear the preserved capture:
+# ffplay -nodisp -autoexit world_model/audio/<session>/recording.wav
+./test.sh
+./test.sh --integration
+./test.sh --all
+```
+
+Tests use temporary output roots. They verify exact audio samples, separate
+sessions, linked transcripts, incomplete/canceled observations, and storage error
+reporting. The prerecorded CPU integration test also decodes the saved WAV and
+compares it with input samples while checking the real recognized text. No audio
+hardware is required for these tests.

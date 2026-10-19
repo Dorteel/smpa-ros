@@ -17,6 +17,7 @@ from rclpy.signals import SignalHandlerOptions
 from smpa_ros_interfaces.action import Listen, Talk
 import yaml
 
+from smpa_ros.speech.observation import AudioObservation
 from smpa_ros.backends.speech import FasterWhisperBackend, PiperBackend
 
 
@@ -24,6 +25,12 @@ class SpeechServer(Node):
     def __init__(self, kind, backend=None, lock_path=None):
         super().__init__('listener' if kind == 'listen' else 'talker')
         self.kind = kind
+        config_path = Path(get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml'
+        config = yaml.safe_load(config_path.read_text())
+        self.declare_parameter('world_model_dir', config['world_model_dir'])
+        self.world_model_dir = Path(self.get_parameter('world_model_dir').value)
+        if not self.world_model_dir.is_absolute():
+            raise ValueError('world_model_dir must be an absolute path')
         self.action_type = Listen if kind == 'listen' else Talk
         self.declare_parameter('model', 'faster-whisper-base' if kind == 'listen' else 'piper-lessac-medium')
         self.declare_parameter('model_root', str(Path.cwd() / 'models'))
@@ -76,8 +83,11 @@ class SpeechServer(Node):
         return GoalResponse.ACCEPT
 
     def cancel_goal(self, goal):
-        self.cancel.set()
-        self.backend.stop()
+        with self.guard:
+            if not goal.is_active:
+                return CancelResponse.REJECT
+            self.cancel.set()
+            self.backend.stop()
         return CancelResponse.ACCEPT
 
     def feedback(self, goal, state, value):
@@ -90,11 +100,20 @@ class SpeechServer(Node):
     def execute(self, goal):
         result = self.action_type.Result()
         error = None
+        observation = None
+
+        def save_audio(audio):
+            nonlocal observation
+            observation = AudioObservation(self.world_model_dir, audio, goal.request.language,
+                                           self.get_parameter('model').value)
+
         try:
             report = lambda state, value: self.feedback(goal, state, value)
             if self.kind == 'listen':
                 text = self.backend.listen(goal.request.language, goal.request.max_duration,
-                                           self.cancel, report)
+                                           self.cancel, report, on_audio=save_audio)
+                if observation is None:
+                    raise RuntimeError("Listen backend did not provide recorded audio")
                 if not text.strip():
                     raise ValueError('No speech was recognized')
                 result.transcription = text
@@ -108,19 +127,32 @@ class SpeechServer(Node):
                 deadline = monotonic() + 1
                 while not goal.is_cancel_requested and not self.stopping and monotonic() < deadline:
                     sleep(0.001)
-            if goal.is_cancel_requested:
-                result.error_message = 'Canceled'
-                if self.kind == 'listen':
-                    result.transcription = ''
-                goal.canceled()
-            elif error is not None or self.stopping:
-                result.error_message = str(error or 'Server stopping')
-                goal.abort()
-                self.get_logger().error(result.error_message)
-            else:
-                result.success = True
-                goal.succeed()
-            return result
+            # Commit the status and terminal action state together: a late cancel
+            # must not leave a canceled goal labeled as a complete observation.
+            with self.guard:
+                if observation is not None:
+                    try:
+                        complete = error is None and not self.cancel.is_set() and not self.stopping
+                        observation.write_transcript('complete' if complete else 'incomplete',
+                                                     result.transcription if complete else '',
+                                                     '' if complete else str(error or 'Canceled or server stopping'))
+                        self.get_logger().info(f'Audio observation saved: {observation.path}')
+                    except Exception as storage_error:
+                        error = storage_error
+                        self.get_logger().error(f'Audio persistence failed: {storage_error}')
+                if goal.is_cancel_requested:
+                    result.error_message = 'Canceled'
+                    if self.kind == 'listen':
+                        result.transcription = ''
+                    goal.canceled()
+                elif error is not None or self.stopping:
+                    result.error_message = str(error or 'Server stopping')
+                    goal.abort()
+                    self.get_logger().error(result.error_message)
+                else:
+                    result.success = True
+                    goal.succeed()
+                return result
         finally:
             # The backend has closed its stream before another server can acquire audio.
             with self.guard:

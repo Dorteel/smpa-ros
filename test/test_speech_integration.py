@@ -47,6 +47,7 @@ def test_prerecorded_listener_talker(tmp_path, monkeypatch):
     ))
     rclpy.init(args=[])
     listener = SpeechServer('listen', stt, tmp_path / 'audio.lock')
+    listener.world_model_dir = tmp_path / 'world_model'
     talker = SpeechServer('talk', tts, tmp_path / 'audio.lock')
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(listener)
@@ -57,6 +58,14 @@ def test_prerecorded_listener_talker(tmp_path, monkeypatch):
     started = perf_counter()
     try:
         response = demo.turn()
+        observations = list((listener.world_model_dir / 'audio').iterdir())
+        assert len(observations) == 1
+        assert (observations[0] / 'recording.wav').stat().st_size > 56
+        saved = decode_audio(str(observations[0] / 'recording.wav'))
+        np.testing.assert_array_equal(saved, samples[:len(saved)])
+        transcript = (observations[0] / 'transcript.md').read_text()
+        assert response.removeprefix('I heard ') in transcript
+        assert 'recording.wav' in transcript and 'Status: complete' in transcript
         assert response.startswith('I heard ')
         assert 'hello' in response.lower() and 'robot' in response.lower()
         assert len(outputs) == 1 and outputs[0].audio and outputs[0].drained

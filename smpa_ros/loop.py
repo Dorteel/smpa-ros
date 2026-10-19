@@ -102,7 +102,7 @@ def main(args=None) -> None:
     parser = argparse.ArgumentParser(description='Describe one camera frame and exit.')
     parser.add_argument('--config', type=Path, default=Path(
         get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml')
-    parser.add_argument('--output-dir', type=Path, default=Path.cwd() / 'world_model')
+    parser.add_argument('--output-dir', type=Path, default=None)
     parser.add_argument('--timeout', type=float, default=120)
     options = parser.parse_args(remove_ros_args(args=args)[1:])
     if options.timeout <= 0:
@@ -113,7 +113,7 @@ def main(args=None) -> None:
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
-        capture_once(node, config, options.output_dir, executor, options.timeout)
+        capture_once(node, config, options.output_dir or Path(config['world_model_dir']), executor, options.timeout)
     finally:
         executor.shutdown()
         node.destroy_node()

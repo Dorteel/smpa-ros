@@ -44,9 +44,12 @@ class FakeBackend:
         if self.error:
             raise self.error
 
-    def listen(self, language, max_duration, cancel, feedback):
+    def listen(self, language, max_duration, cancel, feedback, on_audio=None):
         feedback('waiting', 0.0)
         feedback('recording', 0.01)
+        import numpy as np
+        if on_audio is not None:
+            on_audio(np.full(1600, 0.2, dtype=np.float32))
         self.operation(cancel)
         feedback('transcribing', 0.02)
         return self.transcription
@@ -64,6 +67,7 @@ def speech(tmp_path):
     rclpy.init(args=[])
     listener = SpeechServer('listen', FakeBackend(), tmp_path / 'audio.lock')
     talker = SpeechServer('talk', FakeBackend(), tmp_path / 'audio.lock')
+    listener.world_model_dir = tmp_path / 'world_model'
     client = rclpy.create_node('speech_test_client')
     listen = ActionClient(client, Listen, '/speech/listen')
     talk = ActionClient(client, Talk, '/speech/talk')
@@ -130,6 +134,10 @@ def test_cancellation_and_half_duplex(speech, kind):
     assert response.status == GoalStatus.STATUS_CANCELED
     assert not response.result.success
     assert server.backend.stopped.is_set()
+    if kind == 'listen':
+        session, = (listener.world_model_dir / 'audio').iterdir()
+        assert (session / 'recording.wav').exists()
+        assert 'Status: incomplete' in (session / 'transcript.md').read_text()
     server.backend.block = False
     next_goal = wait(talk.send_goal_async(Talk.Goal(text='audio is free')))
     assert next_goal.accepted
@@ -197,3 +205,68 @@ def test_speech_models_registered():
     assert models['faster-whisper-base']['backend'] == 'faster_whisper'
     assert models['piper-lessac-medium']['backend'] == 'piper'
     assert all(models[name]['device'] == 'cpu' for name in ('faster-whisper-base', 'piper-lessac-medium'))
+
+
+def test_listen_persists_separate_linked_observations(speech):
+    import struct
+    import numpy as np
+
+    listener, _, listen, _ = speech
+    for _ in range(2):
+        handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
+        response = wait(handle.get_result_async())
+        assert response.result.success
+    sessions = list((listener.world_model_dir / 'audio').iterdir())
+    assert len(sessions) == 2
+    for session in sessions:
+        data = (session / 'recording.wav').read_bytes()
+        assert data[:4] == b'RIFF' and data[8:12] == b'WAVE'
+        assert struct.unpack_from('<HHI', data, 20) == (3, 1, 16000)
+        assert struct.unpack_from('<I', data, 4)[0] == len(data) - 8
+        np.testing.assert_array_equal(np.frombuffer(data, dtype='<f4', offset=56),
+                                      np.full(1600, 0.2, dtype=np.float32))
+        text = (session / 'transcript.md').read_text()
+        assert 'hello robot' in text and 'Audio file: recording.wav' in text
+        assert 'Status: complete' in text and 'Language: en' in text
+        assert 'faster-whisper-base' in text
+
+
+def test_transcription_failure_preserves_incomplete_recording(speech):
+    listener, _, listen, _ = speech
+    listener.backend.error = RuntimeError('transcription failed')
+    handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
+    response = wait(handle.get_result_async())
+    assert response.status == GoalStatus.STATUS_ABORTED
+    session, = (listener.world_model_dir / 'audio').iterdir()
+    assert (session / 'recording.wav').stat().st_size > 56
+    text = (session / 'transcript.md').read_text()
+    assert 'Status: incomplete' in text and 'transcription failed' in text
+
+
+def test_audio_storage_failure_aborts_action(speech):
+    listener, _, listen, _ = speech
+    listener.world_model_dir.write_text('A file blocks directory creation')
+    handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
+    response = wait(handle.get_result_async())
+    assert response.status == GoalStatus.STATUS_ABORTED and not response.result.success
+    assert response.result.error_message
+
+
+def test_transcript_storage_failure_aborts_and_preserves_audio(speech, monkeypatch):
+    from smpa_ros.speech.observation import AudioObservation
+    original = AudioObservation.write_transcript
+
+    def fail_complete(self, status, text='', error=''):
+        if status == 'complete':
+            raise OSError('disk full')
+        original(self, status, text, error)
+
+    monkeypatch.setattr(AudioObservation, 'write_transcript', fail_complete)
+    listener, _, listen, _ = speech
+    handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
+    response = wait(handle.get_result_async())
+    assert response.status == GoalStatus.STATUS_ABORTED
+    assert 'disk full' in response.result.error_message
+    session, = (listener.world_model_dir / 'audio').iterdir()
+    assert (session / 'recording.wav').exists()
+    assert 'Status: incomplete' in (session / 'transcript.md').read_text()

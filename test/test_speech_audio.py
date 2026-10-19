@@ -87,11 +87,14 @@ def test_recording_stops_after_silence(monkeypatch):
 
     monkeypatch.setitem(sys.modules, 'sounddevice', SimpleNamespace(InputStream=create))
     feedback = []
-    assert backend.listen('en', 1.0, Event(), lambda *args: feedback.append(args)) == 'hello robot'
+    captured = []
+    assert backend.listen('en', 1.0, Event(), lambda *args: feedback.append(args),
+                          on_audio=captured.append) == 'hello robot'
     assert streams[0].closed.is_set() and backend.stream is None
     assert [entry[0] for entry in feedback][0] == 'waiting'
     assert feedback[-1][0] == 'transcribing'
     audio = backend.model.transcribe.call_args.args[0]
+    assert captured[0] is audio
     assert len(audio) == 4800  # One speech block plus two silence blocks.
 
 
