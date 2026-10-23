@@ -228,7 +228,7 @@ cleanup. Actual VLM quality and GPU memory use require a manual run.
 ## One camera frame → Sense → Markdown
 
 `config/pipeline.yaml` is the shared configuration: `camera_topic` is
-`/TLO/Camera/Color/ImageRaw`, `model` is `smolvlm2`, and `prompt` is
+`/tiago/camera/color/image_raw`, `model` is `smolvlm2`, and `prompt` is
 `describe_scene`. The service uses the model setting; the one-shot loop resolves
 that prompt name to `sense/prompts/describe_scene.txt`. Both read the installed
 configuration by default. For an edited source configuration, pass the same
@@ -265,7 +265,7 @@ In a second terminal at the repository root:
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ros2 topic list -t --no-daemon
-ros2 topic type /TLO/Camera/Color/ImageRaw --no-daemon
+ros2 topic type /tiago/camera/color/image_raw --no-daemon
 ros2 run smpa_ros loop --config "$PWD/config/pipeline.yaml"
 ```
 
