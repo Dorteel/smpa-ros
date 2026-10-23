@@ -1,4 +1,5 @@
 camera_topic: /tiago/camera/color/image_raw
 model: smolvlm2
 prompt: describe_scene
-world_model_dir: /home/dorteel/ros2_ws/src/smpa-ros/world_model
+execution:
+  max_cycles: 1

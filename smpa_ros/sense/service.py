@@ -1,16 +1,19 @@
 from importlib.resources import files
 from pathlib import Path
+import signal
 from time import perf_counter
 
 from ament_index_python.packages import get_package_share_directory
 from PIL import Image as PILImage
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from smpa_ros_interfaces.srv import DescribeScene
 import yaml
 
 from smpa_ros.backends.transformers import TransformersVLM
+from smpa_ros.loop import assigned_run
 
 
 def image_to_pil(image: Image) -> PILImage.Image:
@@ -35,6 +38,10 @@ def image_to_pil(image: Image) -> PILImage.Image:
 class SenseService(Node):
     def __init__(self, backend: TransformersVLM | None = None) -> None:
         super().__init__('sense')
+        self.declare_parameter('world_model_dir', '')
+        self.declare_parameter('run_id', '')
+        self.world_model_dir, self.run_id = assigned_run(
+            self.get_parameter('world_model_dir').value, self.get_parameter('run_id').value)
         self.get_logger().info('Sense node starting')
         share = Path(get_package_share_directory('smpa_ros'))
         self.declare_parameter('config', str(share / 'config/pipeline.yaml'))
@@ -93,15 +100,22 @@ class SenseService(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
     node = None
     try:
+        rclpy.init(args=args)
         node = SenseService()
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        rclpy.logging.get_logger('sense').info('Sense shutdown requested')
     finally:
-        if node is not None:
-            node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Finish cleanup even if a further SIGINT arrives from the launch process group.
+        previous_sigint = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            try:
+                if node is not None:
+                    node.destroy_node()
+            finally:
+                if rclpy.ok():
+                    rclpy.shutdown()
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)

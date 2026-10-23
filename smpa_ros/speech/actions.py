@@ -17,6 +17,7 @@ from rclpy.signals import SignalHandlerOptions
 from smpa_ros_interfaces.action import Listen, Talk
 import yaml
 
+from smpa_ros.loop import assigned_run
 from smpa_ros.speech.observation import AudioObservation
 from smpa_ros.backends.speech import FasterWhisperBackend, PiperBackend
 
@@ -25,12 +26,10 @@ class SpeechServer(Node):
     def __init__(self, kind, backend=None, lock_path=None):
         super().__init__('listener' if kind == 'listen' else 'talker')
         self.kind = kind
-        config_path = Path(get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml'
-        config = yaml.safe_load(config_path.read_text())
-        self.declare_parameter('world_model_dir', config['world_model_dir'])
-        self.world_model_dir = Path(self.get_parameter('world_model_dir').value)
-        if not self.world_model_dir.is_absolute():
-            raise ValueError('world_model_dir must be an absolute path')
+        self.declare_parameter('world_model_dir', '')
+        self.declare_parameter('run_id', '')
+        self.world_model_dir, self.run_id = assigned_run(
+            self.get_parameter('world_model_dir').value, self.get_parameter('run_id').value)
         self.action_type = Listen if kind == 'listen' else Talk
         self.declare_parameter('model', 'faster-whisper-base' if kind == 'listen' else 'piper-lessac-medium')
         self.declare_parameter('model_root', str(Path.cwd() / 'models'))

@@ -67,7 +67,6 @@ def speech(tmp_path):
     rclpy.init(args=[])
     listener = SpeechServer('listen', FakeBackend(), tmp_path / 'audio.lock')
     talker = SpeechServer('talk', FakeBackend(), tmp_path / 'audio.lock')
-    listener.world_model_dir = tmp_path / 'world_model'
     client = rclpy.create_node('speech_test_client')
     listen = ActionClient(client, Listen, '/speech/listen')
     talk = ActionClient(client, Talk, '/speech/talk')
@@ -245,7 +244,8 @@ def test_transcription_failure_preserves_incomplete_recording(speech):
 
 def test_audio_storage_failure_aborts_action(speech):
     listener, _, listen, _ = speech
-    listener.world_model_dir.write_text('A file blocks directory creation')
+    (listener.world_model_dir / 'audio').rmdir()
+    (listener.world_model_dir / 'audio').write_text('A file blocks directory creation')
     handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
     response = wait(handle.get_result_async())
     assert response.status == GoalStatus.STATUS_ABORTED and not response.result.success

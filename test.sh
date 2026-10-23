@@ -55,6 +55,7 @@ assert files('smpa_ros.sense').joinpath('prompts/describe_scene.txt').read_text(
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
 pipeline = yaml.safe_load((registry.parent / 'config/pipeline.yaml').read_text())
 assert pipeline == yaml.safe_load(Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).read_text())
+assert type(pipeline['execution']['max_cycles']) is int and pipeline['execution']['max_cycles'] > 0
 for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):
     config = yaml.safe_load((registry / (name + '.yaml')).read_text())
     assert config['name'] == name and config['model_id'] and config['vram_gb'] is None
@@ -71,6 +72,8 @@ PY
 timeout --kill-after=2s 10s ros2 run smpa_ros hello > "$work_dir/hello.log" 2>&1
 cat "$work_dir/hello.log"
 grep -Fq 'Hello ROS 2!' "$work_dir/hello.log"
-timeout --kill-after=2s 10s ros2 run smpa_ros loop --help > /dev/null
+timeout --kill-after=2s 10s ros2 run smpa_ros loop --help > "$work_dir/loop-help.txt"
+grep -Fq -- '--max-cycles' "$work_dir/loop-help.txt"
 timeout --kill-after=2s 10s ros2 launch smpa_ros speech.launch.py --show-args > /dev/null
-echo 'Build, tests (including audio persistence), installed assets, hello output, and loop command checks passed.'
+timeout --kill-after=2s 10s ros2 launch smpa_ros llm.launch.py --show-args > /dev/null
+echo 'Build, tests (including SMPA cycles and audio persistence), installed assets, hello output, and loop command checks passed.'

@@ -1,5 +1,123 @@
 # Minimal robot cognition
 
+## SMPA execution and run storage
+
+`smpa_ros/loop.py` is the single orchestrator. It creates a UUID and run directory,
+starts the operation servers with that assignment, executes Sense → Model → Plan
+→ Act sequentially, counts complete cycles, stops at the configured limit, cleans
+up its servers, and finalizes metadata. Launch files only start and configure
+processes. Neither services nor action callbacks create runs or initiate cycles.
+
+```yaml
+# config/pipeline.yaml
+execution:
+  max_cycles: 1
+```
+
+The default is one cycle. Each camera cycle calls the existing Sense service;
+each speech cycle calls the existing Listen action. `service:=all` collects both.
+Model, Plan, and Act have existing prompt templates but no configured ROS model
+implementations. Their default records are explicitly labelled `placeholder` and
+pass the previous value through. They do not claim inference or robot execution.
+Python callers can supply existing text backend instances to `run(model=...,
+plan=..., act=...)`; these execute through the existing `generate` contract.
+`demo:=true` reuses the existing "I heard ..." Talk behavior in Act, once per
+cycle. The standalone `listener_talker` demonstration remains available.
+
+Build and launch from the repository root (model dependencies below still apply):
+
+```bash
+cd /home/dorteel/ros2_ws/src/smpa-ros
+source /opt/ros/jazzy/setup.bash
+colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
+source install/setup.bash
+
+# One complete cycle (default limit comes from pipeline.yaml).
+ros2 launch smpa_ros llm.launch.py service:=vision run_name:=scene_experiment \
+  config:="$PWD/config/pipeline.yaml" python:="$PWD/.venv/bin/python"
+
+# Three cycles in one run.
+ros2 launch smpa_ros llm.launch.py service:=vision run_name:=three_scenes max_cycles:=3 \
+  config:="$PWD/config/pipeline.yaml" python:="$PWD/.venv/bin/python"
+
+# Speech-only session, one Listen and echo per cycle.
+ros2 launch smpa_ros speech.launch.py run_name:=dialogue max_cycles:=3 demo:=true \
+  python:="$PWD/.venv/bin/python"
+```
+
+`llm.launch.py` defaults to vision; `speech.launch.py` defaults to speech.
+`service:=all` enables both inputs for every cycle. `world_model_root:=/absolute/path`
+selects the storage root (default `$PWD/world_model`). Audio device, model root,
+and audio lock arguments remain supported. Run names are sanitized for filenames.
+
+```text
+world_model/
+├── legacy/                 # historical observations, untouched
+└── runs/
+    └── <timestamp>_<safe_name>_<uuid>/
+        ├── metadata.yaml   # identity, models, config, status, completed_cycles
+        ├── vision/         # timestamped descriptions
+        ├── audio/          # timestamped microphone WAV + transcript folders
+        └── state/
+            └── cycle_000001/
+                ├── sense.json
+                ├── model.json
+                ├── plan.json
+                └── act.json
+```
+
+Results are saved after each successful stage. A failed stage stops execution;
+previous results remain, and the count advances only after Act succeeds. Metadata
+starts as `running`, finishes as `completed`, and records `failed` or `interrupted`
+for failures or handled interruptions. Metadata is flushed and atomically replaced.
+SIGKILL or power loss cannot finalize metadata and may leave `running`.
+New runs never relocate or modify existing observations. There is no runtime
+historical migration infrastructure. Synthesized audio is not stored as microphone
+input. Visual Jev remains an unchanged third-party project.
+
+The flow can be read in `loop.py`: `initialize_run()` → `run()` →
+`finalize_run()`. Its `main()` connects that flow to ROS. Imports for ROS and
+speech clients are lazy so other consumers can use the shared `assigned_run()`
+validator without importing ROS or starting orchestration. `run_cycle()` remains
+the original non-persistent text helper. There is no separate run-storage module.
+
+The loop prints the directory and endpoint prefix
+`/run_<uuid_with_underscores>/...`. It uses the existing launcher in
+`participants_only:=true` mode to start Sense/Listen/Talk after initialization.
+That mode consumes an assignment and never creates a run. Services are stopped
+when the loop finishes; they never independently start cognitive cycles.
+For explicit service restarts while the owning loop remains active:
+
+```bash
+export RUN_DIR=/absolute/path/to/world_model/runs/<existing-run>
+export RUN_ID=$(python3 -c 'import os,yaml; print(yaml.safe_load(open(os.environ["RUN_DIR"]+"/metadata.yaml"))["run_id"])')
+export RUN_PREFIX=/run_${RUN_ID//-/_}
+ros2 launch smpa_ros llm.launch.py participants_only:=true service:=speech \
+  world_model_dir:="$RUN_DIR" run_id:="$RUN_ID" python:="$PWD/.venv/bin/python"
+```
+
+Stop the previous service instance before restarting its endpoint. Standalone
+Sense/Listen/Talk nodes likewise require `world_model_dir` and accept `run_id`
+ROS parameters. A supplied ID must match metadata; a missing directory is an error.
+All launch-managed clients use per-run endpoint remappings, keeping concurrent
+sessions isolated. The shared audio lock continues to serialize physical audio.
+Manual clients must use the printed endpoint prefix.
+
+```bash
+find world_model/runs -name metadata.yaml -print -exec cat {} \;
+find world_model/runs -path '*/vision/*.md' -print
+find world_model/runs -path '*/state/cycle_*/*.json' -print
+find world_model/runs -name transcript.md -print -exec cat {} \;
+find world_model/runs -name recording.wav -print
+./test.sh --unit
+./test.sh --integration
+./test.sh --all
+```
+
+The component reference below describes the individual operations. Its standalone
+servers need the assigned run parameters and remappings above; launching the loop
+creates a new execution session.
+
 ## Persistent local model library
 
 The standalone `scripts/download_models.py` manages exactly eleven public models
@@ -58,7 +176,7 @@ is installed globally. Hugging Face's local-folder metadata enables resumable
 ## ROS logging
 
 Sense logs startup, selected model/backend, weight loading, readiness, and request
-completion or failure. The one-shot loop logs camera/service waits, image and
+completion or failure. The loop logs camera/service waits, image and
 response arrival, and the saved Markdown path. Timings use a monotonic clock;
 neither image bytes nor model weights are logged. Failures and timeouts use ERROR.
 
@@ -200,7 +318,7 @@ python3 -m venv --system-site-packages /tmp/smpa-vlm
 source /tmp/smpa-vlm/bin/activate
 python -m pip install torch torchvision 'transformers>=4.57,<5' num2words pillow pyyaml huggingface_hub
 hf download HuggingFaceTB/SmolVLM2-2.2B-Instruct
-python -c 'from smpa_ros.sense.service import main; main()' --ros-args -p model_config:=smolvlm2.yaml -p dtype:=float16
+python -c 'from smpa_ros.sense.service import main; main()' --ros-args -p world_model_dir:="$RUN_DIR" -p run_id:="$RUN_ID" -r /sense:="$RUN_PREFIX/sense" -p model_config:=smolvlm2.yaml -p dtype:=float16
 ```
 
 The explicit `hf download` populates the default cache outside the repository
@@ -216,7 +334,7 @@ checking the request path, though not a meaningful scene):
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 service call /sense smpa_ros_interfaces/srv/DescribeScene "{image: {height: 1, width: 1, encoding: rgb8, is_bigendian: 0, step: 3, data: [255, 0, 0]}, prompt: ''}"
+ros2 service call "$RUN_PREFIX/sense" smpa_ros_interfaces/srv/DescribeScene "{image: {height: 1, width: 1, encoding: rgb8, is_bigendian: 0, step: 3, data: [255, 0, 0]}, prompt: ''}"
 ```
 
 Supported ROS encodings: rgb8, bgr8, rgba8, bgra8, mono8 (including row padding).
@@ -225,55 +343,30 @@ prompt defaults, custom prompts and malformed images, and performs no downloads.
 Ctrl+C stops the manual service; automated service nodes are destroyed in test
 cleanup. Actual VLM quality and GPU memory use require a manual run.
 
-## One camera frame → Sense → Markdown
+## Camera observations within SMPA cycles
 
-`config/pipeline.yaml` is the shared configuration: `camera_topic` is
-`/tiago/camera/color/image_raw`, `model` is `smolvlm2`, and `prompt` is
-`describe_scene`. The service uses the model setting; the one-shot loop resolves
-that prompt name to `sense/prompts/describe_scene.txt`. Both read the installed
-configuration by default. For an edited source configuration, pass the same
-absolute file path to both processes as shown below. The existing `model_config`
-service parameter can still override model selection explicitly.
+`config/pipeline.yaml` selects `/tiago/camera/color/image_raw`, `smolvlm2`, and the
+`describe_scene` prompt. Both the Sense server and loop receive the same config.
+The source config can be selected through the `config` launch argument; otherwise
+the installed config is used. Rebuild after editing installed configuration assets.
 
-The loop waits for `/sense`, subscribes with sensor-data QoS, takes one image,
-unsubscribes, requests a description, and saves the response verbatim. It creates
-`world_model/YYYY-MM-DD_HH-MM-SS_microseconds_sense_output.md` under the current
-directory, then exits. Run from the repository root to use its world_model folder.
-Generated outputs are ignored in Git. There is no interpretation or world-state
-update. Service errors and timeouts raise without producing a Markdown file.
-`--timeout` defaults to 120 seconds per waiting phase; `--output-dir` can override
-the destination. The older `run_cycle()` text helper remains unchanged.
-
-After building and downloading the model as above, start Sense from the root:
+Each cycle waits for Sense, receives one frame with sensor-data QoS, requests its
+description, saves it under the run's `vision/` directory, and continues through
+Model, Plan, and Act. The response text is saved verbatim. `capture_once()` remains
+available for callers with an explicitly assigned run. Errors stop the run;
+`--timeout` defaults to 120 seconds per camera/service waiting phase.
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-source /tmp/smpa-vlm/bin/activate
-python -c 'from smpa_ros.sense.service import main; main()' --ros-args -p config:="$PWD/config/pipeline.yaml"
-```
-
-With VLM dependencies installed in the ROS Python environment, the equivalent is:
-
-```bash
-ros2 run smpa_ros sense --ros-args -p config:="$PWD/config/pipeline.yaml"
-```
-
-In a second terminal at the repository root:
-
-```bash
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
 ros2 topic list -t --no-daemon
 ros2 topic type /tiago/camera/color/image_raw --no-daemon
-ros2 run smpa_ros loop --config "$PWD/config/pipeline.yaml"
+ros2 run smpa_ros loop --config "$PWD/config/pipeline.yaml" --run-name camera_run --max-cycles 3
 ```
 
-The camera must publish `sensor_msgs/msg/Image`. The loop needs ROS dependencies
-but no PyTorch installation; only the Sense process loads the model. To run the
-module directly, use `python3 -m smpa_ros.loop --config config/pipeline.yaml`.
-Ctrl+C stops the service. Loop subscriptions, clients, executors, and nodes are
-cleaned up on completion or error.
+The camera must publish `sensor_msgs/msg/Image`. The loop manages the Sense server
+as a separate process, using `--python` (default: the loop's interpreter). Run with
+an interpreter providing the optional inference dependencies; runtime model
+loading remains local-only. No actual camera or VLM inference is performed by the
+model-free tests. There is no structured robot world model or motion execution.
 
 ### Registered model downloads
 
@@ -330,9 +423,9 @@ In another terminal, source ROS and the same install, then run goals sequentiall
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 action send_goal /speech/listen smpa_ros_interfaces/action/Listen "{language: en, max_duration: 10.0}" --feedback
-ros2 action send_goal /speech/talk smpa_ros_interfaces/action/Talk "{text: 'Hello, I am ready.'}" --feedback
-ros2 run smpa_ros listener_talker
+ros2 action send_goal "$RUN_PREFIX"/speech/listen smpa_ros_interfaces/action/Listen "{language: en, max_duration: 10.0}" --feedback
+ros2 action send_goal "$RUN_PREFIX"/speech/talk smpa_ros_interfaces/action/Talk "{text: 'Hello, I am ready.'}" --feedback
+ros2 run smpa_ros listener_talker --ros-args -r /speech/listen:="$RUN_PREFIX/speech/listen" -r /speech/talk:="$RUN_PREFIX/speech/talk"
 ```
 
 Alternatively add `demo:=true` to launch. The demo awaits each terminal action
@@ -369,7 +462,7 @@ Every successful Listen action now writes both microphone audio and recognized
 text before returning success:
 
 ```text
-world_model/audio/2026-10-20T012400_123456Z_<unique suffix>/
+world_model/runs/<run>/audio/2026-10-20T012400_123456Z_<unique suffix>/
 ├── recording.wav
 └── transcript.md
 ```
@@ -388,27 +481,19 @@ also retains an incomplete observation; cancellation before completed capture
 creates no observation. Storage errors abort the action rather than reporting
 successful persistence. Talk audio is never stored as a microphone observation.
 
-`config/pipeline.yaml` now defines the absolute `world_model_dir`, initially this
-repository's existing world_model directory. Both the vision loop (unless
-`--output-dir` is supplied) and Listen use it, independent of their working
-directory. Update that setting if the repository moves, then rebuild to refresh
-the installed configuration. The listener also accepts a `world_model_dir` ROS
-parameter override, for example:
-
-```bash
-.venv/bin/python -c 'from smpa_ros.speech.actions import listen_main; listen_main()' \
-  --ros-args -p world_model_dir:="$PWD/world_model"
-```
+The loop assigns the run directory through `world_model_dir` and `run_id`
+parameters. See the run-specific storage instructions above for standalone
+participants and endpoint remappings. Both vision and Listen share that run for every cycle.
 
 After sourcing the build and starting the speech servers as above:
 
 ```bash
-ros2 action send_goal /speech/listen smpa_ros_interfaces/action/Listen \
+ros2 action send_goal "$RUN_PREFIX"/speech/listen smpa_ros_interfaces/action/Listen \
   "{language: en, max_duration: 10.0}" --feedback
-find world_model/audio -name transcript.md -print -exec cat {} \;
-find world_model/audio -name recording.wav -print
+find world_model/runs -name transcript.md -print -exec cat {} \;
+find world_model/runs -name recording.wav -print
 # Set this to one of the printed paths to hear the preserved capture:
-# ffplay -nodisp -autoexit world_model/audio/<session>/recording.wav
+# ffplay -nodisp -autoexit world_model/runs/<run>/audio/<session>/recording.wav
 ./test.sh
 ./test.sh --integration
 ./test.sh --all

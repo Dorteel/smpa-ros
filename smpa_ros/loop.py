@@ -1,4 +1,5 @@
-"""One camera-to-Sense capture, plus the existing text-cycle helper."""
+"""Own one run and execute sequential Sense–Model–Plan–Act cycles."""
+from __future__ import annotations
 
 import argparse
 from datetime import datetime
@@ -7,18 +8,128 @@ from importlib.resources import files
 from pathlib import Path
 from time import perf_counter
 
-from ament_index_python.packages import get_package_share_directory
-import rclpy
-from rclpy.executors import SingleThreadedExecutor
-from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
-from rclpy.task import Future
-from rclpy.utilities import remove_ros_args
-from sensor_msgs.msg import Image
-from smpa_ros_interfaces.srv import DescribeScene
+import os
+import re
+import signal
+import subprocess
+import sys
+from tempfile import NamedTemporaryFile
+from uuid import uuid4
 import yaml
 
 from smpa_ros.backends.base import Backend
+
+def assigned_run(directory, run_id=''):
+    if not directory:
+        raise ValueError('Missing world_model_dir: launch llm.launch.py or supply an existing run directory')
+    path = Path(directory)
+    if not path.is_absolute():
+        raise ValueError('world_model_dir must be an absolute existing run directory')
+    try:
+        metadata = yaml.safe_load((path / 'metadata.yaml').read_text())
+        identity = metadata['run_id']
+        if not identity or (run_id and identity != run_id):
+            raise ValueError('run_id does not match assigned metadata')
+        if any(not (path / name).is_dir() for name in ('vision', 'audio', 'state')):
+            raise ValueError('Assigned run is missing observation directories')
+    except (OSError, KeyError, TypeError) as error:
+        raise ValueError(f'Invalid assigned world-model run: {path}') from error
+    return path, identity
+
+
+def write_metadata(directory, metadata):
+    with NamedTemporaryFile(mode='w', dir=directory, prefix='.metadata-', delete=False) as output:
+        pending = Path(output.name)
+        try:
+            yaml.safe_dump(metadata, output, sort_keys=False)
+            output.flush()
+            os.fsync(output.fileno())
+            pending.replace(directory / 'metadata.yaml')
+        finally:
+            pending.unlink(missing_ok=True)
+
+
+def initialize_run(root, run_name='session', *, models=None, configuration=None):
+    name = re.sub(r'[^a-zA-Z0-9_-]+', '_', run_name).strip('_-')[:80]
+    if not name:
+        raise ValueError('run_name must contain a letter, digit, underscore, or hyphen')
+    identity = str(uuid4())
+    started = datetime.now().astimezone()
+    directory = Path(root).resolve() / 'runs' / f'{started:%Y-%m-%dT%H%M%S_%f%z}_{name}_{identity}'
+    directory.mkdir(parents=True, exist_ok=False)
+    for category in ('vision', 'audio', 'state'):
+        (directory / category).mkdir()
+    metadata = dict(run_id=identity, run_name=name, started_at=started.isoformat(),
+                    completed_at=None, status='running', completed_cycles=0,
+                    models=models or {}, configuration=configuration or {})
+    write_metadata(directory, metadata)
+    return directory, metadata
+
+
+def finalize_run(directory, metadata, status):
+    if status not in ('completed', 'interrupted', 'failed'):
+        raise ValueError(f'Invalid terminal run status: {status}')
+    if metadata['status'] == 'running':
+        metadata.update(status=status, completed_at=datetime.now().astimezone().isoformat())
+        write_metadata(directory, metadata)
+
+
+def stage_prompt(name, value):
+    component = files('smpa_ros').joinpath(name)
+    prompt = component.joinpath('prompts/default.txt').read_text(encoding='utf-8').format(input=value)
+    settings = json.loads(component.joinpath('models/default.json').read_text(encoding='utf-8'))
+    return prompt, settings
+
+
+def run(max_cycles=1, *, root=None, run_name='session', sense,
+        model=None, plan=None, act=None, models=None, configuration=None,
+        setup=None, teardown=None):
+    """Own the entire session. Each sense callback receives its run and cycle number.
+
+    Unconfigured text stages retain their existing templates as explicit placeholders.
+    Results are committed after each stage; the count advances only after Act succeeds.
+    """
+    if isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1:
+        raise ValueError('max_cycles must be a positive integer')
+    directory, metadata = initialize_run(root or Path.cwd() / 'world_model', run_name,
+                                         models=models, configuration=configuration)
+    metadata['max_cycles'] = max_cycles
+    status = 'failed'
+    try:
+        write_metadata(directory, metadata)
+        if setup:
+            setup(directory, metadata['run_id'])
+        for cycle in range(1, max_cycles + 1):
+            destination = directory / 'state' / f'cycle_{cycle:06d}'
+            destination.mkdir()
+            value = sense(directory, cycle)
+            with (destination / 'sense.json').open('x', encoding='utf-8') as output:
+                json.dump({'stage': 'sense', 'cycle': cycle, 'output': value}, output, ensure_ascii=False, indent=2)
+            for name, backend in [('model', model), ('plan', plan), ('act', act)]:
+                prompt, settings = stage_prompt(name, value)
+                generate = getattr(backend, 'generate', backend)
+                result = generate(prompt, **settings) if backend is not None else value
+                record = dict(stage=name, cycle=cycle, status='generated' if backend is not None else 'placeholder',
+                              input=value, prompt=prompt, output=result)
+                with (destination / f'{name}.json').open('x', encoding='utf-8') as output:
+                    json.dump(record, output, ensure_ascii=False, indent=2)
+                value = result
+            metadata['completed_cycles'] += 1
+            write_metadata(directory, metadata)
+        status = 'completed'
+        return directory
+    except KeyboardInterrupt:
+        status = 'interrupted'
+        raise
+    finally:
+        try:
+            if teardown:
+                teardown()
+        except BaseException:
+            status = 'failed'
+            raise
+        finally:
+            finalize_run(directory, metadata, status)
 
 
 def run_cycle(observation: str, *, sense: Backend, model: Backend,
@@ -31,10 +142,8 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
     results = {}
     value = observation
     for name, backend in [('sense', sense), ('model', model), ('plan', plan), ('act', act)]:
-        component = files('smpa_ros').joinpath(name)
-        template = component.joinpath('prompts/default.txt').read_text(encoding='utf-8')
-        config = json.loads(component.joinpath('models/default.json').read_text(encoding='utf-8'))
-        value = backend.generate(template.format(input=value), **config)
+        prompt, config = stage_prompt(name, value)
+        value = backend.generate(prompt, **config)
         results[name] = value
     return results
 
@@ -42,6 +151,13 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
 def capture_once(node: Node, config: dict, output_dir: Path,
                  executor: SingleThreadedExecutor, timeout: float = 120) -> Path:
     """Receive one frame, request its description, and write the exact response."""
+    from rclpy.qos import qos_profile_sensor_data
+    from rclpy.task import Future
+    from sensor_msgs.msg import Image
+    from smpa_ros_interfaces.srv import DescribeScene
+
+    output_dir, _ = assigned_run(output_dir, config.get('run_id', ''))
+    output_dir = output_dir / 'vision'
     prompt = files('smpa_ros.sense').joinpath(
         'prompts/' + config['prompt'] + '.txt',
     ).read_text(encoding='utf-8').strip()
@@ -81,7 +197,6 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         node.get_logger().info(f'/sense response received after {perf_counter() - started:.2f}s')
         if response.error:
             raise RuntimeError(response.error)
-        output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')
         path = output_dir / f'{timestamp}_sense_output.md'
         # Exclusive creation prevents an existing observation from being overwritten.
@@ -99,26 +214,123 @@ def capture_once(node: Node, config: dict, output_dir: Path,
 
 
 def main(args=None) -> None:
-    parser = argparse.ArgumentParser(description='Describe one camera frame and exit.')
+    from ament_index_python.packages import get_package_share_directory
+    import rclpy
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.signals import SignalHandlerOptions
+    from rclpy.utilities import remove_ros_args
+
+    parser = argparse.ArgumentParser(description='Execute one run of sequential SMPA cycles.')
     parser.add_argument('--config', type=Path, default=Path(
         get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml')
-    parser.add_argument('--output-dir', type=Path, default=None)
+    parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'world_model')
+    parser.add_argument('--run-name', default='session')
+    parser.add_argument('--max-cycles', type=int, default=None)
+    parser.add_argument('--service', choices=['vision', 'speech', 'all'], default='vision')
+    parser.add_argument('--python', default=sys.executable)
+    parser.add_argument('--model-root', default=str(Path.cwd() / 'models'))
+    parser.add_argument('--audio-lock', default='')
+    parser.add_argument('--input-device', default='')
+    parser.add_argument('--output-device', default='')
+    parser.add_argument('--demo', choices=['true', 'false'], default='false')
     parser.add_argument('--timeout', type=float, default=120)
     options = parser.parse_args(remove_ros_args(args=args)[1:])
+    config = yaml.safe_load(options.config.read_text(encoding='utf-8'))
+    limit = options.max_cycles if options.max_cycles is not None else config.get('execution', {}).get('max_cycles', 1)
     if options.timeout <= 0:
         parser.error('--timeout must be positive')
-    config = yaml.safe_load(options.config.read_text(encoding='utf-8'))
-    rclpy.init(args=args)
-    node = Node('smpa_loop')
-    executor = SingleThreadedExecutor()
-    executor.add_node(node)
+    participant = None
+    camera_node = executor = speech = None
+    last_transcript = ''
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt)
+
+    def setup(directory, identity):
+        nonlocal participant, camera_node, executor, speech
+        namespace = '/run_' + identity.replace('-', '_')
+        command = ['ros2', 'launch', 'smpa_ros', 'llm.launch.py', 'participants_only:=true',
+                   f'service:={options.service}', f'world_model_dir:={directory}', f'run_id:={identity}',
+                   f'config:={options.config.resolve()}', f'python:={options.python}',
+                   f'model_root:={options.model_root}']
+        for name in ('audio_lock', 'input_device', 'output_device'):
+            if getattr(options, name):
+                command.append(f'{name}:={getattr(options, name)}')
+        participant = subprocess.Popen(command, start_new_session=True)
+        print(f'World-model run: {directory}\nROS endpoints: {namespace}/...', flush=True)
+        rclpy.init(args=['--ros-args', '-r', f'/sense:={namespace}/sense',
+                         '-r', f'/speech/listen:={namespace}/speech/listen',
+                         '-r', f'/speech/talk:={namespace}/speech/talk',
+                         '-p', f'world_model_dir:={directory}', '-p', f'run_id:={identity}'],
+                   signal_handler_options=SignalHandlerOptions.NO)
+        if options.service in ('vision', 'all'):
+            camera_node = rclpy.create_node('smpa_loop')
+            executor = SingleThreadedExecutor()
+            executor.add_node(camera_node)
+        if options.service in ('speech', 'all'):
+            from smpa_ros.speech.demo import ListenerTalker
+            speech = ListenerTalker()
+
+    def sense(directory, cycle):
+        nonlocal last_transcript
+        if participant.poll() is not None:
+            raise RuntimeError('Participating ROS processes exited')
+        outputs = {}
+        if camera_node is not None:
+            outputs['vision'] = capture_once(camera_node, config, directory, executor, options.timeout).read_text()
+        if speech is not None:
+            from smpa_ros_interfaces.action import Listen
+            result = speech.perform(speech.listener, Listen.Goal(language='en', max_duration=10.0))
+            last_transcript = result.transcription
+            outputs['speech'] = result.transcription
+        return json.dumps(outputs, ensure_ascii=False)
+
+    def speak(prompt, *, max_new_tokens):
+        from smpa_ros_interfaces.action import Talk
+        speech.perform(speech.talker, Talk.Goal(text=f'I heard {last_transcript}'))
+        return f'I heard {last_transcript}'
+
+    def teardown():
+        try:
+            if speech is not None:
+                speech.close()
+            if executor is not None:
+                executor.shutdown()
+            if camera_node is not None:
+                camera_node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+        finally:
+            if participant is not None and participant.poll() is None:
+                os.killpg(participant.pid, signal.SIGINT)
+                try:
+                    participant.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    os.killpg(participant.pid, signal.SIGTERM)
+                    try:
+                        participant.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(participant.pid, signal.SIGKILL)
+                        participant.wait()
+
+    registry = Path(get_package_share_directory('smpa_ros')) / 'models'
+    models = {}
+    if options.service in ('vision', 'all'):
+        models['vision'] = yaml.safe_load((registry / (config['model'] + '.yaml')).read_text())
+    if options.service in ('speech', 'all'):
+        models.update(yaml.safe_load((registry / 'model_library.yaml').read_text())['models'])
     try:
-        capture_once(node, config, options.output_dir or Path(config['world_model_dir']), executor, options.timeout)
+        run(limit, root=options.world_model_root, run_name=options.run_name, sense=sense,
+            act=speak if options.demo == 'true' and options.service in ('speech', 'all') else None,
+            models=models, configuration=dict(pipeline=config, service=options.service, max_cycles=limit),
+            setup=setup, teardown=teardown)
+    except KeyboardInterrupt:
+        pass
     finally:
-        executor.shutdown()
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        signal.signal(signal.SIGTERM, old_sigterm)
 
 
 if __name__ == '__main__':

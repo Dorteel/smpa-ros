@@ -5,12 +5,14 @@ import os
 import struct
 from tempfile import mkdtemp
 
+from smpa_ros.loop import assigned_run
+
 
 class AudioObservation:
     def __init__(self, root: Path, audio, language: str, model: str):
+        root, self.run_id = assigned_run(root)
         self.timestamp = datetime.now(timezone.utc)
         parent = root / 'audio'
-        parent.mkdir(parents=True, exist_ok=True)
         # Exclusive directory creation also prevents collisions within a microsecond.
         self.path = Path(mkdtemp(prefix=self.timestamp.strftime('%Y-%m-%dT%H%M%S_%fZ_'), dir=parent))
         self.language = language or 'auto'
@@ -30,7 +32,7 @@ class AudioObservation:
 
     def write_transcript(self, status: str, text: str = '', error: str = ''):
         content = (f'# Audio Observation\n\n- Timestamp: {self.timestamp.isoformat()}\n'
-                   f'- Source: ROS 2 Listen action\n- Audio file: recording.wav\n'
+                   f'- Run ID: {self.run_id}\n- Source: ROS 2 Listen action\n- Audio file: recording.wav\n'
                    f'- Audio format: 16000 Hz, mono, IEEE float32 PCM (lossless)\n'
                    f'- Language: {self.language}\n- Recognition model: {self.model}\n'
                    f'- Status: {status}\n')

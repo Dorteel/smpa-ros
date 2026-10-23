@@ -47,7 +47,6 @@ def test_prerecorded_listener_talker(tmp_path, monkeypatch):
     ))
     rclpy.init(args=[])
     listener = SpeechServer('listen', stt, tmp_path / 'audio.lock')
-    listener.world_model_dir = tmp_path / 'world_model'
     talker = SpeechServer('talk', tts, tmp_path / 'audio.lock')
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(listener)
