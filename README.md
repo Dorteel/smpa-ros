@@ -16,11 +16,12 @@ execution:
 
 The default is one cycle. Each camera cycle calls the existing Sense service;
 each speech cycle calls the existing Listen action. `service:=all` collects both.
-Model, Plan, and Act have existing prompt templates but no configured ROS model
-implementations. Their default records are explicitly labelled `placeholder` and
-pass the previous value through. They do not claim inference or robot execution.
-Python callers can supply existing text backend instances to `run(model=...,
-plan=..., act=...)`; these execute through the existing `generate` contract.
+Model uses a local LLM to create a complete Markdown world-model snapshot each
+cycle. The first prompt has an empty previous representation; subsequent prompts
+include the previous snapshot and the latest Sense observations. Plan and Act
+retain their placeholder behavior, passing the latest representation through.
+Python callers may supply existing backend instances to `run(model=...,
+plan=..., act=...)`. The CLI configures Model from the existing model registry.
 `demo:=true` reuses the existing "I heard ..." Talk behavior in Act, once per
 cycle. The standalone `listener_talker` demonstration remains available.
 
@@ -47,17 +48,21 @@ ros2 launch smpa_ros speech.launch.py run_name:=dialogue max_cycles:=3 demo:=tru
 
 `llm.launch.py` defaults to vision; `speech.launch.py` defaults to speech.
 `service:=all` enables both inputs for every cycle. `world_model_root:=/absolute/path`
-selects the storage root (default `$PWD/world_model`). Audio device, model root,
-and audio lock arguments remain supported. Run names are sanitized for filenames.
+selects the storage root (default `$PWD/memory`). Audio device, model root,
+and audio lock arguments remain supported. Run names are sanitized and retained in metadata.
 
 ```text
-world_model/
-├── legacy/                 # historical observations, untouched
+memory/
+├── legacy/                    # historical observations, unchanged
 └── runs/
-    └── <timestamp>_<safe_name>_<uuid>/
-        ├── metadata.yaml   # identity, models, config, status, completed_cycles
-        ├── vision/         # timestamped descriptions
-        ├── audio/          # timestamped microphone WAV + transcript folders
+    └── <uuid>/
+        ├── metadata.yaml      # lifecycle, models, configuration, cycle count
+        ├── observations/
+        │   ├── vision/        # timestamped scene descriptions
+        │   └── audio/         # captured WAV + transcript folders
+        ├── world_model/
+        │   ├── iteration_001.md
+        │   └── iteration_002.md
         └── state/
             └── cycle_000001/
                 ├── sense.json
@@ -65,6 +70,54 @@ world_model/
                 ├── plan.json
                 └── act.json
 ```
+
+Memory preserves evidence and generated representations; the world model is the
+LLM's evolving environment representation. Existing `world_model/` storage was
+renamed once to `memory/`; historical files, run names/IDs, metadata contents, and
+internal layouts remain unchanged. There is no runtime migration code. New runs
+use UUID directory names and the layout above.
+
+Model selection uses existing configuration and registry files:
+
+```yaml
+# config/pipeline.yaml
+modeling:
+  model: qwen3-0.6b
+```
+
+```yaml
+# models/model_library.yaml, under models:
+qwen3-0.6b:
+  backend: transformers
+  model_id: Qwen/Qwen3-0.6B
+  path: llm/qwen3_0.6b
+  enable_thinking: false
+```
+
+The checkpoint is already provisioned locally. Runtime loading uses local files
+only, once per run; no downloads or automatic substitutions occur. `model_root`
+selects the root containing that relative checkpoint path. The backend retains
+its `.model` and `.tokenizer` for instrumentation. Sense uses a different model
+in a separate process, so its VLM instance cannot be shared with this text LLM.
+An existing Ollama backend is also supported for registry entries with
+`backend: ollama` and an already installed `model_id`; no additional text backend
+framework is introduced.
+
+The modeling instructions live in `smpa_ros/model/prompts/default.txt`; generation
+settings live in `smpa_ros/model/models/default.json` (512 new tokens). The prompt
+requests Entities, Properties, Relations, and Uncertain Information, stable IDs,
+and separation of observations from inferences. These are model instructions,
+not semantic guarantees. Snapshot publication is atomic and exclusive: previous
+iterations cannot be overwritten. A failed/empty generation records an error in
+`model.json`, stops the run, and creates no successful snapshot for that cycle.
+The record identifies the prompt, source observation files, previous iteration,
+output iteration, model identifier, and cycle. Plan receives the Markdown itself.
+
+```bash
+find memory/runs -path '*/world_model/iteration_*.md' -print -exec cat {} \;
+find memory/runs -path '*/state/cycle_*/model.json' -print -exec cat {} \;
+```
+
 
 Results are saved after each successful stage. A failed stage stops execution;
 previous results remain, and the count advances only after Act succeeds. Metadata
@@ -89,7 +142,7 @@ when the loop finishes; they never independently start cognitive cycles.
 For explicit service restarts while the owning loop remains active:
 
 ```bash
-export RUN_DIR=/absolute/path/to/world_model/runs/<existing-run>
+export RUN_DIR=/absolute/path/to/memory/runs/<existing-run>
 export RUN_ID=$(python3 -c 'import os,yaml; print(yaml.safe_load(open(os.environ["RUN_DIR"]+"/metadata.yaml"))["run_id"])')
 export RUN_PREFIX=/run_${RUN_ID//-/_}
 ros2 launch smpa_ros llm.launch.py participants_only:=true service:=speech \
@@ -104,13 +157,13 @@ sessions isolated. The shared audio lock continues to serialize physical audio.
 Manual clients must use the printed endpoint prefix.
 
 ```bash
-find world_model/runs -name metadata.yaml -print -exec cat {} \;
-find world_model/runs -path '*/vision/*.md' -print
-find world_model/runs -path '*/state/cycle_*/*.json' -print
-find world_model/runs -name transcript.md -print -exec cat {} \;
-find world_model/runs -name recording.wav -print
+find memory/runs -name metadata.yaml -print -exec cat {} \;
+find memory/runs -path '*/vision/*.md' -print
+find memory/runs -path '*/state/cycle_*/*.json' -print
+find memory/runs -name transcript.md -print -exec cat {} \;
+find memory/runs -name recording.wav -print
 ./test.sh --unit
-./test.sh --integration
+./test.sh --integration   # optional real local text LLM + speech inference
 ./test.sh --all
 ```
 
@@ -351,7 +404,7 @@ The source config can be selected through the `config` launch argument; otherwis
 the installed config is used. Rebuild after editing installed configuration assets.
 
 Each cycle waits for Sense, receives one frame with sensor-data QoS, requests its
-description, saves it under the run's `vision/` directory, and continues through
+description, saves it under the run's `observations/vision/` directory, and continues through
 Model, Plan, and Act. The response text is saved verbatim. `capture_once()` remains
 available for callers with an explicitly assigned run. Errors stop the run;
 `--timeout` defaults to 120 seconds per camera/service waiting phase.
@@ -366,7 +419,7 @@ The camera must publish `sensor_msgs/msg/Image`. The loop manages the Sense serv
 as a separate process, using `--python` (default: the loop's interpreter). Run with
 an interpreter providing the optional inference dependencies; runtime model
 loading remains local-only. No actual camera or VLM inference is performed by the
-model-free tests. There is no structured robot world model or motion execution.
+model-free tests. World models are Markdown snapshots; robot motion execution is not implemented.
 
 ### Registered model downloads
 
@@ -462,7 +515,7 @@ Every successful Listen action now writes both microphone audio and recognized
 text before returning success:
 
 ```text
-world_model/runs/<run>/audio/2026-10-20T012400_123456Z_<unique suffix>/
+memory/runs/<run>/observations/audio/2026-10-20T012400_123456Z_<unique suffix>/
 ├── recording.wav
 └── transcript.md
 ```
@@ -490,10 +543,10 @@ After sourcing the build and starting the speech servers as above:
 ```bash
 ros2 action send_goal "$RUN_PREFIX"/speech/listen smpa_ros_interfaces/action/Listen \
   "{language: en, max_duration: 10.0}" --feedback
-find world_model/runs -name transcript.md -print -exec cat {} \;
-find world_model/runs -name recording.wav -print
+find memory/runs -name transcript.md -print -exec cat {} \;
+find memory/runs -name recording.wav -print
 # Set this to one of the printed paths to hear the preserved capture:
-# ffplay -nodisp -autoexit world_model/runs/<run>/audio/<session>/recording.wav
+# ffplay -nodisp -autoexit memory/runs/<run>/observations/audio/<session>/recording.wav
 ./test.sh
 ./test.sh --integration
 ./test.sh --all

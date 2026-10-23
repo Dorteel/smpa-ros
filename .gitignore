@@ -219,8 +219,8 @@ tempCodeRunnerFile.py
 /models/download_report.json*
 *.incomplete
 *.part
-/world_model/*
-!/world_model/.gitkeep
+/memory/*
+!/memory/.gitkeep
 *.safetensors
 *.gguf
 

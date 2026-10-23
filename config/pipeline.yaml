@@ -1,5 +1,7 @@
 camera_topic: /tiago/camera/color/image_raw
 model: smolvlm2
 prompt: describe_scene
+modeling:
+  model: qwen3-0.6b
 execution:
   max_cycles: 1

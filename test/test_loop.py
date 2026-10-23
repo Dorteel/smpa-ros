@@ -36,12 +36,12 @@ def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
         if fails:
             with pytest.raises(RuntimeError, match='model failed'):
                 capture_once(loop, config, run_dir, executor, timeout=5)
-            assert not list((run_dir / 'vision').glob('*.md'))
+            assert not list((run_dir / 'observations' / 'vision').glob('*.md'))
         else:
             path = capture_once(loop, config, run_dir, executor, timeout=5)
             assert path.name.endswith('_sense_output.md')
             assert path.read_bytes() == text.encode('utf-8')
-            assert list((run_dir / 'vision').glob('*.md')) == [path]
+            assert list((run_dir / 'observations' / 'vision').glob('*.md')) == [path]
         backend.describe.assert_called_once()
         assert backend.describe.call_args.args[1] == 'Describe the scene.'
     finally:
@@ -61,6 +61,11 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     from rclpy.qos import qos_profile_sensor_data
 
     config = {'camera_topic': '/test/smpa_main_camera', 'model': 'smolvlm2', 'prompt': 'describe_scene'}
+    config['modeling'] = {'model': 'qwen3-0.6b'}
+    model_backend = MagicMock()
+    model_backend.generate.return_value = '# World Model\n\n## Entities\n\n- pixel_1: Red pixel'
+    constructor = MagicMock(return_value=model_backend)
+    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend', constructor)
     if configured is not None:
         config['execution'] = {'max_cycles': configured}
     config_path = tmp_path / 'pipeline.yaml'
@@ -94,8 +99,11 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     directory, = (tmp_path / 'world_model/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['completed_cycles'] == expected and metadata['status'] == 'completed'
-    assert len(list((directory / 'vision').iterdir())) == expected
+    assert len(list((directory / 'observations' / 'vision').iterdir())) == expected
     assert len(list((directory / 'state').iterdir())) == expected
+    constructor.assert_called_once()
+    assert model_backend.generate.call_count == expected
+    assert len(list((directory / 'world_model').glob('iteration_*.md'))) == expected
     assert len(commands) == 1
     assert f'world_model_dir:={directory}' in commands[0]
     assert f'run_id:={metadata["run_id"]}' in commands[0]

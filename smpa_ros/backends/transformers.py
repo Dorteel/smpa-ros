@@ -7,12 +7,14 @@ if TYPE_CHECKING:
 class TransformersBackend:
     """Load a local causal language model once, retaining access to its internals."""
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, *, enable_thinking: bool | None = None):
         # Optional dependencies are loaded only when this backend is selected.
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.torch = torch
+        self.model_id = str(model_path)
+        self.enable_thinking = enable_thinking
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, local_files_only=True,
         )
@@ -24,8 +26,9 @@ class TransformersBackend:
     def generate(self, prompt: str, *, max_new_tokens: int = 128) -> str:
         messages = [{'role': 'user', 'content': prompt}]
         if self.tokenizer.chat_template:
+            options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
             prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
+                messages, tokenize=False, add_generation_prompt=True, **options,
             )
             inputs = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
         else:

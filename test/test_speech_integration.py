@@ -57,7 +57,7 @@ def test_prerecorded_listener_talker(tmp_path, monkeypatch):
     started = perf_counter()
     try:
         response = demo.turn()
-        observations = list((listener.world_model_dir / 'audio').iterdir())
+        observations = list((listener.world_model_dir / 'observations' / 'audio').iterdir())
         assert len(observations) == 1
         assert (observations[0] / 'recording.wav').stat().st_size > 56
         saved = decode_audio(str(observations[0] / 'recording.wav'))

@@ -1,3 +1,8 @@
-Represent the observed facts as a concise world state. Explicitly identify unknowns.
-Observed facts:
+Create a structured world model from the provided observations. Use the previous world model as context when available. Preserve supported information, update facts when new evidence justifies it, and do not invent observations.
+Return a complete Markdown snapshot with the title "# World Model" and sections "## Entities", "## Properties", "## Relations", and "## Uncertain Information". Preserve stable entity identifiers where possible. Distinguish observed facts from inferences and mark uncertainty explicitly.
+
+Previous world model:
+{previous_world_model}
+
+Observations:
 {input}

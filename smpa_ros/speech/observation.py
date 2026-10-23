@@ -12,7 +12,7 @@ class AudioObservation:
     def __init__(self, root: Path, audio, language: str, model: str):
         root, self.run_id = assigned_run(root)
         self.timestamp = datetime.now(timezone.utc)
-        parent = root / 'audio'
+        parent = root / 'observations' / 'audio'
         # Exclusive directory creation also prevents collisions within a microsecond.
         self.path = Path(mkdtemp(prefix=self.timestamp.strftime('%Y-%m-%dT%H%M%S_%fZ_'), dir=parent))
         self.language = language or 'auto'

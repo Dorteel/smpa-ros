@@ -10,10 +10,15 @@ import yaml
 from smpa_ros.loop import assigned_run, initialize_run, finalize_run, run
 
 
+
+def model_snapshot(prompt, **settings):
+    return '# World Model\n\n## Entities\n\n- observed'
+
+
 def test_concurrent_sessions_are_isolated(tmp_path):
     with ThreadPoolExecutor(4) as pool:
         sessions = list(pool.map(lambda _: run(root=tmp_path, run_name='../safe name',
-                                               sense=lambda directory, cycle: 'observation'), range(4)))
+                                               sense=lambda directory, cycle: 'observation', model=model_snapshot), range(4)))
     assert len(set(sessions)) == 4
     identities = set()
     for directory in sessions:
@@ -31,10 +36,10 @@ def test_new_run_leaves_existing_storage_untouched(tmp_path):
     legacy.mkdir(parents=True)
     (legacy / 'recording.wav').write_bytes(b'historical audio')
     (tmp_path / 'scene.md').write_text('existing observation')
-    previous = run(root=tmp_path, sense=lambda directory, cycle: 'previous')
+    previous = run(root=tmp_path, sense=lambda directory, cycle: 'previous', model=model_snapshot)
     before = {path.relative_to(tmp_path): path.read_bytes()
               for path in tmp_path.rglob('*') if path.is_file()}
-    current = run(root=tmp_path, sense=lambda directory, cycle: 'current')
+    current = run(root=tmp_path, sense=lambda directory, cycle: 'current', model=model_snapshot)
     assert current != previous
     assert all((tmp_path / path).read_bytes() == content for path, content in before.items())
     assert {path.name for path in tmp_path.iterdir()} == {'legacy', 'scene.md', 'runs'}
@@ -93,21 +98,21 @@ def test_failed_stage_stops_and_preserves_results(tmp_path, stage):
     directory, = (tmp_path / 'runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['status'] == 'failed' and metadata['completed_cycles'] == 0
-    assert len(list((directory / 'state').glob('cycle_*/*.json'))) == names.index(stage)
+    assert len(list((directory / 'state').glob('cycle_*/*.json'))) == names.index(stage) + (stage == 'model')
 
 
 def test_interruption_retains_completed_cycles(tmp_path):
     def sense(directory, cycle):
-        (directory / 'vision' / f'{cycle}.md').write_text('captured')
+        (directory / 'observations' / 'vision' / f'{cycle}.md').write_text('captured')
         if cycle == 2:
             raise KeyboardInterrupt
         return 'observed'
     with pytest.raises(KeyboardInterrupt):
-        run(3, root=tmp_path, sense=sense)
+        run(3, root=tmp_path, sense=sense, model=model_snapshot)
     directory, = (tmp_path / 'runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['status'] == 'interrupted' and metadata['completed_cycles'] == 1
-    assert len(list((directory / 'vision').iterdir())) == 2
+    assert len(list((directory / 'observations' / 'vision').iterdir())) == 2
     record = json.loads((directory / 'state/cycle_000001/act.json').read_text())
     assert record['status'] == 'placeholder'
 
@@ -150,7 +155,7 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
         options = kwargs['arguments']
         root = options[options.index('--world-model-root') + 1]
         script = ('from smpa_ros.loop import run; '
-                  f'run(3, root={root!r}, sense=lambda directory, cycle: "observed")')
+                  f'run(3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model")')
         return ExecuteProcess(cmd=[sys.executable, '-c', script], on_exit=kwargs['on_exit'])
     monkeypatch.setattr(launch_ros.actions, 'Node', fake_node)
     if entrypoint == 'llm':
@@ -231,7 +236,82 @@ def test_act_operation_runs_before_cycle_completion(tmp_path):
         assert metadata['completed_cycles'] == 0
         calls.append(prompt)
         return 'action result'
-    directory = run(root=tmp_path, sense=lambda directory, cycle: 'observed', act=act)
+    directory = run(root=tmp_path, sense=lambda directory, cycle: 'observed', model=model_snapshot, act=act)
     assert len(calls) == 1 and 'observed' in calls[0]
     record = json.loads((directory / 'state/cycle_000001/act.json').read_text())
     assert record['status'] == 'generated' and record['output'] == 'action result'
+
+
+def test_model_iterations_chain_and_feed_plan(tmp_path):
+    snapshots = ['# World Model\n\n## Entities\n\n- cup_1: Cup',
+                 '# World Model\n\n## Entities\n\n- cup_1: Cup\n- table_1: Table']
+    backend = MagicMock()
+    backend.generate.side_effect = snapshots
+    plan = MagicMock()
+    plan.generate.return_value = 'proposed plan'
+    def sense(directory, cycle):
+        (directory / 'observations/vision' / f'{cycle}.md').write_text(f'observation {cycle}')
+        if cycle == 2:
+            assert (directory / 'world_model/iteration_001.md').read_text() == snapshots[0]
+        return f'observation {cycle}'
+    directory = run(2, root=tmp_path, sense=sense, model=backend, plan=plan,
+                    model_identifier='test/local-model')
+    assert (directory / 'world_model/iteration_001.md').read_text() == snapshots[0]
+    assert (directory / 'world_model/iteration_002.md').read_text() == snapshots[1]
+    assert 'Previous world model:\n\n' in backend.generate.call_args_list[0].args[0]
+    assert snapshots[0] in backend.generate.call_args_list[1].args[0]
+    for cycle, snapshot in enumerate(snapshots, 1):
+        assert snapshot in plan.generate.call_args_list[cycle - 1].args[0]
+        record = json.loads((directory / f'state/cycle_{cycle:06d}/model.json').read_text())
+        assert record['model_identifier'] == 'test/local-model'
+        assert f'observations/vision/{cycle}.md' in record['source_observations']
+        assert record['iteration'] == f'world_model/iteration_{cycle:03d}.md'
+        assert record['previous_iteration'] == ('world_model/iteration_001.md' if cycle == 2 else None)
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('model failed'), '', '   '])
+def test_model_failure_preserves_previous_snapshot(tmp_path, failure):
+    backend = MagicMock()
+    backend.generate.side_effect = ['# World Model\n\nFirst snapshot', failure]
+    plan = MagicMock()
+    plan.generate.return_value = 'plan'
+    with pytest.raises((RuntimeError, ValueError)):
+        run(2, root=tmp_path, sense=lambda directory, cycle: f'observation {cycle}', model=backend, plan=plan)
+    directory, = (tmp_path / 'runs').iterdir()
+    assert (directory / 'world_model/iteration_001.md').read_text() == '# World Model\n\nFirst snapshot'
+    assert not (directory / 'world_model/iteration_002.md').exists()
+    assert plan.generate.call_count == 1
+    record = json.loads((directory / 'state/cycle_000002/model.json').read_text())
+    assert record['status'] == 'failed' and record['error'] and record['iteration'] is None
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert metadata['status'] == 'failed' and metadata['completed_cycles'] == 1
+
+
+def test_model_never_overwrites_existing_iteration(tmp_path):
+    def sense(directory, cycle):
+        (directory / 'world_model/iteration_001.md').write_text('preserve existing snapshot')
+        return 'observation'
+    with pytest.raises(FileExistsError):
+        run(root=tmp_path, sense=sense, model=model_snapshot)
+    directory, = (tmp_path / 'runs').iterdir()
+    assert (directory / 'world_model/iteration_001.md').read_text() == 'preserve existing snapshot'
+    assert not list((directory / 'world_model').glob('.iteration-*'))
+
+
+def test_default_memory_layout(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    directory = run(sense=lambda directory, cycle: 'observation', model=model_snapshot)
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert directory.parent == tmp_path / 'memory/runs'
+    assert directory.name == metadata['run_id']
+    assert (directory / 'observations/vision').is_dir()
+    assert (directory / 'observations/audio').is_dir()
+    assert (directory / 'world_model/iteration_001.md').is_file()
+
+
+def test_missing_model_backend_fails_explicitly(tmp_path):
+    with pytest.raises(ValueError, match='configured local LLM'):
+        run(root=tmp_path, sense=lambda directory, cycle: 'observation')
+    directory, = (tmp_path / 'runs').iterdir()
+    assert not list((directory / 'world_model').glob('iteration_*.md'))
+    assert json.loads((directory / 'state/cycle_000001/model.json').read_text())['status'] == 'failed'

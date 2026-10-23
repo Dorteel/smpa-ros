@@ -53,7 +53,7 @@ def generate_launch_description():
         DeclareLaunchArgument('service', default_value='vision', choices=['speech', 'vision', 'all']),
         DeclareLaunchArgument('run_name', default_value='session'),
         DeclareLaunchArgument('max_cycles', default_value='', description='Override execution.max_cycles'),
-        DeclareLaunchArgument('world_model_root', default_value=str(Path.cwd() / 'world_model')),
+        DeclareLaunchArgument('world_model_root', default_value=str(Path.cwd() / 'memory')),
         DeclareLaunchArgument('config', default_value=str(share / 'config/pipeline.yaml')),
         DeclareLaunchArgument('python', default_value=sys.executable),
         DeclareLaunchArgument('model_root', default_value=str(Path.cwd() / 'models')),

@@ -26,7 +26,7 @@ def test_cycle_order_and_independent_backends():
     previous = 'a red cup'
     for name, prompt, limit in calls:
         assert previous in prompt
-        assert limit == 128
+        assert limit == (512 if name == 'model' else 128)
         previous = name + ' output'
         assert result[name] == previous
 
@@ -96,3 +96,45 @@ def test_transformers_local_loading_and_continuation(monkeypatch, chat_template)
         )
     else:
         tokenizer.assert_called_once_with('prompt', return_tensors='pt')
+
+
+@pytest.mark.integration
+def test_local_llm_world_model_iterations(tmp_path):
+    """Optional genuine CPU inference using the already provisioned modeling checkpoint."""
+    import importlib.util
+    from pathlib import Path
+    import yaml
+    from smpa_ros.loop import run
+
+    repository = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((repository / 'config/pipeline.yaml').read_text())
+    registry = yaml.safe_load((repository / 'models/model_library.yaml').read_text())['models']
+    selected = registry[config['modeling']['model']]
+    checkpoint = repository / 'models' / selected.get('path', '')
+    if (selected['backend'] != 'transformers' or not (checkpoint / 'model.safetensors').is_file()
+            or importlib.util.find_spec('torch') is None or importlib.util.find_spec('transformers') is None):
+        pytest.skip('Optional local Transformers modeling checkpoint/dependencies are unavailable; no download attempted')
+    import torch
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(2)
+    try:
+        backend = TransformersBackend(str(checkpoint), enable_thinking=selected.get('enable_thinking'))
+        assert isinstance(backend.model, torch.nn.Module)
+        observations = ['A white cup is on a wooden table.',
+                        'The same white cup is still on the table. A red book is now next to it.']
+        directory = run(2, root=tmp_path, sense=lambda directory, cycle: observations[cycle - 1],
+                        model=backend, model_identifier=selected['model_id'])
+        snapshots = [(directory / f'world_model/iteration_{cycle:03d}.md').read_text() for cycle in (1, 2)]
+        for snapshot in snapshots:
+            assert '# World Model' in snapshot and '## Entities' in snapshot
+            assert 'cup' in snapshot.lower()
+            assert snapshot not in observations
+        second = json.loads((directory / 'state/cycle_000002/model.json').read_text())
+        assert snapshots[0] in second['prompt']
+        assert second['output'] == snapshots[1]
+        assert second['model_identifier'] == selected['model_id']
+        assert json.loads((directory / 'state/cycle_000002/plan.json').read_text())['input'] == snapshots[1]
+        assert yaml.safe_load((directory / 'metadata.yaml').read_text())['completed_cycles'] == 2
+        print(f'Genuine local LLM inference: {selected["model_id"]}, two persisted snapshots')
+    finally:
+        torch.set_num_threads(previous_threads)

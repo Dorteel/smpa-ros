@@ -134,7 +134,7 @@ def test_cancellation_and_half_duplex(speech, kind):
     assert not response.result.success
     assert server.backend.stopped.is_set()
     if kind == 'listen':
-        session, = (listener.world_model_dir / 'audio').iterdir()
+        session, = (listener.world_model_dir / 'observations' / 'audio').iterdir()
         assert (session / 'recording.wav').exists()
         assert 'Status: incomplete' in (session / 'transcript.md').read_text()
     server.backend.block = False
@@ -215,7 +215,7 @@ def test_listen_persists_separate_linked_observations(speech):
         handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
         response = wait(handle.get_result_async())
         assert response.result.success
-    sessions = list((listener.world_model_dir / 'audio').iterdir())
+    sessions = list((listener.world_model_dir / 'observations' / 'audio').iterdir())
     assert len(sessions) == 2
     for session in sessions:
         data = (session / 'recording.wav').read_bytes()
@@ -236,7 +236,7 @@ def test_transcription_failure_preserves_incomplete_recording(speech):
     handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
     response = wait(handle.get_result_async())
     assert response.status == GoalStatus.STATUS_ABORTED
-    session, = (listener.world_model_dir / 'audio').iterdir()
+    session, = (listener.world_model_dir / 'observations' / 'audio').iterdir()
     assert (session / 'recording.wav').stat().st_size > 56
     text = (session / 'transcript.md').read_text()
     assert 'Status: incomplete' in text and 'transcription failed' in text
@@ -244,8 +244,8 @@ def test_transcription_failure_preserves_incomplete_recording(speech):
 
 def test_audio_storage_failure_aborts_action(speech):
     listener, _, listen, _ = speech
-    (listener.world_model_dir / 'audio').rmdir()
-    (listener.world_model_dir / 'audio').write_text('A file blocks directory creation')
+    (listener.world_model_dir / 'observations' / 'audio').rmdir()
+    (listener.world_model_dir / 'observations' / 'audio').write_text('A file blocks directory creation')
     handle = wait(listen.send_goal_async(Listen.Goal(language='en', max_duration=1.0)))
     response = wait(handle.get_result_async())
     assert response.status == GoalStatus.STATUS_ABORTED and not response.result.success
@@ -267,6 +267,6 @@ def test_transcript_storage_failure_aborts_and_preserves_audio(speech, monkeypat
     response = wait(handle.get_result_async())
     assert response.status == GoalStatus.STATUS_ABORTED
     assert 'disk full' in response.result.error_message
-    session, = (listener.world_model_dir / 'audio').iterdir()
+    session, = (listener.world_model_dir / 'observations' / 'audio').iterdir()
     assert (session / 'recording.wav').exists()
     assert 'Status: incomplete' in (session / 'transcript.md').read_text()

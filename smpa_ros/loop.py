@@ -30,7 +30,7 @@ def assigned_run(directory, run_id=''):
         identity = metadata['run_id']
         if not identity or (run_id and identity != run_id):
             raise ValueError('run_id does not match assigned metadata')
-        if any(not (path / name).is_dir() for name in ('vision', 'audio', 'state')):
+        if any(not (path / name).is_dir() for name in ('observations/vision', 'observations/audio', 'world_model', 'state')):
             raise ValueError('Assigned run is missing observation directories')
     except (OSError, KeyError, TypeError) as error:
         raise ValueError(f'Invalid assigned world-model run: {path}') from error
@@ -55,10 +55,10 @@ def initialize_run(root, run_name='session', *, models=None, configuration=None)
         raise ValueError('run_name must contain a letter, digit, underscore, or hyphen')
     identity = str(uuid4())
     started = datetime.now().astimezone()
-    directory = Path(root).resolve() / 'runs' / f'{started:%Y-%m-%dT%H%M%S_%f%z}_{name}_{identity}'
+    directory = Path(root).resolve() / 'runs' / identity
     directory.mkdir(parents=True, exist_ok=False)
-    for category in ('vision', 'audio', 'state'):
-        (directory / category).mkdir()
+    for category in ('observations/vision', 'observations/audio', 'world_model', 'state'):
+        (directory / category).mkdir(parents=True)
     metadata = dict(run_id=identity, run_name=name, started_at=started.isoformat(),
                     completed_at=None, status='running', completed_cycles=0,
                     models=models or {}, configuration=configuration or {})
@@ -74,24 +74,24 @@ def finalize_run(directory, metadata, status):
         write_metadata(directory, metadata)
 
 
-def stage_prompt(name, value):
+def stage_prompt(name, value, previous_world_model=''):
     component = files('smpa_ros').joinpath(name)
-    prompt = component.joinpath('prompts/default.txt').read_text(encoding='utf-8').format(input=value)
+    prompt = component.joinpath('prompts/default.txt').read_text(encoding='utf-8').format(input=value, previous_world_model=previous_world_model)
     settings = json.loads(component.joinpath('models/default.json').read_text(encoding='utf-8'))
     return prompt, settings
 
 
 def run(max_cycles=1, *, root=None, run_name='session', sense,
         model=None, plan=None, act=None, models=None, configuration=None,
-        setup=None, teardown=None):
+        setup=None, teardown=None, model_identifier=None):
     """Own the entire session. Each sense callback receives its run and cycle number.
 
-    Unconfigured text stages retain their existing templates as explicit placeholders.
+    Model creates a full immutable snapshot; Plan and Act retain their placeholders.
     Results are committed after each stage; the count advances only after Act succeeds.
     """
     if isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1:
         raise ValueError('max_cycles must be a positive integer')
-    directory, metadata = initialize_run(root or Path.cwd() / 'world_model', run_name,
+    directory, metadata = initialize_run(root or Path.cwd() / 'memory', run_name,
                                          models=models, configuration=configuration)
     metadata['max_cycles'] = max_cycles
     status = 'failed'
@@ -102,10 +102,53 @@ def run(max_cycles=1, *, root=None, run_name='session', sense,
         for cycle in range(1, max_cycles + 1):
             destination = directory / 'state' / f'cycle_{cycle:06d}'
             destination.mkdir()
+            prior_files = set((directory / 'observations').rglob('*'))
             value = sense(directory, cycle)
             with (destination / 'sense.json').open('x', encoding='utf-8') as output:
                 json.dump({'stage': 'sense', 'cycle': cycle, 'output': value}, output, ensure_ascii=False, indent=2)
-            for name, backend in [('model', model), ('plan', plan), ('act', act)]:
+            observations = [str(path.relative_to(directory)) for path in sorted(
+                set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()]
+            source_record = str((destination / 'sense.json').relative_to(directory))
+            previous = directory / 'world_model' / f'iteration_{cycle - 1:03d}.md' if cycle > 1 else None
+            previous_text = previous.read_text(encoding='utf-8') if previous is not None else ''
+            prompt, settings = stage_prompt('model', value, previous_text)
+            snapshot = directory / 'world_model' / f'iteration_{cycle:03d}.md'
+            backend_id = getattr(model, 'model_id', None) or getattr(model, 'model', None)
+            record = dict(stage='model', cycle=cycle, input=value, prompt=prompt,
+                          source_observations=[source_record, *observations],
+                          previous_iteration=str(previous.relative_to(directory)) if previous else None,
+                          iteration=str(snapshot.relative_to(directory)),
+                          model_identifier=model_identifier or (models or {}).get('model', {}).get('model_id')
+                          or (backend_id if isinstance(backend_id, str) else type(model).__name__))
+            try:
+                if model is None:
+                    raise ValueError('Model stage requires a configured local LLM backend')
+                generate = getattr(model, 'generate', model)
+                world_model = generate(prompt, **settings)
+                if not isinstance(world_model, str) or not world_model.strip():
+                    raise ValueError('Model returned an empty world model')
+                # Publish a complete snapshot exclusively; never replace an earlier iteration.
+                with NamedTemporaryFile(mode='w', encoding='utf-8', dir=snapshot.parent,
+                                        prefix='.iteration-', delete=False) as output:
+                    pending = Path(output.name)
+                    try:
+                        output.write(world_model)
+                        output.flush()
+                        os.fsync(output.fileno())
+                        os.link(pending, snapshot)
+                    finally:
+                        pending.unlink(missing_ok=True)
+                record.update(status='generated', output=world_model)
+            except (Exception, KeyboardInterrupt) as error:
+                record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                              error=f'{type(error).__name__}: {error}', iteration=None)
+                with (destination / 'model.json').open('x', encoding='utf-8') as output:
+                    json.dump(record, output, ensure_ascii=False, indent=2)
+                raise
+            with (destination / 'model.json').open('x', encoding='utf-8') as output:
+                json.dump(record, output, ensure_ascii=False, indent=2)
+            value = world_model
+            for name, backend in [('plan', plan), ('act', act)]:
                 prompt, settings = stage_prompt(name, value)
                 generate = getattr(backend, 'generate', backend)
                 result = generate(prompt, **settings) if backend is not None else value
@@ -157,7 +200,7 @@ def capture_once(node: Node, config: dict, output_dir: Path,
     from smpa_ros_interfaces.srv import DescribeScene
 
     output_dir, _ = assigned_run(output_dir, config.get('run_id', ''))
-    output_dir = output_dir / 'vision'
+    output_dir = output_dir / 'observations' / 'vision'
     prompt = files('smpa_ros.sense').joinpath(
         'prompts/' + config['prompt'] + '.txt',
     ).read_text(encoding='utf-8').strip()
@@ -223,7 +266,7 @@ def main(args=None) -> None:
     parser = argparse.ArgumentParser(description='Execute one run of sequential SMPA cycles.')
     parser.add_argument('--config', type=Path, default=Path(
         get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml')
-    parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'world_model')
+    parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'memory')
     parser.add_argument('--run-name', default='session')
     parser.add_argument('--max-cycles', type=int, default=None)
     parser.add_argument('--service', choices=['vision', 'speech', 'all'], default='vision')
@@ -317,13 +360,33 @@ def main(args=None) -> None:
                         participant.wait()
 
     registry = Path(get_package_share_directory('smpa_ros')) / 'models'
-    models = {}
+    registry_entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
+    selected_name = config['modeling']['model']
+    selected = registry_entries[selected_name]
+    modeling_backend = None
+
+    def model(prompt, *, max_new_tokens):
+        nonlocal modeling_backend
+        if modeling_backend is None:
+            if selected['backend'] == 'transformers':
+                from smpa_ros.backends.transformers import TransformersBackend
+                path = Path(options.model_root) / selected['path']
+                modeling_backend = TransformersBackend(str(path), enable_thinking=selected.get('enable_thinking'))
+            elif selected['backend'] == 'ollama':
+                from smpa_ros.backends.ollama import OllamaBackend
+                modeling_backend = OllamaBackend(selected['model_id'])
+            else:
+                raise ValueError(f"Unsupported modeling backend: {selected['backend']}")
+        return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens)
+
+    models = {'model': dict(selected, name=selected_name)}
     if options.service in ('vision', 'all'):
         models['vision'] = yaml.safe_load((registry / (config['model'] + '.yaml')).read_text())
     if options.service in ('speech', 'all'):
         models.update(yaml.safe_load((registry / 'model_library.yaml').read_text())['models'])
     try:
-        run(limit, root=options.world_model_root, run_name=options.run_name, sense=sense,
+        run(limit, root=options.world_model_root, run_name=options.run_name, sense=sense, model=model,
+            model_identifier=selected['model_id'],
             act=speak if options.demo == 'true' and options.service in ('speech', 'all') else None,
             models=models, configuration=dict(pipeline=config, service=options.service, max_cycles=limit),
             setup=setup, teardown=teardown)

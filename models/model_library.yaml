@@ -1,4 +1,9 @@
 models:
+  qwen3-0.6b:
+    backend: transformers
+    model_id: Qwen/Qwen3-0.6B
+    path: llm/qwen3_0.6b
+    enable_thinking: false
   faster-whisper-base:
     backend: faster_whisper
     model_id: Systran/faster-whisper-base
