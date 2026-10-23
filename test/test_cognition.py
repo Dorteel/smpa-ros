@@ -123,7 +123,9 @@ def test_local_llm_world_model_iterations(tmp_path):
         observations = ['A white cup is on a wooden table.',
                         'The same white cup is still on the table. A red book is now next to it.']
         directory = run(2, root=tmp_path, sense=lambda directory, cycle: observations[cycle - 1],
-                        model=backend, model_identifier=selected['model_id'])
+                        model=backend, model_identifier=selected['model_id'],
+                        plan=lambda prompt, **settings: '{"action":"look_left"}',
+                        act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True))
         snapshots = [(directory / f'world_model/iteration_{cycle:03d}.md').read_text() for cycle in (1, 2)]
         for snapshot in snapshots:
             assert '# World Model' in snapshot and '## Entities' in snapshot
@@ -138,3 +140,32 @@ def test_local_llm_world_model_iterations(tmp_path):
         print(f'Genuine local LLM inference: {selected["model_id"]}, two persisted snapshots')
     finally:
         torch.set_num_threads(previous_threads)
+
+
+@pytest.mark.parametrize('available', [True, False])
+def test_transformers_schema_constraints_never_fall_back(monkeypatch, available):
+    from types import ModuleType
+    from smpa_ros.loop import ACTION_SCHEMA
+    torch = MagicMock()
+    transformers = MagicMock()
+    monkeypatch.setitem(sys.modules, 'torch', torch)
+    monkeypatch.setitem(sys.modules, 'transformers', transformers)
+    library = ModuleType('letssee_llm.structured')
+    library.logits_processor = MagicMock(return_value='token-mask')
+    library.validate_response = MagicMock(return_value='{"action":"look_left"}')
+    monkeypatch.setitem(sys.modules, 'letssee_llm', ModuleType('letssee_llm'))
+    monkeypatch.setitem(sys.modules, 'letssee_llm.structured', library if available else None)
+    tokenizer = transformers.AutoTokenizer.from_pretrained.return_value
+    tokenizer.chat_template = 'test'
+    tokenizer.decode.return_value = '{"action":"look_left"}'
+    tokenizer.return_value.to.return_value = {'input_ids': MagicMock(shape=(1, 3))}
+    backend = TransformersBackend('/local/model', enable_thinking=False)
+    if available:
+        assert backend.generate('choose', schema=ACTION_SCHEMA) == '{"action":"look_left"}'
+        library.logits_processor.assert_called_once_with(backend.model, backend.tokenizer, ACTION_SCHEMA)
+        assert backend.model.generate.call_args.kwargs['logits_processor'] == ['token-mask']
+        library.validate_response.assert_called_once_with('{"action":"look_left"}', ACTION_SCHEMA)
+    else:
+        with pytest.raises(RuntimeError, match='no unrestricted fallback'):
+            backend.generate('choose', schema=ACTION_SCHEMA)
+        backend.model.generate.assert_not_called()

@@ -23,12 +23,20 @@ class TransformersBackend:
         )
         self.model.eval()
 
-    def generate(self, prompt: str, *, max_new_tokens: int = 128) -> str:
+    def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None) -> str:
+        options = {}
+        if schema is not None:
+            try:
+                from letssee_llm.structured import logits_processor, validate_response
+                options['logits_processor'] = [logits_processor(self.model, self.tokenizer, schema)]
+            except ImportError as error:
+                raise RuntimeError('Constrained planning requires the existing letssee_llm structured-generation '
+                                   'utilities and their Outlines dependencies; no unrestricted fallback is allowed') from error
         messages = [{'role': 'user', 'content': prompt}]
         if self.tokenizer.chat_template:
-            options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
+            template_options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
             prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, **options,
+                messages, tokenize=False, add_generation_prompt=True, **template_options,
             )
             inputs = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
         else:
@@ -36,12 +44,13 @@ class TransformersBackend:
         inputs = inputs.to(self.model.device)
         with self.torch.no_grad():
             output = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                **inputs, max_new_tokens=max_new_tokens, do_sample=False, **options,
             )
         # Decode only the continuation, excluding the input prompt.
-        return self.tokenizer.decode(
+        text = self.tokenizer.decode(
             output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=True,
         )
+        return validate_response(text, schema) if schema is not None else text
 
 
 class TransformersVLM:

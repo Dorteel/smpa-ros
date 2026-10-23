@@ -63,7 +63,11 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     config = {'camera_topic': '/test/smpa_main_camera', 'model': 'smolvlm2', 'prompt': 'describe_scene'}
     config['modeling'] = {'model': 'qwen3-0.6b'}
     model_backend = MagicMock()
-    model_backend.generate.return_value = '# World Model\n\n## Entities\n\n- pixel_1: Red pixel'
+    model_backend.generate.side_effect = lambda prompt, **settings: (
+        '{"action":"look_left"}' if 'schema' in settings else '# World Model\n\n## Entities\n\n- pixel_1: Red pixel')
+    def execute(node, executor, action, record, timeout):
+        record.update(goal_accepted=True, result_status=4, success=True)
+    monkeypatch.setattr(module, 'execute_action', execute)
     constructor = MagicMock(return_value=model_backend)
     monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend', constructor)
     if configured is not None:
@@ -102,11 +106,11 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     assert len(list((directory / 'observations' / 'vision').iterdir())) == expected
     assert len(list((directory / 'state').iterdir())) == expected
     constructor.assert_called_once()
-    assert model_backend.generate.call_count == expected
+    assert model_backend.generate.call_count == expected * 2
     assert len(list((directory / 'world_model').glob('iteration_*.md'))) == expected
     assert len(commands) == 1
     assert f'world_model_dir:={directory}' in commands[0]
     assert f'run_id:={metadata["run_id"]}' in commands[0]
     assert 'participants_only:=true' in commands[0]
     for cycle in range(1, expected + 1):
-        assert json.loads((directory / f'state/cycle_{cycle:06d}/act.json').read_text())['status'] == 'placeholder'
+        assert json.loads((directory / f'state/cycle_{cycle:06d}/act.json').read_text())['status'] == 'succeeded'

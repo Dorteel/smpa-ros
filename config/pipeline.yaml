@@ -3,5 +3,10 @@ model: smolvlm2
 prompt: describe_scene
 modeling:
   model: qwen3-0.6b
+goal: |
+  # Goal
+
+  Explore the environment to discover previously unobserved objects and relationships.
 execution:
   max_cycles: 1
+  action_timeout: 30.0

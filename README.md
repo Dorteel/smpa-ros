@@ -16,20 +16,48 @@ execution:
 
 The default is one cycle. Each camera cycle calls the existing Sense service;
 each speech cycle calls the existing Listen action. `service:=all` collects both.
-Model uses a local LLM to create a complete Markdown world-model snapshot each
-cycle. The first prompt has an empty previous representation; subsequent prompts
-include the previous snapshot and the latest Sense observations. Plan and Act
-retain their placeholder behavior, passing the latest representation through.
-Python callers may supply existing backend instances to `run(model=...,
-plan=..., act=...)`. The CLI configures Model from the existing model registry.
-`demo:=true` reuses the existing "I heard ..." Talk behavior in Act, once per
-cycle. The standalone `listener_talker` demonstration remains available.
+Model uses a local LLM to create a complete Markdown snapshot each cycle. Plan
+reads that snapshot and the run's `goal.md`, then uses the same loaded local text
+model with JSON Schema-constrained generation to choose exactly one action:
+`look_left` (`/look_left`) or `look_right` (`/look_right`). Act sends an empty goal
+to `simulation_actions/action/Look` and waits for ROS status SUCCEEDED before the
+next cycle captures a fresh image. Rejected, aborted, unavailable, or timed-out
+actions stop the run; active goals are canceled on early exit when possible.
+Cancellation failures are recorded rather than reported as success.
+
+The goal is initialized from `goal` in `pipeline.yaml`; it is never autonomously
+modified. Plan reads the file each cycle, so an explicit user edit is observable.
+`execution.action_timeout` (default 30 seconds) bounds server, acceptance, result,
+and cancellation waits separately. The planner uses the registry entry selected
+by `modeling.model`, reusing Model's loaded backend. The existing standalone text
+helper and speech demonstration remain available. With speech enabled,
+`demo:=true` also echoes the transcript after the selected Look action succeeds.
+
+Planning reuses `letssee_llm.structured` and its existing Outlines token masks;
+it does not implement a second schema framework. Source the workspace containing
+that utility and make its optional constrained-decoding dependencies available to
+the selected Python interpreter. Missing support produces a clear Plan error,
+with no unrestricted fallback and no ROS action dispatch. The current Ollama
+backend is not configured for this constrained path and fails explicitly if
+selected for planning. The simulation must supply `simulation_actions` and both
+action servers. Verify the interface in the simulation environment:
+
+```bash
+ros2 interface show simulation_actions/action/Look
+ros2 action list -t
+```
+
+The singular `action` namespace is used by the Python import. That interface is
+not installed in this checkout's test environment; genuine simulation motion has
+not been verified here. Tests use remapped endpoints and substitute a generated
+existing test interface for mocked Look servers.
 
 Build and launch from the repository root (model dependencies below still apply):
 
 ```bash
 cd /home/dorteel/ros2_ws/src/smpa-ros
 source /opt/ros/jazzy/setup.bash
+source /home/dorteel/ros2_ws/install/setup.bash
 colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
 source install/setup.bash
 
@@ -55,8 +83,9 @@ and audio lock arguments remain supported. Run names are sanitized and retained 
 memory/
 ├── legacy/                    # historical observations, unchanged
 └── runs/
-    └── <uuid>/
+    └── <timestamp>_<run_name>_<uuid>/
         ├── metadata.yaml      # lifecycle, models, configuration, cycle count
+        ├── goal.md            # goal shared by every cycle
         ├── observations/
         │   ├── vision/        # timestamped scene descriptions
         │   └── audio/         # captured WAV + transcript folders
@@ -75,7 +104,7 @@ Memory preserves evidence and generated representations; the world model is the
 LLM's evolving environment representation. Existing `world_model/` storage was
 renamed once to `memory/`; historical files, run names/IDs, metadata contents, and
 internal layouts remain unchanged. There is no runtime migration code. New runs
-use UUID directory names and the layout above.
+use timestamped names (default `smpa`) and UUIDs; historical runs are never renamed.
 
 Model selection uses existing configuration and registry files:
 
@@ -112,10 +141,16 @@ iterations cannot be overwritten. A failed/empty generation records an error in
 `model.json`, stops the run, and creates no successful snapshot for that cycle.
 The record identifies the prompt, source observation files, previous iteration,
 output iteration, model identifier, and cycle. Plan receives the Markdown itself.
+`plan.json` records the goal, prompt, model identifier, available actions, and
+validated selection. `act.json` records the real request, acceptance, numeric ROS
+result status, cancellation details if needed, and execution success or error.
+These action results are kept separate from LLM predictions.
 
 ```bash
 find memory/runs -path '*/world_model/iteration_*.md' -print -exec cat {} \;
 find memory/runs -path '*/state/cycle_*/model.json' -print -exec cat {} \;
+find memory/runs -name plan.json -print -exec cat {} \;
+find memory/runs -name act.json -print -exec cat {} \;
 ```
 
 
@@ -419,7 +454,7 @@ The camera must publish `sensor_msgs/msg/Image`. The loop manages the Sense serv
 as a separate process, using `--python` (default: the loop's interpreter). Run with
 an interpreter providing the optional inference dependencies; runtime model
 loading remains local-only. No actual camera or VLM inference is performed by the
-model-free tests. World models are Markdown snapshots; robot motion execution is not implemented.
+model-free tests. World models are Markdown snapshots; selected Look actions execute through the simulation action servers.
 
 ### Registered model downloads
 

@@ -1,3 +1,11 @@
-Propose a short action plan from this world state. If a goal or required information is missing, request clarification.
+Plan the next action to take, given the current world model, the goal, and the available actions. Select exactly one action from the provided list.
+Return a JSON object containing only the action property.
+
+Goal:
+{goal}
+
+Available actions:
+{available_actions}
+
 World state:
 {input}

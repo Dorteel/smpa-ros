@@ -19,6 +19,15 @@ import yaml
 
 from smpa_ros.backends.base import Backend
 
+DEFAULT_GOAL = '# Goal\n\nExplore the environment to discover previously unobserved objects and relationships.\n'
+AVAILABLE_ACTIONS = {
+    'look_left': {'endpoint': '/look_left', 'type': 'simulation_actions/action/Look'},
+    'look_right': {'endpoint': '/look_right', 'type': 'simulation_actions/action/Look'},
+}
+ACTION_SCHEMA = {'type': 'object', 'properties': {'action': {'type': 'string',
+                 'enum': list(AVAILABLE_ACTIONS)}}, 'required': ['action'], 'additionalProperties': False}
+
+
 def assigned_run(directory, run_id=''):
     if not directory:
         raise ValueError('Missing world_model_dir: launch llm.launch.py or supply an existing run directory')
@@ -49,16 +58,20 @@ def write_metadata(directory, metadata):
             pending.unlink(missing_ok=True)
 
 
-def initialize_run(root, run_name='session', *, models=None, configuration=None):
+def initialize_run(root, run_name='smpa', *, models=None, configuration=None, goal=DEFAULT_GOAL):
     name = re.sub(r'[^a-zA-Z0-9_-]+', '_', run_name).strip('_-')[:80]
     if not name:
         raise ValueError('run_name must contain a letter, digit, underscore, or hyphen')
+    if not isinstance(goal, str) or not goal.strip():
+        raise ValueError('Run goal must be nonempty Markdown')
     identity = str(uuid4())
     started = datetime.now().astimezone()
-    directory = Path(root).resolve() / 'runs' / identity
+    directory = Path(root).resolve() / 'runs' / f'{started:%Y-%m-%d_%H%M%S_%f%z}_{name}_{identity}'
     directory.mkdir(parents=True, exist_ok=False)
     for category in ('observations/vision', 'observations/audio', 'world_model', 'state'):
         (directory / category).mkdir(parents=True)
+    with (directory / 'goal.md').open('x', encoding='utf-8') as output:
+        output.write(goal)
     metadata = dict(run_id=identity, run_name=name, started_at=started.isoformat(),
                     completed_at=None, status='running', completed_cycles=0,
                     models=models or {}, configuration=configuration or {})
@@ -74,25 +87,25 @@ def finalize_run(directory, metadata, status):
         write_metadata(directory, metadata)
 
 
-def stage_prompt(name, value, previous_world_model=''):
+def stage_prompt(name, value, previous_world_model='', goal='', available_actions=''):
     component = files('smpa_ros').joinpath(name)
-    prompt = component.joinpath('prompts/default.txt').read_text(encoding='utf-8').format(input=value, previous_world_model=previous_world_model)
+    prompt = component.joinpath('prompts/default.txt').read_text(encoding='utf-8').format(input=value, previous_world_model=previous_world_model, goal=goal, available_actions=available_actions)
     settings = json.loads(component.joinpath('models/default.json').read_text(encoding='utf-8'))
     return prompt, settings
 
 
-def run(max_cycles=1, *, root=None, run_name='session', sense,
+def run(max_cycles=1, *, root=None, run_name='smpa', sense,
         model=None, plan=None, act=None, models=None, configuration=None,
-        setup=None, teardown=None, model_identifier=None):
+        setup=None, teardown=None, model_identifier=None, plan_identifier=None, goal=DEFAULT_GOAL):
     """Own the entire session. Each sense callback receives its run and cycle number.
 
-    Model creates a full immutable snapshot; Plan and Act retain their placeholders.
+    Model creates a snapshot; Plan chooses one constrained action; Act waits for its result.
     Results are committed after each stage; the count advances only after Act succeeds.
     """
     if isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1:
         raise ValueError('max_cycles must be a positive integer')
     directory, metadata = initialize_run(root or Path.cwd() / 'memory', run_name,
-                                         models=models, configuration=configuration)
+                                         models=models, configuration=configuration, goal=goal)
     metadata['max_cycles'] = max_cycles
     status = 'failed'
     try:
@@ -147,16 +160,53 @@ def run(max_cycles=1, *, root=None, run_name='session', sense,
                 raise
             with (destination / 'model.json').open('x', encoding='utf-8') as output:
                 json.dump(record, output, ensure_ascii=False, indent=2)
-            value = world_model
-            for name, backend in [('plan', plan), ('act', act)]:
-                prompt, settings = stage_prompt(name, value)
-                generate = getattr(backend, 'generate', backend)
-                result = generate(prompt, **settings) if backend is not None else value
-                record = dict(stage=name, cycle=cycle, status='generated' if backend is not None else 'placeholder',
-                              input=value, prompt=prompt, output=result)
-                with (destination / f'{name}.json').open('x', encoding='utf-8') as output:
+            goal_text = (directory / 'goal.md').read_text(encoding='utf-8')
+            prompt, settings = stage_prompt('plan', world_model, goal=goal_text,
+                                            available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2))
+            record = dict(stage='plan', cycle=cycle, input=world_model, goal=goal_text,
+                          model_identifier=plan_identifier or model_identifier or 'configured planner',
+                          prompt=prompt, available_actions=AVAILABLE_ACTIONS, selected_action=None)
+            try:
+                if plan is None:
+                    raise ValueError('Plan stage requires a schema-constrained LLM backend')
+                generate = getattr(plan, 'generate', plan)
+                text = generate(prompt, **settings, schema=ACTION_SCHEMA)
+                if not isinstance(text, str):
+                    raise ValueError('Planner must return a JSON string')
+                record['output'] = text
+                decision = json.loads(text)
+                if (not isinstance(decision, dict) or set(decision) != {'action'}
+                        or not isinstance(decision['action'], str) or decision['action'] not in AVAILABLE_ACTIONS):
+                    raise ValueError('Planner must select exactly one supported action: look_left or look_right')
+                record.update(status='generated', selected_action=decision['action'])
+            except (Exception, KeyboardInterrupt) as error:
+                record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                              error=f'{type(error).__name__}: {error}')
+                with (destination / 'plan.json').open('x', encoding='utf-8') as output:
                     json.dump(record, output, ensure_ascii=False, indent=2)
-                value = result
+                raise
+            with (destination / 'plan.json').open('x', encoding='utf-8') as output:
+                json.dump(record, output, ensure_ascii=False, indent=2)
+            action = decision['action']
+            record = dict(stage='act', cycle=cycle, requested_action=action,
+                          endpoint=AVAILABLE_ACTIONS[action]['endpoint'], goal={}, goal_accepted=None,
+                          result_status=None, success=False)
+            try:
+                if act is None:
+                    raise ValueError('Act stage requires a ROS action executor')
+                act(action, record)
+                if (record['goal_accepted'] is not True or record['result_status'] != 4
+                        or record['success'] is not True):
+                    raise RuntimeError('Action did not complete successfully')
+                record['status'] = 'succeeded'
+            except (Exception, KeyboardInterrupt) as error:
+                record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                              success=False, error=f'{type(error).__name__}: {error}')
+                with (destination / 'act.json').open('x', encoding='utf-8') as output:
+                    json.dump(record, output, ensure_ascii=False, indent=2)
+                raise
+            with (destination / 'act.json').open('x', encoding='utf-8') as output:
+                json.dump(record, output, ensure_ascii=False, indent=2)
             metadata['completed_cycles'] += 1
             write_metadata(directory, metadata)
         status = 'completed'
@@ -256,6 +306,62 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         node.destroy_client(client)
 
 
+def execute_action(node, executor, action, record, timeout):
+    """Send one empty Look goal, await its terminal result, and cancel on early exit."""
+    from action_msgs.msg import GoalStatus
+    from rclpy.action import ActionClient
+    if action not in AVAILABLE_ACTIONS:
+        raise ValueError(f'Unsupported action: {action}')
+    try:
+        from simulation_actions.action import Look
+    except ImportError as error:
+        raise RuntimeError('simulation_actions/action/Look is unavailable; source the simulation workspace') from error
+    client = ActionClient(node, Look, AVAILABLE_ACTIONS[action]['endpoint'])
+    pending = handle = None
+    result_future = None
+    terminal = False
+
+    def wait(future, phase):
+        executor.spin_until_future_complete(future, timeout_sec=timeout)
+        if not future.done():
+            raise TimeoutError(f'{action}: timeout waiting for {phase}')
+        return future.result()
+
+    try:
+        if not client.wait_for_server(timeout_sec=timeout):
+            raise TimeoutError(f'{action}: action server unavailable')
+        pending = client.send_goal_async(Look.Goal())
+        handle = wait(pending, 'goal acceptance')
+        record['goal_accepted'] = handle.accepted
+        if not handle.accepted:
+            raise RuntimeError(f'{action}: goal rejected')
+        result_future = handle.get_result_async()
+        response = wait(result_future, 'action result')
+        terminal = True
+        record.update(result_status=response.status, success=response.status == GoalStatus.STATUS_SUCCEEDED)
+        if not record['success']:
+            raise RuntimeError(f'{action}: unsuccessful ROS goal status {response.status}')
+    finally:
+        try:
+            if pending is not None and not terminal:
+                try:
+                    if handle is None:
+                        handle = wait(pending, 'late goal acceptance before cancellation')
+                        record['goal_accepted'] = handle.accepted
+                    if handle.accepted:
+                        canceled = wait(handle.cancel_goal_async(), 'cancellation response')
+                        record['cancel_requested'] = bool(canceled.goals_canceling)
+                        if result_future is None:
+                            result_future = handle.get_result_async()
+                        response = wait(result_future, 'terminal result after cancellation')
+                        record['cancellation_result_status'] = response.status
+                except Exception as error:
+                    record['cancellation_error'] = str(error)
+                    node.get_logger().error(f'{action}: could not confirm goal termination: {error}')
+        finally:
+            client.destroy()
+
+
 def main(args=None) -> None:
     from ament_index_python.packages import get_package_share_directory
     import rclpy
@@ -267,7 +373,7 @@ def main(args=None) -> None:
     parser.add_argument('--config', type=Path, default=Path(
         get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml')
     parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'memory')
-    parser.add_argument('--run-name', default='session')
+    parser.add_argument('--run-name', default='smpa')
     parser.add_argument('--max-cycles', type=int, default=None)
     parser.add_argument('--service', choices=['vision', 'speech', 'all'], default='vision')
     parser.add_argument('--python', default=sys.executable)
@@ -282,6 +388,10 @@ def main(args=None) -> None:
     limit = options.max_cycles if options.max_cycles is not None else config.get('execution', {}).get('max_cycles', 1)
     if options.timeout <= 0:
         parser.error('--timeout must be positive')
+    import math
+    action_timeout = config.get('execution', {}).get('action_timeout', 30.0)
+    if not isinstance(action_timeout, (int, float)) or isinstance(action_timeout, bool) or not math.isfinite(action_timeout) or action_timeout <= 0:
+        parser.error('execution.action_timeout must be finite and positive')
     participant = None
     camera_node = executor = speech = None
     last_transcript = ''
@@ -309,10 +419,9 @@ def main(args=None) -> None:
                          '-r', f'/speech/talk:={namespace}/speech/talk',
                          '-p', f'world_model_dir:={directory}', '-p', f'run_id:={identity}'],
                    signal_handler_options=SignalHandlerOptions.NO)
-        if options.service in ('vision', 'all'):
-            camera_node = rclpy.create_node('smpa_loop')
-            executor = SingleThreadedExecutor()
-            executor.add_node(camera_node)
+        camera_node = rclpy.create_node('smpa_loop')
+        executor = SingleThreadedExecutor()
+        executor.add_node(camera_node)
         if options.service in ('speech', 'all'):
             from smpa_ros.speech.demo import ListenerTalker
             speech = ListenerTalker()
@@ -322,7 +431,7 @@ def main(args=None) -> None:
         if participant.poll() is not None:
             raise RuntimeError('Participating ROS processes exited')
         outputs = {}
-        if camera_node is not None:
+        if options.service in ('vision', 'all'):
             outputs['vision'] = capture_once(camera_node, config, directory, executor, options.timeout).read_text()
         if speech is not None:
             from smpa_ros_interfaces.action import Listen
@@ -331,10 +440,11 @@ def main(args=None) -> None:
             outputs['speech'] = result.transcription
         return json.dumps(outputs, ensure_ascii=False)
 
-    def speak(prompt, *, max_new_tokens):
-        from smpa_ros_interfaces.action import Talk
-        speech.perform(speech.talker, Talk.Goal(text=f'I heard {last_transcript}'))
-        return f'I heard {last_transcript}'
+    def act(action, record):
+        execute_action(camera_node, executor, action, record, action_timeout)
+        if options.demo == 'true' and speech is not None:
+            from smpa_ros_interfaces.action import Talk
+            speech.perform(speech.talker, Talk.Goal(text=f'I heard {last_transcript}'))
 
     def teardown():
         try:
@@ -365,7 +475,7 @@ def main(args=None) -> None:
     selected = registry_entries[selected_name]
     modeling_backend = None
 
-    def model(prompt, *, max_new_tokens):
+    def model(prompt, *, max_new_tokens, schema=None):
         nonlocal modeling_backend
         if modeling_backend is None:
             if selected['backend'] == 'transformers':
@@ -377,6 +487,10 @@ def main(args=None) -> None:
                 modeling_backend = OllamaBackend(selected['model_id'])
             else:
                 raise ValueError(f"Unsupported modeling backend: {selected['backend']}")
+        if schema is not None:
+            if selected['backend'] != 'transformers':
+                raise RuntimeError('Selected backend does not provide the required schema-constrained planning')
+            return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, schema=schema)
         return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens)
 
     models = {'model': dict(selected, name=selected_name)}
@@ -387,7 +501,7 @@ def main(args=None) -> None:
     try:
         run(limit, root=options.world_model_root, run_name=options.run_name, sense=sense, model=model,
             model_identifier=selected['model_id'],
-            act=speak if options.demo == 'true' and options.service in ('speech', 'all') else None,
+            plan=model, act=act, plan_identifier=selected['model_id'], goal=config.get('goal', DEFAULT_GOAL),
             models=models, configuration=dict(pipeline=config, service=options.service, max_cycles=limit),
             setup=setup, teardown=teardown)
     except KeyboardInterrupt:

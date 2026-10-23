@@ -7,8 +7,22 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from smpa_ros.loop import assigned_run, initialize_run, finalize_run, run
+from smpa_ros.loop import assigned_run, initialize_run, finalize_run, run as run_session
 
+
+
+def planned_action(prompt, **settings):
+    return '{"action": "look_left"}'
+
+
+def completed_action(action, record):
+    record.update(goal_accepted=True, result_status=4, success=True)
+
+
+def run(*args, **kwargs):
+    kwargs.setdefault('plan', planned_action)
+    kwargs.setdefault('act', completed_action)
+    return run_session(*args, **kwargs)
 
 
 def model_snapshot(prompt, **settings):
@@ -59,13 +73,17 @@ def test_sequential_cycles_share_run(tmp_path, limit):
         result = MagicMock()
         def generate(prompt, **kwargs):
             calls.append(name)
-            return f'{name}: {prompt}'
+            return planned_action(prompt) if name == 'plan' else f'{name}: {prompt}'
         result.generate.side_effect = generate
         return result
 
+    def act(action, record):
+        calls.append('act')
+        completed_action(action, record)
+
     options = {} if limit == 1 else {'max_cycles': limit}
     directory = run(root=tmp_path, sense=sense, model=backend('model'), plan=backend('plan'),
-                    act=backend('act'), **options)
+                    act=act, **options)
     assert calls == ['sense', 'model', 'plan', 'act'] * limit
     assert set(assignments) == {directory}
     assert list((tmp_path / 'runs').iterdir()) == [directory]
@@ -88,17 +106,22 @@ def test_failed_stage_stops_and_preserves_results(tmp_path, stage):
             calls.append(name)
             if name == stage:
                 raise RuntimeError('failed stage')
-            return name
+            return planned_action(prompt) if name == 'plan' else name
         result.generate.side_effect = generate
         return result
+    def act(action, record):
+        calls.append('act')
+        if stage == 'act':
+            raise RuntimeError('failed stage')
+        completed_action(action, record)
     with pytest.raises(RuntimeError, match='failed stage'):
-        run(3, root=tmp_path, sense=sense, **{name: backend(name) for name in ('model', 'plan', 'act')})
+        run(3, root=tmp_path, sense=sense, model=backend('model'), plan=backend('plan'), act=act)
     names = ['sense', 'model', 'plan', 'act']
     assert calls == names[:names.index(stage) + 1]
     directory, = (tmp_path / 'runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['status'] == 'failed' and metadata['completed_cycles'] == 0
-    assert len(list((directory / 'state').glob('cycle_*/*.json'))) == names.index(stage) + (stage == 'model')
+    assert len(list((directory / 'state').glob('cycle_*/*.json'))) == names.index(stage) + (stage != 'sense')
 
 
 def test_interruption_retains_completed_cycles(tmp_path):
@@ -114,7 +137,7 @@ def test_interruption_retains_completed_cycles(tmp_path):
     assert metadata['status'] == 'interrupted' and metadata['completed_cycles'] == 1
     assert len(list((directory / 'observations' / 'vision').iterdir())) == 2
     record = json.loads((directory / 'state/cycle_000001/act.json').read_text())
-    assert record['status'] == 'placeholder'
+    assert record['status'] == 'succeeded'
 
 
 @pytest.mark.parametrize('limit', [0, -1, True, 1.5])
@@ -155,7 +178,9 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
         options = kwargs['arguments']
         root = options[options.index('--world-model-root') + 1]
         script = ('from smpa_ros.loop import run; '
-                  f'run(3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model")')
+                  f'run(3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model", '
+                  f'plan=lambda prompt, **kw: ' + repr('{"action":"look_left"}') + ', '
+                  'act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True))')
         return ExecuteProcess(cmd=[sys.executable, '-c', script], on_exit=kwargs['on_exit'])
     monkeypatch.setattr(launch_ros.actions, 'Node', fake_node)
     if entrypoint == 'llm':
@@ -230,16 +255,16 @@ def test_participant_launcher_consumes_one_assignment(assigned_test_run, monkeyp
 
 def test_act_operation_runs_before_cycle_completion(tmp_path):
     calls = []
-    def act(prompt, *, max_new_tokens):
+    def act(action, record):
         directory, = (tmp_path / 'runs').iterdir()
         metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
         assert metadata['completed_cycles'] == 0
-        calls.append(prompt)
-        return 'action result'
+        calls.append(action)
+        completed_action(action, record)
     directory = run(root=tmp_path, sense=lambda directory, cycle: 'observed', model=model_snapshot, act=act)
-    assert len(calls) == 1 and 'observed' in calls[0]
+    assert calls == ['look_left']
     record = json.loads((directory / 'state/cycle_000001/act.json').read_text())
-    assert record['status'] == 'generated' and record['output'] == 'action result'
+    assert record['status'] == 'succeeded' and record['success'] is True
 
 
 def test_model_iterations_chain_and_feed_plan(tmp_path):
@@ -248,7 +273,7 @@ def test_model_iterations_chain_and_feed_plan(tmp_path):
     backend = MagicMock()
     backend.generate.side_effect = snapshots
     plan = MagicMock()
-    plan.generate.return_value = 'proposed plan'
+    plan.generate.return_value = planned_action('')
     def sense(directory, cycle):
         (directory / 'observations/vision' / f'{cycle}.md').write_text(f'observation {cycle}')
         if cycle == 2:
@@ -274,7 +299,7 @@ def test_model_failure_preserves_previous_snapshot(tmp_path, failure):
     backend = MagicMock()
     backend.generate.side_effect = ['# World Model\n\nFirst snapshot', failure]
     plan = MagicMock()
-    plan.generate.return_value = 'plan'
+    plan.generate.return_value = planned_action('')
     with pytest.raises((RuntimeError, ValueError)):
         run(2, root=tmp_path, sense=lambda directory, cycle: f'observation {cycle}', model=backend, plan=plan)
     directory, = (tmp_path / 'runs').iterdir()
@@ -303,7 +328,8 @@ def test_default_memory_layout(tmp_path, monkeypatch):
     directory = run(sense=lambda directory, cycle: 'observation', model=model_snapshot)
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert directory.parent == tmp_path / 'memory/runs'
-    assert directory.name == metadata['run_id']
+    assert directory.name.endswith('_smpa_' + metadata['run_id'])
+    assert directory.name[:10] == metadata['started_at'][:10]
     assert (directory / 'observations/vision').is_dir()
     assert (directory / 'observations/audio').is_dir()
     assert (directory / 'world_model/iteration_001.md').is_file()
@@ -315,3 +341,125 @@ def test_missing_model_backend_fails_explicitly(tmp_path):
     directory, = (tmp_path / 'runs').iterdir()
     assert not list((directory / 'world_model').glob('iteration_*.md'))
     assert json.loads((directory / 'state/cycle_000001/model.json').read_text())['status'] == 'failed'
+
+
+@pytest.mark.parametrize('text', ['{"action":"drive"}', '{"action":"look_left","extra":true}', '{}', 'not JSON', 42])
+def test_invalid_planner_decision_never_executes(tmp_path, text):
+    action = MagicMock()
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        run(root=tmp_path, sense=lambda directory, cycle: 'seen', model=model_snapshot,
+            plan=lambda prompt, **settings: text, act=action)
+    action.assert_not_called()
+    directory, = (tmp_path / 'runs').iterdir()
+    assert json.loads((directory / 'state/cycle_000001/plan.json').read_text())['status'] == 'failed'
+    assert (directory / 'world_model/iteration_001.md').is_file()
+    assert not (directory / 'state/cycle_000001/act.json').exists()
+    assert yaml.safe_load((directory / 'metadata.yaml').read_text())['status'] == 'failed'
+
+
+def test_goal_file_is_the_planning_source(tmp_path):
+    goal = '# Goal\n\nInspect the left side.'
+    planned = MagicMock()
+    planned.generate.return_value = '{"action":"look_left"}'
+    directory = run(root=tmp_path, run_name='first test', goal=goal,
+                    sense=lambda directory, cycle: 'seen', model=model_snapshot, plan=planned)
+    assert (directory / 'goal.md').read_text() == goal
+    assert '_first_test_' in directory.name
+    assert directory.name[:10] == yaml.safe_load((directory / 'metadata.yaml').read_text())['started_at'][:10]
+    record = json.loads((directory / 'state/cycle_000001/plan.json').read_text())
+    assert record['goal'] == goal
+    assert goal in record['prompt']
+    assert 'look_left' in record['prompt'] and 'look_right' in record['prompt']
+    from smpa_ros.loop import ACTION_SCHEMA
+    assert planned.generate.call_args.kwargs['schema'] == ACTION_SCHEMA
+
+
+@pytest.mark.parametrize('mode', ['success', 'rejected', 'aborted', 'timeout', 'unavailable'])
+def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
+    """Real rclpy round trip; substitute Listen for unavailable simulation Look and remap endpoints."""
+    import sys
+    from types import ModuleType
+    from threading import Thread, Event
+    from time import sleep
+    import rclpy
+    from rclpy.action import ActionServer, CancelResponse, GoalResponse
+    from rclpy.callback_groups import ReentrantCallbackGroup
+    from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
+    from smpa_ros_interfaces.action import Listen
+    from smpa_ros.loop import execute_action
+    parent = ModuleType('simulation_actions')
+    interface = ModuleType('simulation_actions.action')
+    interface.Look = Listen
+    monkeypatch.setitem(sys.modules, 'simulation_actions', parent)
+    monkeypatch.setitem(sys.modules, 'simulation_actions.action', interface)
+    rclpy.init(args=['--ros-args', '-r', '/look_left:=/test_smpa/look_left',
+                     '-r', '/look_right:=/test_smpa/look_right'])
+    server = rclpy.create_node('test_look_server')
+    client = rclpy.create_node('test_look_client')
+    server_executor = MultiThreadedExecutor(num_threads=3)
+    client_executor = SingleThreadedExecutor()
+    server_executor.add_node(server)
+    client_executor.add_node(client)
+    finished = Event()
+    accepted = []
+    def execute(handle):
+        accepted.append(handle.request)
+        finished.clear()
+        if mode == 'timeout':
+            while not handle.is_cancel_requested:
+                sleep(0.005)
+            handle.canceled()
+        elif mode == 'aborted':
+            handle.abort()
+        else:
+            sleep(0.02)
+            handle.succeed()
+        finished.set()
+        return Listen.Result(success=mode == 'success')
+    servers = []
+    if mode != 'unavailable':
+        for endpoint in ('/look_left', '/look_right'):
+            servers.append(ActionServer(server, Listen, endpoint, execute,
+                goal_callback=lambda request: GoalResponse.REJECT if mode == 'rejected' else GoalResponse.ACCEPT,
+                cancel_callback=lambda handle: CancelResponse.ACCEPT, callback_group=ReentrantCallbackGroup()))
+    thread = Thread(target=server_executor.spin, daemon=True)
+    thread.start()
+    def sense(directory, cycle):
+        if cycle > 1:
+            assert finished.is_set(), 'Next Sense began before previous action completed'
+        return f'seen {cycle}'
+    choices = iter(['look_left', 'look_right', 'look_left'])
+    def plan(prompt, **settings):
+        return json.dumps({'action': next(choices)})
+    def act(action, record):
+        execute_action(client, client_executor, action, record, 0.3 if mode in ('timeout', 'unavailable') else 3.0)
+    try:
+        if mode == 'success':
+            directory = run(3, root=tmp_path, sense=sense, model=model_snapshot, plan=plan, act=act)
+            assert len(accepted) == 3
+            assert yaml.safe_load((directory / 'metadata.yaml').read_text())['completed_cycles'] == 3
+            assert json.loads((directory / 'state/cycle_000002/act.json').read_text())['requested_action'] == 'look_right'
+        else:
+            with pytest.raises((RuntimeError, TimeoutError)):
+                run(3, root=tmp_path, sense=sense, model=model_snapshot, plan=plan, act=act)
+            directory, = (tmp_path / 'runs').iterdir()
+            metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+            assert metadata['completed_cycles'] == 0 and metadata['status'] == 'failed'
+            record = json.loads((directory / 'state/cycle_000001/act.json').read_text())
+            assert record['success'] is False and record['error']
+            assert (directory / 'world_model/iteration_001.md').is_file()
+            if mode == 'rejected':
+                assert record['goal_accepted'] is False
+            if mode == 'aborted':
+                assert record['result_status'] == 6
+            if mode == 'timeout':
+                assert record['cancel_requested'] is True and record['cancellation_result_status'] == 5
+    finally:
+        client_executor.shutdown()
+        server_executor.shutdown()
+        thread.join(timeout=5)
+        for action_server in servers:
+            action_server.destroy()
+        server.destroy_node()
+        client.destroy_node()
+        rclpy.shutdown()
