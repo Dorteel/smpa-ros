@@ -1,5 +1,191 @@
 # Minimal robot cognition
 
+## Quick start: Ubuntu 24.04 / ROS 2 Jazzy
+
+Use Ubuntu 24.04, Python 3.12, and [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html).
+After installing ROS, install the system build tools explicitly:
+
+```bash
+sudo apt update
+sudo apt install git build-essential python3-venv python3-pip \
+  python3-colcon-common-extensions libportaudio2 \
+  ros-jazzy-rclpy ros-jazzy-sensor-msgs ros-jazzy-action-msgs \
+  ros-jazzy-launch-ros ros-jazzy-ament-cmake ros-jazzy-rosidl-default-generators
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+git clone https://github.com/Dorteel/smpa-ros.git
+cd smpa-ros
+./install.sh
+./run_smpa.sh
+```
+
+The scripts resolve the workspace from `<workspace>/src/<checkout>`; no username
+or workspace name is hardcoded. The resulting layout is:
+
+```text
+ros2_ws/
+├── build/                     # Incremental compilation
+├── install/                   # ROS package installation and setup.bash
+├── log/                       # Colcon logs
+└── src/smpa-ros/
+    ├── .venv/                 # Python environment with system ROS access
+    ├── models/                # Existing model layout and download report
+    └── memory/                # Execution records
+```
+
+`install.sh` creates `.venv` with `--system-site-packages`, installs ordinary
+Python dependencies using its pip, reuses `requirements-speech.txt` and the
+vision requirements documented below, downloads the selected weights, and builds
+both ROS packages from the workspace root. Pillow, PyYAML, and pytest are not
+required in system Python; pytest is only needed if you choose to run tests.
+Already satisfied dependencies and verified weights are reused. The script never
+installs system packages or edits shell configuration. Existing dependency ranges
+are retained; this is not a fully version-locked environment.
+
+`run_smpa.sh` only sources Jazzy and the workspace overlay, checks the installed
+SMPA packages and virtual environment, and launches `llm.launch.py`. It never
+builds, installs dependencies, or downloads models. Rerun `./install.sh` after
+changing code or installed assets. Old repository-level `build/`, `install/`, and
+`log/` directories are left untouched and are not used; start from a fresh terminal
+if you previously sourced that old overlay.
+
+### Python dependency compatibility
+
+`setup.py` is the single declaration for `setuptools>=30.3,<80`,
+`outlines==1.3.3`, and `jsonschema==4.26.0`. The setuptools upper bound matches
+colcon-core 0.21.0 and is enforced even when reinstalling into an existing `.venv`.
+The installer generates `.venv/smpa-constraints.txt` from that declaration,
+configures only `.venv/pip.conf` to use it for subsequent pip operations, and
+installs the declared dependencies. A request to upgrade setuptools beyond the
+bound fails resolution instead of silently breaking colcon. Do not override the
+constraint through pip environment variables or configuration. Rerun installation
+if the checkout moves so that the stored absolute constraint path is refreshed.
+System-wide Python packages and pip configuration are not changed.
+
+Outlines 1.3.3 selects outlines_core 0.2.14; the direct integration was verified
+with Transformers 4.57.6 and the local Qwen3-0.6B model on CPU. The existing
+Transformers range remains `>=4.57,<5`. Other transitive dependencies are not
+fully locked.
+
+```bash
+./install.sh                    # Also repairs an incompatible setuptools version
+.venv/bin/python -m pip check  # Optional global diagnostic
+.venv/bin/python -c 'from importlib.metadata import version; print(version("outlines"), version("setuptools"))'
+```
+
+Installation verifies SMPA's required imports, structured-generation APIs, and
+version constraints from the existing dependency declarations before downloads
+or compilation. It also checks the dependencies of those required packages,
+including ROS `rclpy` and colcon-core. Missing imports or incompatible versions
+in this required dependency graph stop installation with specific errors; a real
+SMPA/ROS dependency conflict must be resolved rather than bypassed.
+
+`--system-site-packages` remains enabled so ROS 2 Jazzy is accessible. Unrelated
+system packages (such as Jupyter, Flask typing stubs, or matplotlib consumers)
+are not part of SMPA's verification and do not block installation. No extra
+applications are installed merely to satisfy their dependency reports.
+`pip check` remains an optional manual diagnostic covering the entire visible
+Python environment; its global exit status is not an installation gate. If you
+run it, distinguish required-package errors from unrelated system reports, and
+retain the setuptools constraint and system ROS packages.
+
+### Models and backend prerequisites
+
+Installation reads `config/pipeline.yaml` and the existing model YAML files.
+The default vision launch always needs the configured vision model. Transformers
+text models also need local weights; Ollama text models do not, so their weights
+are not downloaded by this installer. Unsupported local model IDs or text paths
+that disagree with the downloader layout produce an error.
+
+```bash
+./install.sh --all-models       # Explicitly download the entire eleven-model library
+./install.sh                    # Reuse verified downloads and incrementally build
+.venv/bin/python scripts/download_models.py --model Qwen/Qwen3-0.6B
+```
+
+The downloader needs internet access and free space including its 5 GiB reserve.
+Sense resolves completed downloads through `models/download_report.json`, then
+falls back to the existing Hugging Face cache; runtime loading stays offline.
+Rerun installation after moving a checkout to refresh recorded paths. Speech
+weights are not part of the eleven-model library: provision Whisper/Piper as
+shown in the speech section before using `service:=speech` or `service:=all`.
+
+A successful build alone does **not** mean a full SMPA run is ready:
+
+- **Transformers planning:** installation provides Outlines 1.3.3 and
+  jsonschema 4.26.0 directly; no external planning project is needed. Plan uses
+  token-level JSON Schema constraints and validates the completed JSON response.
+  The existing loaded text model/tokenizer are reused, and CPU execution is
+  supported without CUDA. Missing dependencies, unsupported schemas, incomplete
+  JSON, or validation failures stop generation without an unrestricted fallback.
+- **Ollama:** text generation needs a running server at `http://localhost:11434`
+  with the configured model already installed (provision it using Ollama's own
+  tools). It does not need local Transformers text weights or CUDA in this
+  process. However, the existing loop explicitly rejects Ollama at constrained
+  Plan, so it cannot currently complete `run_smpa.sh`. Installation supports
+  preparing this backend and warns about that limitation. Enabling Ollama planning
+  would require Python implementation changes outside this task's scope.
+- **Vision hardware:** `vision.device: auto` selects CUDA when available and
+  otherwise CPU. Automatic precision is float16 on CUDA and float32 on CPU.
+  CPU execution does not need an NVIDIA driver or CUDA libraries; explicitly
+  requesting CUDA requires both a working driver and CUDA-enabled PyTorch.
+  The Transformers text backend also supports CPU execution.
+- **Simulation:** every full cycle, including speech-only, needs the generated
+  `simulation_actions/action/Look` interface and running `/look_left` and
+  `/look_right` servers. Vision also needs the configured image topic (default
+  `/tiago/camera/color/image_raw`). Build and source the simulation workspace and
+  start its servers before launching; these scripts do not start the simulation.
+
+Check the external prerequisites after sourcing ROS and the relevant workspaces:
+
+```bash
+.venv/bin/python -c 'from outlines import from_transformers; from outlines.backends import get_json_schema_logits_processor'
+.venv/bin/python -c 'import torch; print(torch.cuda.is_available())'
+ros2 interface show simulation_actions/action/Look
+ros2 action list -t
+ros2 topic list -t
+```
+
+### Run and troubleshoot
+
+Defaults are `service:=vision max_cycles:=1`, this repository's pipeline
+configuration, and `.venv/bin/python`. Optional launch arguments override defaults:
+
+```bash
+./run_smpa.sh
+./run_smpa.sh max_cycles:=3 run_name:=experiment_01
+./run_smpa.sh service:=speech max_cycles:=2
+./run_smpa.sh config:=/absolute/path/to/pipeline.yaml
+```
+
+Existing arguments such as `model_root`, `world_model_root`, and audio devices
+are forwarded unchanged. `model_root` controls text/speech models; vision uses
+the download report beside the pipeline's project root or in the checkout.
+
+- **Missing `.venv` or Python dependencies:** run `./install.sh`. An existing
+  virtual environment must use Python 3.12 with system-site-packages; repair or
+  move aside an incompatible environment before reinstalling.
+- **PortAudio library not found:** the declared speech dependencies need the native
+  library; install it with `sudo apt install libportaudio2`, then rerun
+  `./install.sh`. This is a real SMPA dependency failure, not an unrelated
+  system-package conflict.
+- **Missing compiled packages or launch files:** run `./install.sh`; execution
+  does not rebuild. Source any external workspace needed by planning/simulation.
+- **Stale repository overlay:** open a fresh terminal without sourcing
+  `src/smpa-ros/install/setup.bash`, then rerun installation. The scripts reject
+  detected stale overlays rather than using the wrong package installation.
+- **Missing model weights:** rerun installation and inspect
+  `models/download_report.json`; check the configured model and available disk
+  space. For Ollama, check the running server and its installed models.
+- **Planning import errors, camera/action waits, or CUDA failures:** rerun installation for Outlines dependencies or resolve the
+  corresponding simulation/CUDA prerequisites above; installation does not
+  provision drivers or running services.
+
+For optional automated checks, install pytest separately and run
+`./test.sh --unit`. These existing tests use a temporary workspace and mocked
+models/devices; they do not verify real inference or simulation movement.
+
+
 ## SMPA execution and run storage
 
 `smpa_ros/loop.py` is the single orchestrator. It creates a UUID and run directory,
@@ -33,11 +219,19 @@ by `modeling.model`, reusing Model's loaded backend. The existing standalone tex
 helper and speech demonstration remain available. With speech enabled,
 `demo:=true` also echoes the transcript after the selected Look action succeeds.
 
-Planning reuses `letssee_llm.structured` and its existing Outlines token masks;
-it does not implement a second schema framework. Source the workspace containing
-that utility and make its optional constrained-decoding dependencies available to
-the selected Python interpreter. Missing support produces a clear Plan error,
-with no unrestricted fallback and no ROS action dispatch. The current Ollama
+Planning uses Outlines 1.3.3 directly:
+[`from_transformers`](https://dottxt-ai.github.io/outlines/latest/features/models/transformers/)
+wraps the already loaded causal text model/tokenizer, and
+[`get_json_schema_logits_processor`](https://dottxt-ai.github.io/outlines/latest/api_reference/backends/)
+with the `outlines_core` backend creates a fresh token mask for each request.
+The mask is passed to the existing Transformers `generate()` call with
+`do_sample=False`; prompt/chat formatting and unconstrained generation remain
+unchanged. After decoding, `jsonschema` validates the parsed JSON against the
+original schema before the response string is returned. Truncated or invalid
+responses raise an error; no unrestricted retry or action dispatch occurs.
+This path runs on CPU and loads no duplicate model weights.
+
+The current Ollama
 backend is not configured for this constrained path and fails explicitly if
 selected for planning. The simulation must supply `simulation_actions` and both
 action servers. Verify the interface in the simulation environment:
@@ -55,11 +249,10 @@ existing test interface for mocked Look servers.
 Build and launch from the repository root (model dependencies below still apply):
 
 ```bash
-cd /home/dorteel/ros2_ws/src/smpa-ros
+cd ~/ros2_ws/src/smpa-ros
 source /opt/ros/jazzy/setup.bash
-source /home/dorteel/ros2_ws/install/setup.bash
-colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
-source install/setup.bash
+./install.sh
+source ../../install/setup.bash
 
 # One complete cycle (default limit comes from pipeline.yaml).
 ros2 launch smpa_ros llm.launch.py service:=vision run_name:=scene_experiment \
@@ -363,10 +556,11 @@ For a persistent local build:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
-source install/setup.bash
-colcon test --paths . ./smpa_ros_interfaces --packages-select smpa_ros --return-code-on-test-failure
-colcon test-result --verbose
+./install.sh
+source ../../install/setup.bash
+(cd ../.. && colcon test --paths src/smpa-ros src/smpa-ros/smpa_ros_interfaces \
+  --packages-select smpa_ros --return-code-on-test-failure)
+(cd ../.. && colcon test-result --verbose)
 ros2 run smpa_ros hello
 ```
 
@@ -380,48 +574,96 @@ ROS parameter. The central `models/` YAML files register all three requested
 models and are installed under `share/smpa_ros/models`. They contain metadata,
 not weights. Relative config names resolve there; absolute YAML paths also work.
 
-Use FP16 (`dtype:=float16`) on the single GPU `cuda:0`. Roughly 4.4 GB is needed
-for 2.2 billion FP16 parameters alone; activations, image processing, KV cache,
-and allocator overhead add memory. This is a starting choice for 8 GB, not a
-measured fit guarantee. Images are reduced proportionally to at most 512×512
-before processing and output is limited to 128 new tokens by default. Processor
-tiling can still increase memory; long prompts can exhaust VRAM. No detection,
-offloading, quantization, or automatic fallback is performed.
+Hardware settings live only in `config/pipeline.yaml`; model IDs and paths
+are unchanged. Missing settings default to `auto`:
+
+```yaml
+vision:
+  device: auto   # auto, cpu, or cuda
+  dtype: auto    # auto, float32, float16, or bfloat16
+```
+
+| Device | Automatic precision | Notes |
+| --- | --- | --- |
+| CPU | float32 | No CUDA libraries or NVIDIA driver required |
+| CUDA (`cuda:0`) | float16 | Selected automatically only when PyTorch reports CUDA available |
+
+Set `vision.device: cpu` to force CPU, or `vision.device: cuda` to require CUDA.
+Explicit CUDA fails clearly when unavailable; it never silently falls back.
+Explicit float32 works on either device. CPU float16 is rejected because of
+limited operation support and poor performance; CPU bfloat16 is accepted with a
+warning about hardware/operator support. CUDA bfloat16 requires compatible
+hardware. Image tensors use the selected floating dtype; integer token IDs and
+masks remain integer. Existing explicit dtype ROS parameters still override YAML
+defaults; standalone Sense also accepts `-p device:=cpu` or `-p device:=cuda`.
+These are Sense parameters, not new launch arguments.
+
+From the repository directory, rebuild once with the installer, then run:
+
+```bash
+./install.sh
+./run_smpa.sh                  # Automatic selection; CPU on CPU-only machines
+# With the default auto configuration, force CPU for this process:
+CUDA_VISIBLE_DEVICES="" ./run_smpa.sh
+```
+
+Alternatively set `vision.device: cpu` in the existing YAML and use
+`./run_smpa.sh` normally. For CUDA, set `vision.device: cuda` and leave the GPU
+visible. Startup prints `Loading vision model on cpu with float32` (or the
+selected CUDA combination); Sense logs the actual loaded device and dtype.
+
+On a fresh installation without an existing PyTorch package, `install.sh`
+prefers the official CPU wheel index when no working NVIDIA GPU is detected
+through `nvidia-smi`. Existing PyTorch installations are preserved, including
+CUDA builds; those can also run CPU inference. If GPU drivers are installed
+later, provision a compatible CUDA PyTorch build explicitly.
+
+The 2.2B model needs roughly 8.8 GB for float32 CPU weights or 4.4 GB for float16
+GPU weights, plus activations, image processing, KV cache, and allocator memory.
+Allow additional RAM for the text model and ROS processes. CPU inference can be
+slow, particularly for large images or long outputs; the loop's existing waits
+can time out on slow hardware. Images are reduced proportionally to at most
+512×512 before processing, with 128 output tokens by default. Processor tiling
+can still increase memory use. No quantization, model switching, or memory
+fallback is introduced.
+
+A local CPU verification with the existing SmolVLM2-2.2B weights, float32,
+two CPU threads, a 64×64 solid-red image, and 24 output tokens succeeded:
+about 98 seconds of inference and 9.84 GiB peak process RSS. These measurements
+are specific to that machine and input, not a bound for normal camera frames.
+The backend correctly described the red image; a full ROS/simulation cycle was
+not exercised by this check.
 
 The 4B registrations are alternatives, not claims that they fit 8 GB in FP16.
 Gemma requires accepting its Hugging Face license and normally uses BF16
-(`-p dtype:=bfloat16`), which requires a compatible GPU. All `vram_gb` values
+(`-p dtype:=bfloat16`), which requires appropriate hardware/operator support. All `vram_gb` values
 remain null because requirements have not been measured here.
 Model references: [SmolVLM2](https://huggingface.co/HuggingFaceTB/SmolVLM2-2.2B-Instruct),
 [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct),
 [Gemma 3](https://huggingface.co/google/gemma-3-4b-it).
 
-Build using the commands above, then install optional inference dependencies in
-an isolated environment with access to the system ROS Python packages:
+After installation, a standalone Sense server can use the existing virtual
+environment and downloaded weights (the loop normally starts it automatically).
+Supply the assigned run variables described earlier:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-python3 -m venv --system-site-packages /tmp/smpa-vlm
-source /tmp/smpa-vlm/bin/activate
-python -m pip install torch torchvision 'transformers>=4.57,<5' num2words pillow pyyaml huggingface_hub
-hf download HuggingFaceTB/SmolVLM2-2.2B-Instruct
-python -c 'from smpa_ros.sense.service import main; main()' --ros-args -p world_model_dir:="$RUN_DIR" -p run_id:="$RUN_ID" -r /sense:="$RUN_PREFIX/sense" -p model_config:=smolvlm2.yaml -p dtype:=float16
+source ../../install/setup.bash
+.venv/bin/python -c 'from smpa_ros.sense.service import main; main()' --ros-args \
+  -p world_model_dir:="$RUN_DIR" -p run_id:="$RUN_ID" -r /sense:="$RUN_PREFIX/sense" \
+  -p config:="$PWD/config/pipeline.yaml" -p device:=cpu -p dtype:=auto
 ```
 
-The explicit `hf download` populates the default cache outside the repository
-(`~/.cache/huggingface`). Runtime loading is local-only. The Python invocation
-ensures the service uses the virtual environment; with dependencies installed in
-the ROS Python environment, `ros2 run smpa_ros sense` is equivalent. No weights
-are downloaded by the service or the tests. Pin dependencies and checkpoint
-revisions for recorded experiments.
+Runtime loading is local-only and reuses the existing download report or cache;
+there is no second model download. Record dependency versions and checkpoint
+revisions for reproducible experiments.
 
 In another terminal at the repository root, send a single red pixel (valid for
 checking the request path, though not a meaningful scene):
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source install/setup.bash
+source ../../install/setup.bash
 ros2 service call "$RUN_PREFIX/sense" smpa_ros_interfaces/srv/DescribeScene "{image: {height: 1, width: 1, encoding: rgb8, is_bigendian: 0, step: 3, data: [255, 0, 0]}, prompt: ''}"
 ```
 
@@ -496,8 +738,8 @@ snapshot_download('Systran/faster-whisper-base',
 PY
 .venv/bin/python -m piper.download_voices en_US-lessac-medium --download-dir models/speech/piper
 source /opt/ros/jazzy/setup.bash
-colcon build --paths . ./smpa_ros_interfaces --packages-select smpa_ros_interfaces smpa_ros
-source install/setup.bash
+./install.sh
+source ../../install/setup.bash
 ros2 launch smpa_ros speech.launch.py python:="$PWD/.venv/bin/python"
 ```
 
@@ -510,7 +752,7 @@ In another terminal, source ROS and the same install, then run goals sequentiall
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source install/setup.bash
+source ../../install/setup.bash
 ros2 action send_goal "$RUN_PREFIX"/speech/listen smpa_ros_interfaces/action/Listen "{language: en, max_duration: 10.0}" --feedback
 ros2 action send_goal "$RUN_PREFIX"/speech/talk smpa_ros_interfaces/action/Talk "{text: 'Hello, I am ready.'}" --feedback
 ros2 run smpa_ros listener_talker --ros-args -r /speech/listen:="$RUN_PREFIX/speech/listen" -r /speech/talk:="$RUN_PREFIX/speech/talk"

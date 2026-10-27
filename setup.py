@@ -15,7 +15,7 @@ setup(
         ('share/' + package_name + '/config', ['config/pipeline.yaml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools>=30.3,<80', 'outlines==1.3.3', 'jsonschema==4.26.0'],
     zip_safe=True,
     maintainer='Mark Adamik',
     maintainer_email='maintainer@example.com',

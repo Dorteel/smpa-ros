@@ -3,7 +3,7 @@
   <name>smpa_ros</name>
   <version>0.0.1</version>
   <description>Minimal Sense–Model–Plan–Act research architecture.</description>
-  <maintainer email="maintainer@example.com">Mark Adamik</maintainer>
+  <maintainer email="dorteel@gmail.com">Mark Adamik</maintainer>
   <license>MIT</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>rclpy</exec_depend>

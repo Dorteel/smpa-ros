@@ -1,6 +1,9 @@
 camera_topic: /tiago/camera/color/image_raw
 model: smolvlm2
 prompt: describe_scene
+vision:
+  device: auto
+  dtype: auto
 modeling:
   model: qwen3-0.6b
 goal: |

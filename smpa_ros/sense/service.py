@@ -1,5 +1,6 @@
 from importlib.resources import files
 from pathlib import Path
+import json
 import signal
 from time import perf_counter
 
@@ -47,7 +48,9 @@ class SenseService(Node):
         self.declare_parameter('config', str(share / 'config/pipeline.yaml'))
         pipeline = yaml.safe_load(Path(self.get_parameter('config').value).read_text())
         self.declare_parameter('model_config', pipeline['model'] + '.yaml')
-        self.declare_parameter('dtype', 'float16')
+        vision = pipeline.get('vision', {})
+        self.declare_parameter('device', vision.get('device', 'auto'))
+        self.declare_parameter('dtype', vision.get('dtype', 'auto'))
         self.declare_parameter('max_new_tokens', 128)
         self.max_new_tokens = self.get_parameter('max_new_tokens').value
         if self.max_new_tokens <= 0:
@@ -60,18 +63,46 @@ class SenseService(Node):
             if not config_path.is_absolute():
                 config_path = Path(get_package_share_directory('smpa_ros')) / 'models' / config_path
             config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+            # The downloader report maps configured IDs to its existing local layout.
+            model_source = config['model_id']
+            pipeline_path = Path(self.get_parameter('config').value).resolve()
+            for root in (pipeline_path.parent.parent / 'models', Path.cwd() / 'models'):
+                report = root / 'download_report.json'
+                if not report.is_file():
+                    continue
+                try:
+                    records = json.loads(report.read_text())['models']
+                    for record in records:
+                        if record['repo_id'] != config['model_id'] or record['status'] != 'completed':
+                            continue
+                        directory = Path(record['local_dir'])
+                        if ((directory / 'config.json').is_file()
+                                and record.get('files')
+                                and all((directory / name).is_file()
+                                        and (directory / name).stat().st_size == details['size']
+                                        for name, details in record['files'].items())):
+                            model_source = str(directory)
+                            break
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    self.get_logger().warning(f'Cannot use model download report {report}: {error}')
+                if model_source != config['model_id']:
+                    break
             self.get_logger().info(
                 f"Selected model: {config['model_id']}; backend: TransformersVLM; "
-                f"dtype: {self.get_parameter('dtype').value}",
+                f"device: {self.get_parameter('device').value}; dtype: {self.get_parameter('dtype').value}",
             )
-            self.get_logger().info('Loading model weights from the local cache')
+            self.get_logger().info(f'Loading model weights from {model_source} (local files only)')
             started = perf_counter()
             try:
-                backend = TransformersVLM(config['model_id'], self.get_parameter('dtype').value)
+                backend = TransformersVLM(model_source, self.get_parameter('dtype').value,
+                                          device=self.get_parameter('device').value)
             except Exception as error:
-                self.get_logger().error(f'Model loading failed: {error}')
+                self.get_logger().error(
+                    f'Model loading failed: {error}. Check vision.device/vision.dtype and local weights; '
+                    'run ./install.sh if model files are missing.')
                 raise
-            self.get_logger().info(f'Model loaded successfully in {perf_counter() - started:.2f}s')
+            self.get_logger().info(f'Model loaded on {backend.model.device} with {backend.model.dtype} '
+                                   f'in {perf_counter() - started:.2f}s')
         else:
             self.get_logger().info(f'Using supplied backend: {type(backend).__name__}')
         self.backend = backend

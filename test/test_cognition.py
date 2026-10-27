@@ -150,11 +150,12 @@ def test_transformers_schema_constraints_never_fall_back(monkeypatch, available)
     transformers = MagicMock()
     monkeypatch.setitem(sys.modules, 'torch', torch)
     monkeypatch.setitem(sys.modules, 'transformers', transformers)
-    library = ModuleType('letssee_llm.structured')
-    library.logits_processor = MagicMock(return_value='token-mask')
-    library.validate_response = MagicMock(return_value='{"action":"look_left"}')
-    monkeypatch.setitem(sys.modules, 'letssee_llm', ModuleType('letssee_llm'))
-    monkeypatch.setitem(sys.modules, 'letssee_llm.structured', library if available else None)
+    library = ModuleType('outlines')
+    library.from_transformers = MagicMock()
+    processors = ModuleType('outlines.backends')
+    processors.get_json_schema_logits_processor = MagicMock(return_value='token-mask')
+    monkeypatch.setitem(sys.modules, 'outlines', library if available else None)
+    monkeypatch.setitem(sys.modules, 'outlines.backends', processors if available else None)
     tokenizer = transformers.AutoTokenizer.from_pretrained.return_value
     tokenizer.chat_template = 'test'
     tokenizer.decode.return_value = '{"action":"look_left"}'
@@ -162,10 +163,11 @@ def test_transformers_schema_constraints_never_fall_back(monkeypatch, available)
     backend = TransformersBackend('/local/model', enable_thinking=False)
     if available:
         assert backend.generate('choose', schema=ACTION_SCHEMA) == '{"action":"look_left"}'
-        library.logits_processor.assert_called_once_with(backend.model, backend.tokenizer, ACTION_SCHEMA)
+        library.from_transformers.assert_called_once_with(backend.model, backend.tokenizer)
+        processors.get_json_schema_logits_processor.assert_called_once_with(
+            'outlines_core', library.from_transformers.return_value, json.dumps(ACTION_SCHEMA))
         assert backend.model.generate.call_args.kwargs['logits_processor'] == ['token-mask']
-        library.validate_response.assert_called_once_with('{"action":"look_left"}', ACTION_SCHEMA)
     else:
-        with pytest.raises(RuntimeError, match='no unrestricted fallback'):
+        with pytest.raises(RuntimeError, match='[Nn]o unrestricted fallback'):
             backend.generate('choose', schema=ACTION_SCHEMA)
         backend.model.generate.assert_not_called()

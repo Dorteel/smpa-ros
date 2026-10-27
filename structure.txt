@@ -1,0 +1,411 @@
+.
+├── AGENTS.md
+├── config
+│   └── pipeline.yaml
+├── .gitignore
+├── install
+│   ├── COLCON_IGNORE
+│   ├── .colcon_install_layout
+│   ├── local_setup.bash
+│   ├── local_setup.ps1
+│   ├── local_setup.sh
+│   ├── _local_setup_util_ps1.py
+│   ├── _local_setup_util_sh.py
+│   ├── local_setup.zsh
+│   ├── setup.bash
+│   ├── setup.ps1
+│   ├── setup.sh
+│   ├── setup.zsh
+│   ├── smpa_ros
+│   │   ├── lib
+│   │   │   ├── python3.12
+│   │   │   │   └── site-packages
+│   │   │   │       ├── smpa_ros
+│   │   │   │       │   ├── act
+│   │   │   │       │   │   ├── models
+│   │   │   │       │   │   │   └── default.json
+│   │   │   │       │   │   └── prompts
+│   │   │   │       │   │       └── default.txt
+│   │   │   │       │   ├── backends
+│   │   │   │       │   │   ├── base.py
+│   │   │   │       │   │   ├── __init__.py
+│   │   │   │       │   │   ├── ollama.py
+│   │   │   │       │   │   ├── speech.py
+│   │   │   │       │   │   └── transformers.py
+│   │   │   │       │   ├── hello.py
+│   │   │   │       │   ├── __init__.py
+│   │   │   │       │   ├── loop.py
+│   │   │   │       │   ├── model
+│   │   │   │       │   │   ├── models
+│   │   │   │       │   │   │   └── default.json
+│   │   │   │       │   │   └── prompts
+│   │   │   │       │   │       └── default.txt
+│   │   │   │       │   ├── plan
+│   │   │   │       │   │   ├── models
+│   │   │   │       │   │   │   └── default.json
+│   │   │   │       │   │   └── prompts
+│   │   │   │       │   │       └── default.txt
+│   │   │   │       │   ├── sense
+│   │   │   │       │   │   ├── __init__.py
+│   │   │   │       │   │   ├── models
+│   │   │   │       │   │   │   └── default.json
+│   │   │   │       │   │   ├── prompts
+│   │   │   │       │   │   │   ├── default.txt
+│   │   │   │       │   │   │   └── describe_scene.txt
+│   │   │   │       │   │   └── service.py
+│   │   │   │       │   └── speech
+│   │   │   │       │       ├── actions.py
+│   │   │   │       │       ├── demo.py
+│   │   │   │       │       ├── __init__.py
+│   │   │   │       │       └── observation.py
+│   │   │   │       └── smpa_ros-0.0.1-py3.12.egg-info
+│   │   │   │           ├── dependency_links.txt
+│   │   │   │           ├── entry_points.txt
+│   │   │   │           ├── PKG-INFO
+│   │   │   │           ├── requires.txt
+│   │   │   │           ├── SOURCES.txt
+│   │   │   │           ├── top_level.txt
+│   │   │   │           └── zip-safe
+│   │   │   └── smpa_ros
+│   │   │       ├── hello
+│   │   │       ├── listen
+│   │   │       ├── listener_talker
+│   │   │       ├── loop
+│   │   │       ├── sense
+│   │   │       └── talk
+│   │   └── share
+│   │       ├── ament_index
+│   │       │   └── resource_index
+│   │       │       └── packages
+│   │       │           └── smpa_ros
+│   │       ├── colcon-core
+│   │       │   └── packages
+│   │       │       └── smpa_ros
+│   │       └── smpa_ros
+│   │           ├── config
+│   │           │   └── pipeline.yaml
+│   │           ├── hook
+│   │           │   ├── ament_prefix_path.dsv
+│   │           │   ├── ament_prefix_path.ps1
+│   │           │   ├── ament_prefix_path.sh
+│   │           │   ├── pythonpath.dsv
+│   │           │   ├── pythonpath.ps1
+│   │           │   └── pythonpath.sh
+│   │           ├── launch
+│   │           │   ├── llm.launch.py
+│   │           │   └── speech.launch.py
+│   │           ├── models
+│   │           │   ├── gemma3.yaml
+│   │           │   ├── model_library.yaml
+│   │           │   ├── qwen3_vl.yaml
+│   │           │   └── smolvlm2.yaml
+│   │           ├── package.bash
+│   │           ├── package.dsv
+│   │           ├── package.ps1
+│   │           ├── package.sh
+│   │           ├── package.xml
+│   │           └── package.zsh
+│   └── smpa_ros_interfaces
+│       ├── include
+│       │   └── smpa_ros_interfaces
+│       │       └── smpa_ros_interfaces
+│       │           ├── action
+│       │           │   ├── detail
+│       │           │   │   ├── dds_fastrtps
+│       │           │   │   ├── listen__builder.hpp
+│       │           │   │   ├── listen__description.c
+│       │           │   │   ├── listen__functions.c
+│       │           │   │   ├── listen__functions.h
+│       │           │   │   ├── listen__rosidl_typesupport_fastrtps_c.h
+│       │           │   │   ├── listen__rosidl_typesupport_fastrtps_cpp.hpp
+│       │           │   │   ├── listen__rosidl_typesupport_introspection_c.h
+│       │           │   │   ├── listen__rosidl_typesupport_introspection_cpp.hpp
+│       │           │   │   ├── listen__struct.h
+│       │           │   │   ├── listen__struct.hpp
+│       │           │   │   ├── listen__traits.hpp
+│       │           │   │   ├── listen__type_support.c
+│       │           │   │   ├── listen__type_support.cpp
+│       │           │   │   ├── listen__type_support.h
+│       │           │   │   ├── listen__type_support.hpp
+│       │           │   │   ├── talk__builder.hpp
+│       │           │   │   ├── talk__description.c
+│       │           │   │   ├── talk__functions.c
+│       │           │   │   ├── talk__functions.h
+│       │           │   │   ├── talk__rosidl_typesupport_fastrtps_c.h
+│       │           │   │   ├── talk__rosidl_typesupport_fastrtps_cpp.hpp
+│       │           │   │   ├── talk__rosidl_typesupport_introspection_c.h
+│       │           │   │   ├── talk__rosidl_typesupport_introspection_cpp.hpp
+│       │           │   │   ├── talk__struct.h
+│       │           │   │   ├── talk__struct.hpp
+│       │           │   │   ├── talk__traits.hpp
+│       │           │   │   ├── talk__type_support.c
+│       │           │   │   ├── talk__type_support.cpp
+│       │           │   │   ├── talk__type_support.h
+│       │           │   │   └── talk__type_support.hpp
+│       │           │   ├── listen.h
+│       │           │   ├── listen.hpp
+│       │           │   ├── talk.h
+│       │           │   └── talk.hpp
+│       │           ├── msg
+│       │           │   ├── rosidl_generator_cpp__visibility_control.hpp
+│       │           │   ├── rosidl_generator_c__visibility_control.h
+│       │           │   ├── rosidl_typesupport_fastrtps_cpp__visibility_control.h
+│       │           │   ├── rosidl_typesupport_fastrtps_c__visibility_control.h
+│       │           │   └── rosidl_typesupport_introspection_c__visibility_control.h
+│       │           └── srv
+│       │               ├── describe_scene.h
+│       │               ├── describe_scene.hpp
+│       │               └── detail
+│       │                   ├── dds_fastrtps
+│       │                   ├── describe_scene__builder.hpp
+│       │                   ├── describe_scene__description.c
+│       │                   ├── describe_scene__functions.c
+│       │                   ├── describe_scene__functions.h
+│       │                   ├── describe_scene__rosidl_typesupport_fastrtps_c.h
+│       │                   ├── describe_scene__rosidl_typesupport_fastrtps_cpp.hpp
+│       │                   ├── describe_scene__rosidl_typesupport_introspection_c.h
+│       │                   ├── describe_scene__rosidl_typesupport_introspection_cpp.hpp
+│       │                   ├── describe_scene__struct.h
+│       │                   ├── describe_scene__struct.hpp
+│       │                   ├── describe_scene__traits.hpp
+│       │                   ├── describe_scene__type_support.c
+│       │                   ├── describe_scene__type_support.cpp
+│       │                   ├── describe_scene__type_support.h
+│       │                   └── describe_scene__type_support.hpp
+│       ├── lib
+│       │   ├── libsmpa_ros_interfaces__rosidl_generator_c.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_generator_py.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_typesupport_cpp.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_typesupport_c.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_typesupport_fastrtps_cpp.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_typesupport_fastrtps_c.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_typesupport_introspection_cpp.so
+│       │   ├── libsmpa_ros_interfaces__rosidl_typesupport_introspection_c.so
+│       │   └── python3.12
+│       │       └── site-packages
+│       │           ├── smpa_ros_interfaces
+│       │           │   ├── action
+│       │           │   │   ├── __init__.py
+│       │           │   │   ├── _listen.py
+│       │           │   │   ├── _listen_s.c
+│       │           │   │   ├── _talk.py
+│       │           │   │   └── _talk_s.c
+│       │           │   ├── __init__.py
+│       │           │   ├── _smpa_ros_interfaces_s.ep.rosidl_typesupport_c.c
+│       │           │   ├── _smpa_ros_interfaces_s.ep.rosidl_typesupport_fastrtps_c.c
+│       │           │   ├── _smpa_ros_interfaces_s.ep.rosidl_typesupport_introspection_c.c
+│       │           │   ├── smpa_ros_interfaces_s__rosidl_typesupport_c.so
+│       │           │   ├── smpa_ros_interfaces_s__rosidl_typesupport_fastrtps_c.so
+│       │           │   ├── smpa_ros_interfaces_s__rosidl_typesupport_introspection_c.so
+│       │           │   └── srv
+│       │           │       ├── _describe_scene.py
+│       │           │       ├── _describe_scene_s.c
+│       │           │       └── __init__.py
+│       │           └── smpa_ros_interfaces-0.0.1-py3.12.egg-info
+│       │               ├── dependency_links.txt
+│       │               ├── PKG-INFO
+│       │               ├── SOURCES.txt
+│       │               └── top_level.txt
+│       └── share
+│           ├── ament_index
+│           │   └── resource_index
+│           │       ├── package_run_dependencies
+│           │       │   └── smpa_ros_interfaces
+│           │       ├── packages
+│           │       │   └── smpa_ros_interfaces
+│           │       ├── parent_prefix_path
+│           │       │   └── smpa_ros_interfaces
+│           │       ├── rosidl_interfaces
+│           │       │   └── smpa_ros_interfaces
+│           │       └── rust_packages
+│           │           └── smpa_ros_interfaces
+│           ├── colcon-core
+│           │   └── packages
+│           │       └── smpa_ros_interfaces
+│           └── smpa_ros_interfaces
+│               ├── action
+│               │   ├── Listen.action
+│               │   ├── Listen.idl
+│               │   ├── Listen.json
+│               │   ├── Talk.action
+│               │   ├── Talk.idl
+│               │   └── Talk.json
+│               ├── cmake
+│               │   ├── ament_cmake_export_dependencies-extras.cmake
+│               │   ├── ament_cmake_export_include_directories-extras.cmake
+│               │   ├── ament_cmake_export_libraries-extras.cmake
+│               │   ├── ament_cmake_export_targets-extras.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_generator_cExport.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_generator_cExport-noconfig.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_generator_cppExport.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_generator_pyExport.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_generator_pyExport-noconfig.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_typesupport_fastrtps_cExport.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_typesupport_fastrtps_cExport-noconfig.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_typesupport_fastrtps_cppExport.cmake
+│               │   ├── export_smpa_ros_interfaces__rosidl_typesupport_fastrtps_cppExport-noconfig.cmake
+│               │   ├── rosidl_cmake_aggregate_target-extras.cmake
+│               │   ├── rosidl_cmake_export_typesupport_libraries-extras.cmake
+│               │   ├── rosidl_cmake_export_typesupport_targets-extras.cmake
+│               │   ├── rosidl_cmake-extras.cmake
+│               │   ├── smpa_ros_interfacesConfig.cmake
+│               │   ├── smpa_ros_interfacesConfig-version.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_cExport.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_cExport-noconfig.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_cppExport.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_cppExport-noconfig.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_introspection_cExport.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_introspection_cExport-noconfig.cmake
+│               │   ├── smpa_ros_interfaces__rosidl_typesupport_introspection_cppExport.cmake
+│               │   └── smpa_ros_interfaces__rosidl_typesupport_introspection_cppExport-noconfig.cmake
+│               ├── environment
+│               │   ├── ament_prefix_path.dsv
+│               │   ├── ament_prefix_path.sh
+│               │   ├── library_path.dsv
+│               │   ├── library_path.sh
+│               │   ├── path.dsv
+│               │   ├── path.sh
+│               │   ├── pythonpath.dsv
+│               │   └── pythonpath.sh
+│               ├── hook
+│               │   ├── cmake_prefix_path.dsv
+│               │   ├── cmake_prefix_path.ps1
+│               │   ├── cmake_prefix_path.sh
+│               │   ├── ld_library_path_lib.dsv
+│               │   ├── ld_library_path_lib.ps1
+│               │   ├── ld_library_path_lib.sh
+│               │   ├── pythonpath.dsv
+│               │   ├── pythonpath.ps1
+│               │   └── pythonpath.sh
+│               ├── local_setup.bash
+│               ├── local_setup.dsv
+│               ├── local_setup.sh
+│               ├── local_setup.zsh
+│               ├── package.bash
+│               ├── package.dsv
+│               ├── package.ps1
+│               ├── package.sh
+│               ├── package.xml
+│               ├── package.zsh
+│               ├── rust
+│               │   ├── build.rs
+│               │   ├── Cargo.toml
+│               │   └── src
+│               │       ├── action
+│               │       │   └── rmw.rs
+│               │       ├── action.rs
+│               │       ├── lib.rs
+│               │       ├── srv
+│               │       │   └── rmw.rs
+│               │       └── srv.rs
+│               └── srv
+│                   ├── DescribeScene.idl
+│                   ├── DescribeScene.json
+│                   └── DescribeScene.srv
+├── install.sh
+├── launch
+│   ├── llm.launch.py
+│   └── speech.launch.py
+├── LICENSE
+├── log
+│   ├── build_2026-10-27_10-52-27
+│   │   ├── events.log
+│   │   ├── logger_all.log
+│   │   ├── smpa_ros
+│   │   │   ├── command.log
+│   │   │   ├── stderr.log
+│   │   │   ├── stdout.log
+│   │   │   ├── stdout_stderr.log
+│   │   │   └── streams.log
+│   │   └── smpa_ros_interfaces
+│   │       ├── command.log
+│   │       ├── stderr.log
+│   │       ├── stdout.log
+│   │       ├── stdout_stderr.log
+│   │       └── streams.log
+│   ├── COLCON_IGNORE
+│   ├── latest -> latest_test-result
+│   ├── latest_build -> build_2026-10-27_10-52-27
+│   ├── latest_test-result -> test-result_2026-10-27_11-05-49
+│   └── test-result_2026-10-27_11-05-49
+│       └── logger_all.log
+├── memory
+│   └── .gitkeep
+├── models
+│   ├── gemma3.yaml
+│   ├── model_library.yaml
+│   ├── qwen3_vl.yaml
+│   └── smolvlm2.yaml
+├── package.xml
+├── README.md
+├── requirements-speech.txt
+├── resource
+│   └── smpa_ros
+├── run_smpa.sh
+├── scripts
+│   └── download_models.py
+├── setup.cfg
+├── setup.py
+├── smpa_ros
+│   ├── act
+│   │   ├── models
+│   │   │   └── default.json
+│   │   └── prompts
+│   │       └── default.txt
+│   ├── backends
+│   │   ├── base.py
+│   │   ├── __init__.py
+│   │   ├── ollama.py
+│   │   ├── speech.py
+│   │   └── transformers.py
+│   ├── hello.py
+│   ├── __init__.py
+│   ├── loop.py
+│   ├── model
+│   │   ├── models
+│   │   │   └── default.json
+│   │   └── prompts
+│   │       └── default.txt
+│   ├── plan
+│   │   ├── models
+│   │   │   └── default.json
+│   │   └── prompts
+│   │       └── default.txt
+│   ├── sense
+│   │   ├── __init__.py
+│   │   ├── models
+│   │   │   └── default.json
+│   │   ├── prompts
+│   │   │   ├── default.txt
+│   │   │   └── describe_scene.txt
+│   │   └── service.py
+│   └── speech
+│       ├── actions.py
+│       ├── demo.py
+│       ├── __init__.py
+│       └── observation.py
+├── smpa_ros_interfaces
+│   ├── action
+│   │   ├── Listen.action
+│   │   └── Talk.action
+│   ├── CMakeLists.txt
+│   ├── package.xml
+│   └── srv
+│       └── DescribeScene.srv
+├── structure.txt
+├── test
+│   ├── conftest.py
+│   ├── test_cognition.py
+│   ├── test_download_models.py
+│   ├── test_hello.py
+│   ├── test_loop.py
+│   ├── test_run_storage.py
+│   ├── test_sense.py
+│   ├── test_speech_actions.py
+│   ├── test_speech_audio.py
+│   └── test_speech_integration.py
+├── test.sh
+└── third_party
+    └── Visual-Jev
+
+107 directories, 302 files

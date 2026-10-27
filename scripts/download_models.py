@@ -207,7 +207,8 @@ def record_attempt(model, result, root, records, report):
     return record
 
 
-def run(root=ROOT, retries=2, timeout=1800):
+def run(root=ROOT, retries=2, timeout=1800, models=None):
+    models = MODELS if models is None else models
     root.mkdir(parents=True, exist_ok=True)
     report = root / 'download_report.json'
     records = {}
@@ -216,11 +217,11 @@ def run(root=ROOT, retries=2, timeout=1800):
             records = {item['repo_id']: item for item in json.loads(report.read_text())['models']}
         except (ValueError, KeyError, TypeError):
             print('Previous report is unreadable; checking models again.', flush=True)
-    print(f'SMPA ROS MODEL DOWNLOADER\nModels scheduled: {len(MODELS)}', flush=True)
-    for index, model in enumerate(MODELS, 1):
+    print(f'SMPA ROS MODEL DOWNLOADER\nModels scheduled: {len(models)}', flush=True)
+    for index, model in enumerate(models, 1):
         category, folder, repo = model
         directory = root / category / folder
-        print(f'\n[{index}/{len(MODELS)}] {repo}\nCategory: {category}\n'
+        print(f'\n[{index}/{len(models)}] {repo}\nCategory: {category}\n'
               f'Destination: {directory}', flush=True)
         previous = records.get(repo, {})
         interrupted = False
@@ -245,19 +246,19 @@ def run(root=ROOT, retries=2, timeout=1800):
         except Exception as error:
             result.update(status='failed', error=f'{type(error).__name__}: {error}')
         result = record_attempt(model, result, root, records, report)
-        print(f"[{index}/{len(MODELS)}] {result['status'].upper()}"
+        print(f"[{index}/{len(models)}] {result['status'].upper()}"
               f" — {result['error'] or directory}", flush=True)
-        completed = sum(item['status'] == 'completed' for item in records.values())
-        print(f'Completed: {completed}/{len(MODELS)}; remaining to attempt: '
-              f'{len(MODELS) - index}', flush=True)
+        completed = sum(records.get(model[2], {}).get('status') == 'completed' for model in models)
+        print(f'Completed: {completed}/{len(models)}; remaining to attempt: '
+              f'{len(models) - index}', flush=True)
         if interrupted or shutil.disk_usage(root).free < CRITICAL:
             print('Stopping safely; rerun to resume.', flush=True)
             break
-    print(f'\nSMPA ROS MODEL LIBRARY\nTotal models: {len(MODELS)}', flush=True)
+    print(f'\nSMPA ROS MODEL LIBRARY\nTotal models: {len(models)}', flush=True)
     for status in ('completed', 'skipped', 'failed'):
         items = [item for repo, item in records.items()
-                 if repo in {model[2] for model in MODELS} and item['status'] == status]
-        print(f'{status.upper()}: {len(items)}/{len(MODELS)}', flush=True)
+                 if repo in {model[2] for model in models} and item['status'] == status]
+        print(f'{status.upper()}: {len(items)}/{len(models)}', flush=True)
         for item in items:
             print(f"  {item['name']}: {item['error'] or item['revision']}", flush=True)
     print(f'Library location: {root.resolve()}', flush=True)
@@ -268,6 +269,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--retries', type=int, default=2, help='Retries per failed model')
     parser.add_argument('--timeout', type=float, default=1800, help='Seconds per attempt')
+    parser.add_argument('--model', action='append', choices=[model[2] for model in MODELS],
+                        help='Download only this model ID; repeat to select several (default: all)')
     options = parser.parse_args()
     if options.retries < 0 or options.timeout <= 0:
         parser.error('retries must be nonnegative and timeout must be positive')
@@ -276,7 +279,11 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupt)
-    run(retries=options.retries, timeout=options.timeout)
+    selected = [model for model in MODELS if not options.model or model[2] in options.model]
+    records = run(retries=options.retries, timeout=options.timeout, models=selected)
+    if options.model and any(records.get(model[2], {}).get('status') != 'completed'
+                             for model in selected):
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':
