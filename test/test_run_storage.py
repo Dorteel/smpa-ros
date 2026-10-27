@@ -463,3 +463,46 @@ def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
         server.destroy_node()
         client.destroy_node()
         rclpy.shutdown()
+
+
+@pytest.mark.parametrize('pipeline, expected', [
+    ({}, (512, 128)),
+    ({'modeling': {'max_output_tokens': 97}, 'planning': {'max_output_tokens': 43}}, (97, 43)),
+])
+def test_stage_token_budgets(tmp_path, pipeline, expected):
+    model = MagicMock(side_effect=model_snapshot)
+    plan = MagicMock(side_effect=planned_action)
+    # Use plain callables so the loop does not use MagicMock's synthetic generate attribute.
+    run(root=tmp_path, sense=lambda directory, cycle: 'observation',
+        model=lambda *args, **kwargs: model(*args, **kwargs),
+        plan=lambda *args, **kwargs: plan(*args, **kwargs),
+        configuration={'pipeline': pipeline})
+    assert model.call_args.kwargs['max_new_tokens'] == expected[0]
+    assert plan.call_args.kwargs['max_new_tokens'] == expected[1]
+    assert 'schema' in plan.call_args.kwargs
+
+
+@pytest.mark.parametrize('stage', ['modeling', 'planning'])
+@pytest.mark.parametrize('value', [0, -1, True, 1.5, '512', None])
+def test_invalid_stage_token_budget(tmp_path, stage, value):
+    with pytest.raises(ValueError, match='positive integer'):
+        run(root=tmp_path, sense=MagicMock(),
+            configuration={'pipeline': {stage: {'max_output_tokens': value}}})
+    assert not (tmp_path / 'runs').exists()
+
+
+def test_independent_stage_reasoning_effort(tmp_path):
+    received = []
+    def model(prompt, **settings):
+        received.append(settings)
+        return model_snapshot(prompt)
+    def plan(prompt, **settings):
+        received.append(settings)
+        return planned_action(prompt)
+    run(root=tmp_path, sense=lambda directory, cycle: 'observation', model=model, plan=plan,
+        configuration={'pipeline': {'modeling': {'reasoning_effort': 'low'},
+                                    'planning': {'reasoning_effort': 'high'}}})
+    assert received[0] == {'max_new_tokens': 512, 'reasoning_effort': 'low'}
+    assert received[1]['reasoning_effort'] == 'high'
+    assert received[1]['max_new_tokens'] == 128
+    assert 'schema' in received[1]

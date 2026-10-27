@@ -2,10 +2,24 @@ camera_topic: /tiago/camera/color/image_raw
 model: smolvlm2
 prompt: describe_scene
 vision:
-  device: auto
-  dtype: auto
+  backend: api
+  provider: nebula
+  max_output_tokens: 4096
+  reasoning_effort: low
+
 modeling:
-  model: qwen3-0.6b
+  reasoning_effort: low  # Optional API control; omitted preserves provider default.
+  backend: api
+  provider: nebula
+  max_output_tokens: 4096
+# vision:
+#   device: auto
+#   dtype: auto
+# modeling:
+#   model: qwen3-0.6b
+planning:
+  reasoning_effort: low  # Independent of modeling; requires provider support.
+  max_output_tokens: 4096
 goal: |
   # Goal
 

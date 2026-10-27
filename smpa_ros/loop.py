@@ -104,6 +104,15 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
     """
     if isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1:
         raise ValueError('max_cycles must be a positive integer')
+    pipeline = (configuration or {}).get('pipeline', {})
+    for stage in ('modeling', 'planning'):
+        effort = pipeline.get(stage, {}).get('reasoning_effort')
+        if effort is not None and effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
+            raise ValueError(f'{stage}.reasoning_effort is unsupported')
+        if 'max_output_tokens' in pipeline.get(stage, {}):
+            limit = pipeline[stage]['max_output_tokens']
+            if type(limit) is not int or limit <= 0:
+                raise ValueError(f'{stage}.max_output_tokens must be a positive integer')
     directory, metadata = initialize_run(root or Path.cwd() / 'memory', run_name,
                                          models=models, configuration=configuration, goal=goal)
     metadata['max_cycles'] = max_cycles
@@ -125,6 +134,10 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
             previous = directory / 'world_model' / f'iteration_{cycle - 1:03d}.md' if cycle > 1 else None
             previous_text = previous.read_text(encoding='utf-8') if previous is not None else ''
             prompt, settings = stage_prompt('model', value, previous_text)
+            if 'max_output_tokens' in pipeline.get('modeling', {}):
+                settings['max_new_tokens'] = pipeline['modeling']['max_output_tokens']
+            if pipeline.get('modeling', {}).get('reasoning_effort') is not None:
+                settings['reasoning_effort'] = pipeline['modeling']['reasoning_effort']
             snapshot = directory / 'world_model' / f'iteration_{cycle:03d}.md'
             backend_id = getattr(model, 'model_id', None) or getattr(model, 'model', None)
             record = dict(stage='model', cycle=cycle, input=value, prompt=prompt,
@@ -163,6 +176,10 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
             goal_text = (directory / 'goal.md').read_text(encoding='utf-8')
             prompt, settings = stage_prompt('plan', world_model, goal=goal_text,
                                             available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2))
+            if 'max_output_tokens' in pipeline.get('planning', {}):
+                settings['max_new_tokens'] = pipeline['planning']['max_output_tokens']
+            if pipeline.get('planning', {}).get('reasoning_effort') is not None:
+                settings['reasoning_effort'] = pipeline['planning']['reasoning_effort']
             record = dict(stage='plan', cycle=cycle, input=world_model, goal=goal_text,
                           model_identifier=plan_identifier or model_identifier or 'configured planner',
                           prompt=prompt, available_actions=AVAILABLE_ACTIONS, selected_action=None)
@@ -485,31 +502,57 @@ def main(args=None) -> None:
 
     registry = Path(get_package_share_directory('smpa_ros')) / 'models'
     registry_entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
-    selected_name = config['modeling']['model']
-    selected = registry_entries[selected_name]
+    api_path = options.config.resolve().with_name('api.yaml')
+    api_settings = None
+    if (config['modeling'].get('backend') == 'api'
+            or config.get('vision', {}).get('backend') == 'api'):
+        api_settings = yaml.safe_load(api_path.read_text(encoding='utf-8'))
+    if config['modeling'].get('backend') == 'api':
+        selected_name = 'api'
+        provider = config['modeling'].get('provider', 'openai')
+        settings = api_settings if 'base_url' in api_settings else api_settings[provider]
+        selected = {'backend': 'api', 'provider': provider, 'model_id': settings['models']['text']}
+    else:
+        selected_name = config['modeling']['model']
+        selected = registry_entries[selected_name]
+        if config['modeling'].get('backend', selected['backend']) != selected['backend']:
+            raise ValueError('modeling.backend must match the selected registry backend or be api')
     modeling_backend = None
 
-    def model(prompt, *, max_new_tokens, schema=None):
+    def model(prompt, *, max_new_tokens, schema=None, reasoning_effort=None):
         nonlocal modeling_backend
+        generation_options = {}
+        if reasoning_effort is not None:
+            if selected['backend'] != 'api':
+                raise ValueError('reasoning_effort is supported only for API inference')
+            generation_options['reasoning_effort'] = reasoning_effort
         if modeling_backend is None:
             if selected['backend'] == 'transformers':
                 from smpa_ros.backends.transformers import TransformersBackend
                 path = Path(options.model_root) / selected['path']
                 modeling_backend = TransformersBackend(str(path), enable_thinking=selected.get('enable_thinking'))
+            elif selected['backend'] == 'api':
+                from smpa_ros.backends.api import APIBackend
+                modeling_backend = APIBackend(api_path, modality='text', provider=selected['provider'])
             elif selected['backend'] == 'ollama':
                 from smpa_ros.backends.ollama import OllamaBackend
                 modeling_backend = OllamaBackend(selected['model_id'])
             else:
                 raise ValueError(f"Unsupported modeling backend: {selected['backend']}")
         if schema is not None:
-            if selected['backend'] != 'transformers':
+            if selected['backend'] not in ('transformers', 'api'):
                 raise RuntimeError('Selected backend does not provide the required schema-constrained planning')
-            return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, schema=schema)
-        return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens)
+            return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, schema=schema, **generation_options)
+        return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, **generation_options)
 
     models = {'model': dict(selected, name=selected_name)}
     if options.service in ('vision', 'all'):
-        models['vision'] = yaml.safe_load((registry / (config['model'] + '.yaml')).read_text())
+        if config.get('vision', {}).get('backend') == 'api':
+            provider = config['vision'].get('provider', 'openai')
+            settings = api_settings if 'base_url' in api_settings else api_settings[provider]
+            models['vision'] = {'backend': 'api', 'provider': provider, 'model_id': settings['models']['vision']}
+        else:
+            models['vision'] = yaml.safe_load((registry / (config['model'] + '.yaml')).read_text())
     if options.service in ('speech', 'all'):
         models.update(yaml.safe_load((registry / 'model_library.yaml').read_text())['models'])
     try:

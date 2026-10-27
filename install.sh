@@ -108,7 +108,7 @@ while pending:
 
 for module in ('setuptools', 'rclpy', 'colcon_core', 'torch', 'torchvision',
                'transformers', 'num2words', 'PIL.Image', 'yaml', 'huggingface_hub',
-               'faster_whisper', 'piper.voice', 'sounddevice', 'av'):
+               'faster_whisper', 'piper.voice', 'sounddevice', 'av', 'openai', 'dotenv'):
     try:
         importlib.import_module(module)
     except Exception as error:
@@ -141,15 +141,23 @@ from scripts.download_models import MODELS
 root = Path.cwd()
 pipeline = yaml.safe_load((root / 'config/pipeline.yaml').read_text())
 registry = yaml.safe_load((root / 'models/model_library.yaml').read_text())['models']
-text = registry[pipeline['modeling']['model']]
-vision = yaml.safe_load((root / 'models' / (pipeline['model'] + '.yaml')).read_text())
-# Default execution uses vision, whose existing backend always needs local weights.
-required = {vision['model_id']}
+modeling = pipeline['modeling']
+text = ({'backend': 'api'} if modeling.get('backend') == 'api'
+        else registry[modeling['model']])
+if modeling.get('backend', text['backend']) != text['backend']:
+    sys.exit('modeling.backend must match the selected registry backend or be api')
+vision_backend = pipeline.get('vision', {}).get('backend', 'transformers')
+required = set()
+if vision_backend == 'transformers':
+    vision = yaml.safe_load((root / 'models' / (pipeline['model'] + '.yaml')).read_text())
+    required.add(vision['model_id'])
+elif vision_backend != 'api':
+    sys.exit('vision.backend must be transformers or api')
 if text['backend'] == 'transformers':
     required.add(text['model_id'])
 elif text['backend'] == 'ollama':
     print(f"Ollama text model: {text['model_id']}; no text weights will be downloaded.", flush=True)
-else:
+elif text['backend'] != 'api':
     sys.exit(f"Unsupported existing modeling backend: {text['backend']}")
 known = {model[2]: model for model in MODELS}
 if required - known.keys():
@@ -159,6 +167,9 @@ if text['backend'] == 'transformers':
     if Path(text['path']) != Path(model[0]) / model[1]:
         sys.exit('The configured text model path does not match the downloader layout.')
 selected = list(known) if '--all-models' in sys.argv[1:] else sorted(required)
+if not selected:
+    print('No local weights required by the selected backends; skipping downloads.')
+    sys.exit(0)
 command = [sys.executable, str(root / 'scripts/download_models.py')]
 for model_id in selected:
     command.extend(['--model', model_id])
@@ -189,9 +200,10 @@ from pathlib import Path
 import yaml
 pipeline = yaml.safe_load(Path('config/pipeline.yaml').read_text())
 registry = yaml.safe_load(Path('models/model_library.yaml').read_text())['models']
-backend = registry[pipeline['modeling']['model']]['backend']
+backend = (pipeline['modeling'].get('backend')
+           or registry[pipeline['modeling']['model']]['backend'])
 print('Environment, selected downloads, and workspace build prepared.')
-if backend != 'transformers':
+if backend == 'ollama':
     print('WARNING: Ollama is supported for text generation, but the existing full SMPA loop rejects '
           'Ollama at schema-constrained Plan. A full run requires a configured Transformers model '
           'and Outlines. Provision the Ollama server/model separately for text-only use.')
@@ -208,7 +220,9 @@ except Exception as error:
 print(f'Generated Webots actions verified: {actions.__file__}')
 import torch
 vision = pipeline.get('vision', {})
-if vision.get('device', 'auto') == 'cuda' and not torch.cuda.is_available():
+if vision.get('backend') == 'api':
+    print('API inference requires credentials in the environment or repository .env and endpoint access; no live API request was made.')
+elif vision.get('device', 'auto') == 'cuda' and not torch.cuda.is_available():
     print('WARNING: vision.device=cuda is explicitly requested but CUDA is unavailable. '
           'Fix the driver/PyTorch installation or explicitly select cpu/auto before running.')
 elif vision.get('device', 'auto') == 'cpu' or not torch.cuda.is_available():

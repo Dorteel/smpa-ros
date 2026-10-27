@@ -47,18 +47,30 @@ class SenseService(Node):
         share = Path(get_package_share_directory('smpa_ros'))
         self.declare_parameter('config', str(share / 'config/pipeline.yaml'))
         pipeline = yaml.safe_load(Path(self.get_parameter('config').value).read_text())
-        self.declare_parameter('model_config', pipeline['model'] + '.yaml')
         vision = pipeline.get('vision', {})
+        vision_backend = vision.get('backend', 'transformers')
+        if vision_backend not in ('transformers', 'api'):
+            raise ValueError('vision.backend must be transformers or api')
+        self.declare_parameter('model_config', pipeline['model'] + '.yaml'
+                               if vision_backend == 'transformers' else '')
         self.declare_parameter('device', vision.get('device', 'auto'))
         self.declare_parameter('dtype', vision.get('dtype', 'auto'))
-        self.declare_parameter('max_new_tokens', 128)
+        token_limit = vision.get('max_output_tokens', 512 if vision_backend == 'api' else 128)
+        if type(token_limit) is not int or token_limit <= 0:
+            raise ValueError('vision.max_output_tokens must be a positive integer')
+        self.declare_parameter('max_new_tokens', token_limit)
         self.max_new_tokens = self.get_parameter('max_new_tokens').value
-        if self.max_new_tokens <= 0:
-            raise ValueError('max_new_tokens must be positive')
+        if type(self.max_new_tokens) is not int or self.max_new_tokens <= 0:
+            raise ValueError('max_new_tokens must be a positive integer')
         self.default_prompt = files('smpa_ros.sense').joinpath(
             'prompts/describe_scene.txt',
         ).read_text(encoding='utf-8').strip()
-        if backend is None:
+        if backend is None and vision_backend == 'api':
+            from smpa_ros.backends.api import APIBackend
+            api_path = Path(self.get_parameter('config').value).resolve().with_name('api.yaml')
+            backend = APIBackend(api_path, modality='vision', provider=vision.get('provider', 'openai'))
+            self.get_logger().info(f'Using API vision model: {backend.model_id}')
+        elif backend is None:
             config_path = Path(self.get_parameter('model_config').value)
             if not config_path.is_absolute():
                 config_path = Path(get_package_share_directory('smpa_ros')) / 'models' / config_path

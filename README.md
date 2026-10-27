@@ -55,7 +55,8 @@ if you previously sourced that old overlay.
 ### Python dependency compatibility
 
 `setup.py` is the single declaration for `setuptools>=30.3,<80`,
-`outlines==1.3.3`, and `jsonschema==4.26.0`. The setuptools upper bound matches
+`outlines==1.3.3`, `jsonschema==4.26.0`, `openai==3.39.0`, and
+`python-dotenv==1.2.4`. The setuptools upper bound matches
 colcon-core 0.21.0 and is enforced even when reinstalling into an existing `.venv`.
 The installer generates `.venv/smpa-constraints.txt` from that declaration,
 configures only `.venv/pip.conf` to use it for subsequent pip operations, and
@@ -92,10 +93,90 @@ Python environment; its global exit status is not an installation gate. If you
 run it, distinguish required-package errors from unrelated system reports, and
 retain the setuptools constraint and system ROS packages.
 
+### API inference (text and vision)
+
+Local defaults are unchanged. To use API inference, edit the existing sections
+in `config/pipeline.yaml`, preserving the other settings:
+
+```yaml
+vision:
+  backend: api
+  provider: nebula
+modeling:
+  backend: api
+  provider: nebula
+```
+
+Sense and Model/Plan can be selected independently; Model and Plan share one
+text backend. For local vision with API planning, set only `modeling.backend:
+api`. Restore local vision by removing `vision.backend` (or setting it to
+`transformers`); restore local text by removing `modeling.backend`. Local model
+names remain in the pipeline but are ignored for stages using the API.
+
+Each API stage selects `provider: openai` or `provider: nebula` independently;
+omitting `provider` selects OpenAI. Plan shares the modeling provider. Local
+inference remains the default when `backend: api` is absent.
+
+`config/api.yaml` contains the named provider sections with endpoint, separate
+text/vision models, credential variable, and timeout. OpenAI uses its `/v1` base;
+Nebula may specify the full `/api/chat/completions` endpoint, which the backend
+normalizes before the SDK appends `/chat/completions`. The original flat API
+configuration remains supported. Existing Nebula model identifiers are preserved. A custom pipeline config must have
+`api.yaml` beside it. Create `.env` yourself in the repository root:
+
+```dotenv
+OPENAI_API_KEY=your_api_key_here
+NEBULA_API_KEY=your_nebula_key_here
+```
+
+`.env` is Git-ignored; never put credentials in YAML, URLs, or run records.
+Existing environment variables take precedence. Credentials are loaded only
+when an API backend is instantiated. Missing credentials fail explicitly.
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+./install.sh
+./run_smpa.sh max_cycles:=1 timeout:=240
+./run_smpa.sh max_cycles:=3 timeout:=240
+```
+
+Installation skips all local weight downloads when both stages use API inference;
+mixed configurations download only their local models. `--all-models` explicitly
+overrides this. The installer still installs dependencies for existing local
+backends and builds ROS/simulation interfaces. Installation makes no API requests
+and does not establish provider access. The simulation and camera prerequisites
+still apply. API inference requires internet access, may incur charges, and sends
+images and prompts (including world-model context) to the configured provider.
+
+The official OpenAI SDK uses Chat Completions with PNG image data URLs,
+`max_completion_tokens`, and temperature zero. Planning requests strict server-side
+`json_schema` output and validates JSON locally; there is no JSON-mode or
+unrestricted fallback. Compatible providers must support these features with the
+selected models. Refusals, truncated output, and invalid schemas/responses fail
+explicitly; automatic request retries are disabled. Local Transformers/Outlines
+and Ollama behavior is unchanged.
+
+For authentication failures, check the configured variable and model access; for
+429 errors check quota/rate limits. For timeouts, check connectivity and increase
+`config/api.yaml`'s `timeout` if necessary, keeping the launch `timeout` longer
+than the API request timeout (180 seconds by default). Truncated responses require
+adequate existing stage output-token limits. Unsupported strict schemas or image
+inputs require a compatible provider/model; SMPA does not weaken constraints.
+API errors are sanitized before logging. Provider verification results and simulation availability are reported separately;
+a successful API response alone does not establish completion of a robot action.
+
+Nebula verification: authenticated text, the existing Model/Plan prompts, and
+strict-schema action selection succeeded, including a prompt requesting non-JSON
+output. Image requests were accepted, but the configured vision model described
+both solid-red and solid-blue images as white; image grounding remains unverified.
+Do not treat endpoint acceptance as evidence of reliable vision. Full robot-cycle
+verification requires a running camera and simulation action servers.
+
 ### Models and backend prerequisites
 
 Installation reads `config/pipeline.yaml` and the existing model YAML files.
-The default vision launch always needs the configured vision model. Transformers
+Local Transformers vision needs the configured vision weights. API vision does
+not need local weights. Transformers
 text models also need local weights; Ollama text models do not, so their weights
 are not downloaded by this installer. Unsupported local model IDs or text paths
 that disagree with the downloader layout produce an error.
