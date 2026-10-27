@@ -307,15 +307,17 @@ def capture_once(node: Node, config: dict, output_dir: Path,
 
 
 def execute_action(node, executor, action, record, timeout):
-    """Send one empty Look goal, await its terminal result, and cancel on early exit."""
+    """Send the default Look goal, record feedback/result, and cancel on early exit."""
     from action_msgs.msg import GoalStatus
     from rclpy.action import ActionClient
+    from rosidl_runtime_py.convert import message_to_ordereddict
     if action not in AVAILABLE_ACTIONS:
         raise ValueError(f'Unsupported action: {action}')
     try:
         from simulation_actions.action import Look
     except ImportError as error:
-        raise RuntimeError('simulation_actions/action/Look is unavailable; source the simulation workspace') from error
+        raise RuntimeError('simulation_actions/action/Look is unavailable; run ./install.sh to rebuild '
+                           'the current Webots interfaces and source the workspace installation') from error
     client = ActionClient(node, Look, AVAILABLE_ACTIONS[action]['endpoint'])
     pending = handle = None
     result_future = None
@@ -330,7 +332,16 @@ def execute_action(node, executor, action, record, timeout):
     try:
         if not client.wait_for_server(timeout_sec=timeout):
             raise TimeoutError(f'{action}: action server unavailable')
-        pending = client.send_goal_async(Look.Goal())
+        # Look's default angle is zero: the server selects its configured angle.
+        goal = Look.Goal()
+        record['goal'] = dict(message_to_ordereddict(goal))
+        record['feedback'] = []
+
+        def feedback(message):
+            record['feedback'].append(dict(message_to_ordereddict(message.feedback)))
+
+        node.get_logger().info(f"Sending {action}: {record['goal']}")
+        pending = client.send_goal_async(goal, feedback_callback=feedback)
         handle = wait(pending, 'goal acceptance')
         record['goal_accepted'] = handle.accepted
         if not handle.accepted:
@@ -338,9 +349,12 @@ def execute_action(node, executor, action, record, timeout):
         result_future = handle.get_result_async()
         response = wait(result_future, 'action result')
         terminal = True
-        record.update(result_status=response.status, success=response.status == GoalStatus.STATUS_SUCCEEDED)
+        record.update(result_status=response.status,
+                      result=dict(message_to_ordereddict(response.result)),
+                      success=(response.status == GoalStatus.STATUS_SUCCEEDED and response.result.success))
+        node.get_logger().info(f"{action}: ROS status {response.status}; result {record['result']}")
         if not record['success']:
-            raise RuntimeError(f'{action}: unsuccessful ROS goal status {response.status}')
+            raise RuntimeError(f'{action}: unsuccessful ROS goal status/result {response.status}: {record["result"]}')
     finally:
         try:
             if pending is not None and not terminal:

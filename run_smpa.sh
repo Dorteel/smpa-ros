@@ -28,6 +28,21 @@ done
 [[ -f "$prefix/share/smpa_ros_interfaces/package.xml" ]] || fail 'Incomplete interface installation; run ./install.sh.'
 prefix=$(ros2 pkg prefix smpa_ros)
 [[ -f "$prefix/share/smpa_ros/launch/llm.launch.py" ]] || fail 'Missing installed launch file; run ./install.sh.'
+# Validate generated Python and native type support with the actual interpreter.
+"$repo/.venv/bin/python" - <<'PY'
+try:
+    import simulation_actions.action as actions
+    from rclpy.type_support import check_for_type_support
+    check_for_type_support(actions.Look)
+    if (set(actions.Look.Goal.get_fields_and_field_types()) != {'angle'}
+            or set(actions.Look.Result.get_fields_and_field_types()) != {'success', 'message', 'achieved_angle'}
+            or set(actions.Look.Feedback.get_fields_and_field_types()) != {'remaining_angle'}):
+        raise RuntimeError('Look fields do not match the Webots master interface')
+except Exception as error:
+    raise SystemExit(f'Webots Look interface is missing, stale, or incompatible: {error}. '
+                     'Run ./install.sh and source the correct workspace; see Temporary Webots Integration in README.md.')
+print(f'Using generated Look interface: {actions.__file__}', flush=True)
+PY
 # Retain the repository as cwd for existing model and memory path defaults.
 cd "$repo"
 arguments=()

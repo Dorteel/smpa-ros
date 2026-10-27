@@ -25,6 +25,12 @@ source /etc/os-release
 command -v colcon >/dev/null || fail 'Install python3-colcon-common-extensions first.'
 /usr/bin/python3 -c 'import sys; assert sys.version_info[:2] == (3, 12)' || fail 'System Python 3.12 is required.'
 source /opt/ros/jazzy/setup.bash
+# Temporary Webots integration: reuse its interface package, never vendor a
+# second package with the same ROS name. Explicit paths bypass unrelated copies.
+simulation_source=${SIMULATION_ACTIONS_SOURCE:-$workspace/src/webots_ros2_simulation/simulation_actions}
+[[ -f "$simulation_source/action/Look.action" && -f "$simulation_source/CMakeLists.txt" ]] || \
+    fail 'Missing simulation_actions source. Clone Dorteel/webots_ros2_simulation (master) beside SMPA, or set SIMULATION_ACTIONS_SOURCE to its simulation_actions directory; see README.md.'
+simulation_source=$(cd -- "$simulation_source" && pwd)
 /usr/bin/python3 -c 'import rclpy' || fail 'Install the ROS 2 Jazzy Python packages listed in README.md.'
 if [[ ! -d .venv ]]; then
     /usr/bin/python3 -m venv --system-site-packages .venv || fail 'Install python3-venv, then rerun.'
@@ -162,12 +168,19 @@ completed = {r['repo_id'] for r in report['models'] if r['status'] == 'completed
 if set(selected) - completed:
     sys.exit('Some requested models are incomplete; inspect models/download_report.json and rerun.')
 PY
-# Explicit paths include the nested interface package. Colcon reuses build state.
+# An older copy may have generated the existing package without Look. Reconfigure
+# only when switching source directories; keep all build products at workspace level.
+cmake_options=()
+cache="$workspace/build/simulation_actions/CMakeCache.txt"
+if [[ -f $cache ]] && ! grep -Fxq "CMAKE_HOME_DIRECTORY:INTERNAL=$simulation_source" "$cache"; then
+    cmake_options+=(--cmake-clean-cache)
+fi
+# Explicit paths include both nested interface packages; no recursive discovery.
 cd "$workspace"
 colcon --log-base "$workspace/log" build \
     --build-base "$workspace/build" --install-base "$workspace/install" \
-    --paths "$repo" "$repo/smpa_ros_interfaces" \
-    --packages-select smpa_ros_interfaces smpa_ros
+    --paths "$repo" "$repo/smpa_ros_interfaces" "$simulation_source" \
+    --packages-select simulation_actions smpa_ros_interfaces smpa_ros "${cmake_options[@]}"
 # Report external readiness separately from successful environment/build setup.
 source "$workspace/install/local_setup.bash"
 cd "$repo"
@@ -183,9 +196,16 @@ if backend != 'transformers':
           'Ollama at schema-constrained Plan. A full run requires a configured Transformers model '
           'and Outlines. Provision the Ollama server/model separately for text-only use.')
 try:
-    from simulation_actions.action import Look
-except (ImportError, OSError) as error:
-    print(f'WARNING: Simulation interface unavailable ({error}); build/source its workspace before running.')
+    import simulation_actions.action as actions
+    from rclpy.type_support import check_for_type_support
+    for interface in (actions.Look, actions.LookAhead):
+        check_for_type_support(interface)
+    if set(actions.Look.Goal.get_fields_and_field_types()) != {'angle'}:
+        raise RuntimeError('Unexpected Look goal fields; use the documented Webots master interface')
+except Exception as error:
+    raise SystemExit(f'Generated Webots action interfaces cannot be used: {error}. '
+                     'Check workspace overlays and SIMULATION_ACTIONS_SOURCE, then rerun ./install.sh.')
+print(f'Generated Webots actions verified: {actions.__file__}')
 import torch
 vision = pipeline.get('vision', {})
 if vision.get('device', 'auto') == 'cuda' and not torch.cuda.is_available():

@@ -37,7 +37,7 @@ def start(context):
         return nodes
     arguments = []
     for name in ('config', 'world_model_root', 'run_name', 'service', 'python', 'model_root',
-                 'audio_lock', 'input_device', 'output_device', 'demo'):
+                 'audio_lock', 'input_device', 'output_device', 'demo', 'timeout'):
         if value(name):
             arguments.extend(['--' + name.replace('_', '-'), value(name)])
     if value('max_cycles'):
@@ -53,6 +53,7 @@ def generate_launch_description():
         DeclareLaunchArgument('service', default_value='vision', choices=['speech', 'vision', 'all']),
         DeclareLaunchArgument('run_name', default_value='smpa'),
         DeclareLaunchArgument('max_cycles', default_value='', description='Override execution.max_cycles'),
+        DeclareLaunchArgument('timeout', default_value='', description='Override camera/Sense wait timeout in seconds (default: 120)'),
         DeclareLaunchArgument('world_model_root', default_value=str(Path.cwd() / 'memory')),
         DeclareLaunchArgument('config', default_value=str(share / 'config/pipeline.yaml')),
         DeclareLaunchArgument('python', default_value=sys.executable),

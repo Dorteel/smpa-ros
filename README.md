@@ -10,9 +10,12 @@ sudo apt update
 sudo apt install git build-essential python3-venv python3-pip \
   python3-colcon-common-extensions libportaudio2 \
   ros-jazzy-rclpy ros-jazzy-sensor-msgs ros-jazzy-action-msgs \
-  ros-jazzy-launch-ros ros-jazzy-ament-cmake ros-jazzy-rosidl-default-generators
+  ros-jazzy-launch-ros ros-jazzy-ament-cmake ros-jazzy-ament-cmake-python \
+  ros-jazzy-rosidl-default-generators
 mkdir -p ~/ros2_ws/src
 cd ~/ros2_ws/src
+# The existing Webots checkout is also required for its generated interfaces.
+git clone --branch master https://github.com/Dorteel/webots_ros2_simulation.git
 git clone https://github.com/Dorteel/smpa-ros.git
 cd smpa-ros
 ./install.sh
@@ -36,7 +39,7 @@ ros2_ws/
 `install.sh` creates `.venv` with `--system-site-packages`, installs ordinary
 Python dependencies using its pip, reuses `requirements-speech.txt` and the
 vision requirements documented below, downloads the selected weights, and builds
-both ROS packages from the workspace root. Pillow, PyYAML, and pytest are not
+both SMPA packages plus the upstream simulation action interfaces from the workspace root. Pillow, PyYAML, and pytest are not
 required in system Python; pytest is only needed if you choose to run tests.
 Already satisfied dependencies and verified weights are reused. The script never
 installs system packages or edits shell configuration. Existing dependency ranges
@@ -186,6 +189,140 @@ For optional automated checks, install pytest separately and run
 models/devices; they do not verify real inference or simulation movement.
 
 
+## Temporary Webots Integration
+
+This experiment uses [Dorteel/webots_ros2_simulation](https://github.com/Dorteel/webots_ros2_simulation),
+branch **master** (inspected commit `f8a975f1572e248f1ab7614bbc69e9ff6fc619e9`).
+Keep it beside SMPA in `<workspace>/src/`. The original simulation sources and
+servers are reused unchanged; SMPA does not launch Webots or implement servers.
+
+```text
+<workspace>/src/
+├── webots_ros2_simulation/simulation_actions/  # The only interface package source
+└── smpa-ros/temp/simulation_actions/
+    └── README.md                             # Provenance/removal notes, not a ROS package
+```
+
+No vendoring is necessary. `install.sh` explicitly builds the upstream
+`simulation_actions` package alongside SMPA, generating Python modules and native
+ROS type support under the workspace-level `install/`. It reconfigures an old
+CMake cache if it points at a different checkout. This fixes the observed missing
+`Look` import: an older copy from another project's `external/` directory had
+produced the stale installation. No duplicate package is created under `temp/`.
+For another source location, set `SIMULATION_ACTIONS_SOURCE` to the actual
+upstream `simulation_actions` directory when running `./install.sh`.
+
+Install/build from clean ROS Jazzy terminals (skip cloning an existing checkout):
+
+```bash
+cd ~/ros2_ws/src
+git clone --branch master https://github.com/Dorteel/webots_ros2_simulation.git
+cd webots_ros2_simulation
+# First-time system setup; these upstream scripts request confirmation:
+./install-webots.sh
+./install-dependencies.sh
+cd ../smpa-ros
+./install.sh
+```
+
+The simulation needs Webots R2025a, working OpenGL/display access, and the basic
+full-robot profile with cameras/head joints. Build and launch it separately:
+
+```bash
+cd ~/ros2_ws/src/webots_ros2_simulation
+source /opt/ros/jazzy/setup.bash
+export SIM_WORKSPACE="$(cd ../.. && pwd)"
+./run_simulation.sh --build-only
+./run_simulation.sh
+```
+
+Use the same `SIM_WORKSPACE` for both commands to avoid a second repository-level
+installation. Keep the simulation stepping and use the same `ROS_DOMAIN_ID` in
+both terminals. Do not launch a second apartment if Webots is already running.
+The mapping/base-only profile is unsuitable: it lacks the required camera/head.
+
+In the SMPA terminal:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+ros2 interface show simulation_actions/action/Look
+ros2 action list -t
+ros2 topic list -t
+./run_smpa.sh max_cycles:=1
+```
+
+The normal Outlines planner still chooses `/look_left` or `/look_right`; no
+predefined-action mode or planning change is needed. `Look.Goal()` sends
+`angle: 0.0`, meaning the server's configured default (30 degrees in the inspected
+simulation), not zero movement. `/look_ahead` uses the distinct `LookAhead` type;
+that interface is built too, but it is not added to the planner's action set.
+Both installation and execution check generated action type support with SMPA's
+`.venv/bin/python`, so stale imports fail with a repair instruction before inference.
+
+Inspect the run directory printed by the loop:
+
+- `observations/vision/*.md`: actual camera description.
+- `world_model/iteration_001.md`: the generated environment snapshot.
+- `state/cycle_000001/plan.json`: selected action.
+- `state/cycle_000001/act.json`: serialized goal, acceptance, received feedback,
+  ROS result status, and the actual `success`, `message`, and `achieved_angle` result.
+- `metadata.yaml`: `status: completed` and `completed_cycles: 1` after Act succeeds.
+
+Success requires both ROS status **4 (SUCCEEDED)** and the server result's
+`success: true`. A rejected, aborted, timed-out, or false-success result cannot
+complete a cycle. Do not infer success from the launch process exit status alone.
+Cancellation/error recording remains in place. The world-model
+snapshot is generated before Plan/Act; execution evidence is saved separately in
+`act.json`, preserving the existing output structure. A successful result with
+zero achieved angle can mean the head was already at a mechanical limit.
+
+On CPU, inference can be slow. For a shared simulation machine, optionally set
+`export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2` before launching SMPA to limit CPU
+contention. The unchanged default Sense timeout is 120 seconds per wait; the
+first live CPU run timed out before any action was sent. The existing loop timeout
+is now exposed as an optional launch argument for this slow-machine experiment:
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 ./run_smpa.sh max_cycles:=1 timeout:=600 run_name:=webots_integration
+```
+
+This only increases the camera/Sense wait budget; `execution.action_timeout` still
+bounds action waits separately. No model, generation setting, planning algorithm,
+or default timeout is changed.
+
+Verified against the running Webots simulation on 2026-10-27 using the command
+above: real CPU Sense took 146.4 seconds, Model and constrained Plan completed,
+`/look_left` accepted `angle: 0.0`, and the server returned ROS status 4,
+`success: true`, and `achieved_angle: 0.5235988575` radians (about 30 degrees).
+Feedback reported approximately `8.19e-8` radians remaining. The run stopped with
+`completed_cycles: 1` and `status: completed`; no mocked action server was used.
+Evidence is in the local, Git-ignored run directory:
+
+```text
+memory/runs/2026-10-27_121944_844131+0100_webots_integration_a6b98c22-e653-4166-b08d-9e9a1e8de87e/
+```
+
+To inspect any run, replace the path with the directory printed by the loop:
+
+```bash
+RUN_DIR="memory/runs/2026-10-27_121944_844131+0100_webots_integration_a6b98c22-e653-4166-b08d-9e9a1e8de87e"
+cat "$RUN_DIR/metadata.yaml"
+cat "$RUN_DIR/state/cycle_000001/act.json"
+cat "$RUN_DIR/world_model/iteration_001.md"
+```
+
+Existing regressions passed with `ROS_DOMAIN_ID=86 ./test.sh --unit` (81 tests).
+An initial run on the live simulation domain crashed in native ROS speech-node
+teardown; the isolated-domain rerun passed without changing any tests.
+
+To remove the temporary integration later, remove `temp/simulation_actions/`
+and the upstream-source build/preflight blocks in `install.sh`/`run_smpa.sh`
+after providing the replacement action interface. The current fixed Look
+registry/executor still requires generated `simulation_actions`; replacing that
+robot-control design is a separate task.
+
 ## SMPA execution and run storage
 
 `smpa_ros/loop.py` is the single orchestrator. It creates a UUID and run directory,
@@ -205,7 +342,7 @@ each speech cycle calls the existing Listen action. `service:=all` collects both
 Model uses a local LLM to create a complete Markdown snapshot each cycle. Plan
 reads that snapshot and the run's `goal.md`, then uses the same loaded local text
 model with JSON Schema-constrained generation to choose exactly one action:
-`look_left` (`/look_left`) or `look_right` (`/look_right`). Act sends an empty goal
+`look_left` (`/look_left`) or `look_right` (`/look_right`). Act sends the default goal (`angle: 0.0`)
 to `simulation_actions/action/Look` and waits for ROS status SUCCEEDED before the
 next cycle captures a fresh image. Rejected, aborted, unavailable, or timed-out
 actions stop the run; active goals are canceled on early exit when possible.
@@ -241,10 +378,10 @@ ros2 interface show simulation_actions/action/Look
 ros2 action list -t
 ```
 
-The singular `action` namespace is used by the Python import. That interface is
-not installed in this checkout's test environment; genuine simulation motion has
-not been verified here. Tests use remapped endpoints and substitute a generated
-existing test interface for mocked Look servers.
+The singular `action` namespace is used by the Python import. Installation now
+builds the current upstream generated interface; see **Temporary Webots Integration**
+above. Unit tests still use remapped endpoints and an existing generated test
+interface for mocked servers; their success alone does not prove Webots motion.
 
 Build and launch from the repository root (model dependencies below still apply):
 
@@ -335,8 +472,9 @@ iterations cannot be overwritten. A failed/empty generation records an error in
 The record identifies the prompt, source observation files, previous iteration,
 output iteration, model identifier, and cycle. Plan receives the Markdown itself.
 `plan.json` records the goal, prompt, model identifier, available actions, and
-validated selection. `act.json` records the real request, acceptance, numeric ROS
-result status, cancellation details if needed, and execution success or error.
+validated selection. `act.json` records the real request, acceptance, received
+feedback, numeric ROS result status, server result payload, cancellation details
+if needed, and execution success or error.
 These action results are kept separate from LLM predictions.
 
 ```bash
