@@ -370,7 +370,7 @@ def test_goal_file_is_the_planning_source(tmp_path):
     assert record['goal'] == goal
     assert goal in record['prompt']
     assert 'look_left' in record['prompt'] and 'look_right' in record['prompt']
-    from smpa_ros.loop import ACTION_SCHEMA
+    from smpa_ros.plan import ACTION_SCHEMA
     assert planned.generate.call_args.kwargs['schema'] == ACTION_SCHEMA
 
 

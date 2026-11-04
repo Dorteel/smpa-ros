@@ -18,14 +18,10 @@ import yaml
 
 from smpa_ros.backends.base import Backend
 from smpa_ros.model import generate_world_model, load_prompt as model_prompt
+from smpa_ros.plan import (AVAILABLE_ACTIONS, load_prompt as plan_prompt, select_action,
+                           validate_settings as validate_plan_settings)
 
 DEFAULT_GOAL = '# Goal\n\nExplore the environment to discover previously unobserved objects and relationships.\n'
-AVAILABLE_ACTIONS = {
-    'look_left': {'endpoint': '/look_left', 'type': 'simulation_actions/action/Look'},
-    'look_right': {'endpoint': '/look_right', 'type': 'simulation_actions/action/Look'},
-}
-ACTION_SCHEMA = {'type': 'object', 'properties': {'action': {'type': 'string',
-                 'enum': list(AVAILABLE_ACTIONS)}}, 'required': ['action'], 'additionalProperties': False}
 
 
 def assigned_run(directory, run_id=''):
@@ -107,14 +103,15 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
     if isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1:
         raise ValueError('max_cycles must be a positive integer')
     pipeline = (configuration or {}).get('pipeline', {})
-    for stage in ('modeling', 'planning'):
-        effort = pipeline.get(stage, {}).get('reasoning_effort')
-        if effort is not None and effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
-            raise ValueError(f'{stage}.reasoning_effort is unsupported')
-        if 'max_output_tokens' in pipeline.get(stage, {}):
-            limit = pipeline[stage]['max_output_tokens']
-            if type(limit) is not int or limit <= 0:
-                raise ValueError(f'{stage}.max_output_tokens must be a positive integer')
+    stage = 'modeling'
+    effort = pipeline.get(stage, {}).get('reasoning_effort')
+    if effort is not None and effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
+        raise ValueError(f'{stage}.reasoning_effort is unsupported')
+    if 'max_output_tokens' in pipeline.get(stage, {}):
+        limit = pipeline[stage]['max_output_tokens']
+        if type(limit) is not int or limit <= 0:
+            raise ValueError(f'{stage}.max_output_tokens must be a positive integer')
+    validate_plan_settings(pipeline.get('planning', {}))
     directory, metadata = initialize_run(root or Path.cwd() / 'memory', run_name,
                                          models=models, configuration=configuration, goal=goal)
     metadata['max_cycles'] = max_cycles
@@ -135,38 +132,8 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
             world_model = generate_world_model(
                 directory, cycle, value, model, observations=observations, pipeline=pipeline,
                 models=models, model_identifier=model_identifier)
-            goal_text = (directory / 'goal.md').read_text(encoding='utf-8')
-            prompt, settings = stage_prompt('plan', world_model, goal=goal_text,
-                                            available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2))
-            if 'max_output_tokens' in pipeline.get('planning', {}):
-                settings['max_new_tokens'] = pipeline['planning']['max_output_tokens']
-            if pipeline.get('planning', {}).get('reasoning_effort') is not None:
-                settings['reasoning_effort'] = pipeline['planning']['reasoning_effort']
-            record = dict(stage='plan', cycle=cycle, input=world_model, goal=goal_text,
-                          model_identifier=plan_identifier or model_identifier or 'configured planner',
-                          prompt=prompt, available_actions=AVAILABLE_ACTIONS, selected_action=None)
-            try:
-                if plan is None:
-                    raise ValueError('Plan stage requires a schema-constrained LLM backend')
-                generate = getattr(plan, 'generate', plan)
-                text = generate(prompt, **settings, schema=ACTION_SCHEMA)
-                if not isinstance(text, str):
-                    raise ValueError('Planner must return a JSON string')
-                record['output'] = text
-                decision = json.loads(text)
-                if (not isinstance(decision, dict) or set(decision) != {'action'}
-                        or not isinstance(decision['action'], str) or decision['action'] not in AVAILABLE_ACTIONS):
-                    raise ValueError('Planner must select exactly one supported action: look_left or look_right')
-                record.update(status='generated', selected_action=decision['action'])
-            except (Exception, KeyboardInterrupt) as error:
-                record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
-                              error=f'{type(error).__name__}: {error}')
-                with (destination / 'plan.json').open('x', encoding='utf-8') as output:
-                    json.dump(record, output, ensure_ascii=False, indent=2)
-                raise
-            with (destination / 'plan.json').open('x', encoding='utf-8') as output:
-                json.dump(record, output, ensure_ascii=False, indent=2)
-            action = decision['action']
+            action = select_action(directory, cycle, world_model, plan, pipeline=pipeline,
+                                   plan_identifier=plan_identifier, model_identifier=model_identifier)
             record = dict(stage='act', cycle=cycle, requested_action=action,
                           endpoint=AVAILABLE_ACTIONS[action]['endpoint'], goal={}, goal_accepted=None,
                           result_status=None, success=False)
@@ -214,7 +181,12 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
     results = {}
     value = observation
     for name, backend in [('sense', sense), ('model', model), ('plan', plan), ('act', act)]:
-        prompt, config = model_prompt(value) if name == 'model' else stage_prompt(name, value)
+        if name == 'model':
+            prompt, config = model_prompt(value)
+        elif name == 'plan':
+            prompt, config = plan_prompt(value)
+        else:
+            prompt, config = stage_prompt(name, value)
         value = backend.generate(prompt, **config)
         results[name] = value
     return results

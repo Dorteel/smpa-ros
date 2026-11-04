@@ -35,18 +35,18 @@
 │   │   │   │       │   ├── __init__.py
 │   │   │   │       │   ├── loop.py
 │   │   │   │       │   ├── model.py
-│   │   │   │       │   ├── plan
-│   │   │   │       │   │   ├── models
-│   │   │   │       │   │   │   └── default.json
-│   │   │   │       │   │   └── prompts
-│   │   │   │       │   │       └── default.txt
+│   │   │   │       │   ├── plan.py
 │   │   │   │       │   ├── models
 │   │   │   │       │   │   ├── model
+│   │   │   │       │   │   │   └── default.json
+│   │   │   │       │   │   ├── plan
 │   │   │   │       │   │   │   └── default.json
 │   │   │   │       │   │   └── sense
 │   │   │   │       │   │       └── default.json
 │   │   │   │       │   ├── prompts
 │   │   │   │       │   │   ├── model
+│   │   │   │       │   │   │   └── default.txt
+│   │   │   │       │   │   ├── plan
 │   │   │   │       │   │   │   └── default.txt
 │   │   │   │       │   │   └── sense
 │   │   │   │       │   │       ├── default.txt
@@ -360,18 +360,18 @@
 │   ├── __init__.py
 │   ├── loop.py
 │   ├── model.py
-│   ├── plan
-│   │   ├── models
-│   │   │   └── default.json
-│   │   └── prompts
-│   │       └── default.txt
+│   ├── plan.py
 │   ├── models
 │   │   ├── model
+│   │   │   └── default.json
+│   │   ├── plan
 │   │   │   └── default.json
 │   │   └── sense
 │   │       └── default.json
 │   ├── prompts
 │   │   ├── model
+│   │   │   └── default.txt
+│   │   ├── plan
 │   │   │   └── default.txt
 │   │   └── sense
 │   │       ├── default.txt

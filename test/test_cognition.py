@@ -147,7 +147,7 @@ def test_local_llm_world_model_iterations(tmp_path):
 @pytest.mark.parametrize('available', [True, False])
 def test_transformers_schema_constraints_never_fall_back(monkeypatch, available):
     from types import ModuleType
-    from smpa_ros.loop import ACTION_SCHEMA
+    from smpa_ros.plan import ACTION_SCHEMA
     torch = MagicMock()
     transformers = MagicMock()
     monkeypatch.setitem(sys.modules, 'torch', torch)
