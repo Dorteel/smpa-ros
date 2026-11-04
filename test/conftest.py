@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 import pytest
 
-from smpa_ros.loop import initialize_run, finalize_run
+from smpa_ros.smpa import initialize_run, finalize_run
 
 
 @pytest.fixture(autouse=True)

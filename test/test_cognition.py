@@ -6,7 +6,7 @@ import pytest
 
 from smpa_ros.backends.ollama import OllamaBackend
 from smpa_ros.backends.transformers import TransformersBackend
-from smpa_ros.loop import run_cycle
+from smpa_ros.smpa import run_cycle
 
 
 def test_cycle_order_and_independent_backends():
@@ -104,7 +104,7 @@ def test_local_llm_world_model_iterations(tmp_path):
     import importlib.util
     from pathlib import Path
     import yaml
-    from smpa_ros.loop import run
+    from smpa_ros.smpa import run
 
     repository = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((repository / 'config.yaml').read_text())

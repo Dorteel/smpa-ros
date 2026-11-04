@@ -16,7 +16,42 @@ from smpa_ros_interfaces.srv import DescribeScene
 import yaml
 
 from smpa_ros.backends.transformers import TransformersVLM
-from smpa_ros.loop import assigned_run
+from smpa_ros.smpa import assigned_run
+
+
+def load_prompt(value):
+    component = files('smpa_ros')
+    prompt = component.joinpath('prompts/sense/default.txt').read_text(encoding='utf-8').format(
+        input=value, previous_world_model='', goal='', available_actions='')
+    settings = json.loads(component.joinpath('models/sense/default.json').read_text(encoding='utf-8'))
+    return prompt, settings
+
+
+def record_observation(directory, cycle, sense):
+    """Record Sense output and identify its newly persisted observation files."""
+    destination = directory / 'state' / f'cycle_{cycle:06d}'
+    destination.mkdir()
+    prior_files = set((directory / 'observations').rglob('*'))
+    value = sense(directory, cycle)
+    with (destination / 'sense.json').open('x', encoding='utf-8') as output:
+        json.dump({'stage': 'sense', 'cycle': cycle, 'output': value}, output, ensure_ascii=False, indent=2)
+    observations = [str(path.relative_to(directory)) for path in sorted(
+        set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()]
+    return value, observations
+
+
+def observe(node, config, directory, executor, timeout, service, speech=None):
+    """Collect the enabled vision and speech observations."""
+    outputs = {}
+    transcript = ''
+    if service in ('vision', 'all'):
+        outputs['vision'] = capture_once(node, config, directory, executor, timeout).read_text()
+    if speech is not None:
+        from smpa_ros_interfaces.action import Listen
+        result = speech.perform(speech.listener, Listen.Goal(language='en', max_duration=10.0))
+        transcript = result.transcription
+        outputs['speech'] = result.transcription
+    return json.dumps(outputs, ensure_ascii=False), transcript
 
 
 def image_to_pil(image: Image) -> PILImage.Image:

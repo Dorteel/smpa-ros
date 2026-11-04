@@ -14,6 +14,16 @@ def load_prompt(value, previous_world_model=''):
     return prompt, settings
 
 
+def validate_settings(settings):
+    effort = settings.get('reasoning_effort')
+    if effort is not None and effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
+        raise ValueError('modeling.reasoning_effort is unsupported')
+    if 'max_output_tokens' in settings:
+        limit = settings['max_output_tokens']
+        if type(limit) is not int or limit <= 0:
+            raise ValueError('modeling.max_output_tokens must be a positive integer')
+
+
 def generate_world_model(directory, cycle, value, model, *, observations, pipeline,
                          models=None, model_identifier=None):
     """Generate one snapshot and record its provenance, preserving earlier iterations."""

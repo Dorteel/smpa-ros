@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from smpa_ros.loop import assigned_run, initialize_run, finalize_run, run as run_session
+from smpa_ros.smpa import assigned_run, initialize_run, finalize_run, run as run_session
 
 
 
@@ -177,7 +177,7 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
         assignments.append(kwargs)
         options = kwargs['arguments']
         root = options[options.index('--world-model-root') + 1]
-        script = ('from smpa_ros.loop import run; '
+        script = ('from smpa_ros.smpa import run; '
                   f'run(3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model", '
                   f'plan=lambda prompt, **kw: ' + repr('{"action":"look_left"}') + ', '
                   'act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True))')
@@ -191,7 +191,7 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
     launch = LaunchService()
     launch.include_launch_description(LaunchDescription([OpaqueFunction(function=start)]))
     launch.run()
-    assert [item['executable'] for item in assignments] == ['loop']
+    assert [item['executable'] for item in assignments] == ['smpa']
     args = assignments[0]['arguments']
     assert args[args.index('--max-cycles') + 1] == '3'
     assert args[args.index('--service') + 1] == ('speech' if entrypoint == 'speech' else 'vision')

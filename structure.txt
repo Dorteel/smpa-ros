@@ -29,7 +29,7 @@
 │   │   │   │       │   │   └── transformers.py
 │   │   │   │       │   ├── hello.py
 │   │   │   │       │   ├── __init__.py
-│   │   │   │       │   ├── loop.py
+│   │   │   │       │   ├── smpa.py
 │   │   │   │       │   ├── model.py
 │   │   │   │       │   ├── plan.py
 │   │   │   │       │   ├── models
@@ -69,7 +69,7 @@
 │   │   │       ├── hello
 │   │   │       ├── listen
 │   │   │       ├── listener_talker
-│   │   │       ├── loop
+│   │   │       ├── smpa
 │   │   │       ├── sense
 │   │   │       └── talk
 │   │   └── share
@@ -354,7 +354,7 @@
 │   │   └── transformers.py
 │   ├── hello.py
 │   ├── __init__.py
-│   ├── loop.py
+│   ├── smpa.py
 │   ├── model.py
 │   ├── plan.py
 │   ├── models

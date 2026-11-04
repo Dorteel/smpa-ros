@@ -28,7 +28,7 @@ setup(
     entry_points={'console_scripts': [
         'hello = smpa_ros.hello:main',
         'sense = smpa_ros.sense:main',
-        'loop = smpa_ros.loop:main',
+        'smpa = smpa_ros.smpa:main',
         'listen = smpa_ros.speech.actions:listen_main',
         'talk = smpa_ros.speech.actions:talk_main',
         'listener_talker = smpa_ros.speech.demo:main',

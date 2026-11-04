@@ -48,7 +48,7 @@ import os
 from importlib.resources import files
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
-from smpa_ros.loop import run_cycle
+from smpa_ros.smpa import run_cycle
 import yaml
 
 assert files('smpa_ros').joinpath('prompts/sense/describe_scene.txt').read_text().strip() == 'Describe the scene.'
@@ -72,8 +72,8 @@ PY
 timeout --kill-after=2s 10s ros2 run smpa_ros hello > "$work_dir/hello.log" 2>&1
 cat "$work_dir/hello.log"
 grep -Fq 'Hello ROS 2!' "$work_dir/hello.log"
-timeout --kill-after=2s 10s ros2 run smpa_ros loop --help > "$work_dir/loop-help.txt"
-grep -Fq -- '--max-cycles' "$work_dir/loop-help.txt"
+timeout --kill-after=2s 10s ros2 run smpa_ros smpa --help > "$work_dir/smpa-help.txt"
+grep -Fq -- '--max-cycles' "$work_dir/smpa-help.txt"
 timeout --kill-after=2s 10s ros2 launch smpa_ros speech.launch.py --show-args > /dev/null
 timeout --kill-after=2s 10s ros2 launch smpa_ros llm.launch.py --show-args > /dev/null
 echo 'Build, tests (including SMPA cycles and audio persistence), installed assets, hello output, and loop command checks passed.'

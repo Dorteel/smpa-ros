@@ -5,7 +5,7 @@ import os
 import struct
 from tempfile import mkdtemp
 
-from smpa_ros.loop import assigned_run
+from smpa_ros.smpa import assigned_run
 
 
 class AudioObservation:

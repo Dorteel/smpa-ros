@@ -16,7 +16,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 def start(context):
     value = lambda name: LaunchConfiguration(name).perform(context)
     if value('participants_only') == 'true':
-        from smpa_ros.loop import assigned_run
+        from smpa_ros.smpa import assigned_run
         directory, identity = assigned_run(value('world_model_dir'), value('run_id'))
         namespace = '/run_' + identity.replace('-', '_')
         common = {'run_id': identity, 'world_model_dir': str(directory)}
@@ -42,7 +42,7 @@ def start(context):
             arguments.extend(['--' + name.replace('_', '-'), value(name)])
     if value('max_cycles'):
         arguments.extend(['--max-cycles', value('max_cycles')])
-    return [Node(package='smpa_ros', executable='loop', prefix=[value('python')],
+    return [Node(package='smpa_ros', executable='smpa', prefix=[value('python')],
                  arguments=arguments, output='screen',
                  on_exit=EmitEvent(event=Shutdown(reason='Loop process exited')))]
 

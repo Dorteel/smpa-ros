@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
-from importlib.resources import files
 from pathlib import Path
 
 import os
@@ -18,7 +17,8 @@ import yaml
 
 from smpa_ros.backends.base import Backend
 from smpa_ros.act import execute_action, perform_action, load_prompt as act_prompt
-from smpa_ros.model import generate_world_model, load_prompt as model_prompt
+from smpa_ros.model import (generate_world_model, load_prompt as model_prompt,
+                            validate_settings as validate_model_settings)
 from smpa_ros.plan import (load_prompt as plan_prompt, select_action,
                            validate_settings as validate_plan_settings)
 
@@ -84,13 +84,25 @@ def finalize_run(directory, metadata, status):
         write_metadata(directory, metadata)
 
 
-def stage_prompt(name, value, previous_world_model='', goal='', available_actions=''):
-    component = files('smpa_ros')
-    prompt_path = 'prompts/sense/default.txt' if name == 'sense' else name + '/prompts/default.txt'
-    settings_path = 'models/sense/default.json' if name == 'sense' else name + '/models/default.json'
-    prompt = component.joinpath(prompt_path).read_text(encoding='utf-8').format(input=value, previous_world_model=previous_world_model, goal=goal, available_actions=available_actions)
-    settings = json.loads(component.joinpath(settings_path).read_text(encoding='utf-8'))
-    return prompt, settings
+def complete_cycle(directory, metadata):
+    metadata['completed_cycles'] += 1
+    write_metadata(directory, metadata)
+
+
+def run_cycles(max_cycles, directory, metadata, *, sense, model, plan, act,
+               pipeline, models, model_identifier, plan_identifier):
+    """Execute Sense → Model → Plan → Act; advance only after Act completes."""
+    from smpa_ros.sense import record_observation
+
+    for cycle in range(1, max_cycles + 1):
+        observation, sources = record_observation(directory, cycle, sense)
+        world = generate_world_model(
+            directory, cycle, observation, model, observations=sources, pipeline=pipeline,
+            models=models, model_identifier=model_identifier)
+        action = select_action(directory, cycle, world, plan, pipeline=pipeline,
+                               plan_identifier=plan_identifier, model_identifier=model_identifier)
+        perform_action(directory, cycle, action, act)
+        complete_cycle(directory, metadata)
 
 
 def run(max_cycles=1, *, root=None, run_name='smpa', sense,
@@ -104,14 +116,7 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
     if isinstance(max_cycles, bool) or not isinstance(max_cycles, int) or max_cycles < 1:
         raise ValueError('max_cycles must be a positive integer')
     pipeline = (configuration or {}).get('pipeline', {})
-    stage = 'modeling'
-    effort = pipeline.get(stage, {}).get('reasoning_effort')
-    if effort is not None and effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
-        raise ValueError(f'{stage}.reasoning_effort is unsupported')
-    if 'max_output_tokens' in pipeline.get(stage, {}):
-        limit = pipeline[stage]['max_output_tokens']
-        if type(limit) is not int or limit <= 0:
-            raise ValueError(f'{stage}.max_output_tokens must be a positive integer')
+    validate_model_settings(pipeline.get('modeling', {}))
     validate_plan_settings(pipeline.get('planning', {}))
     directory, metadata = initialize_run(root or Path.cwd() / 'memory', run_name,
                                          models=models, configuration=configuration, goal=goal)
@@ -121,23 +126,9 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
         write_metadata(directory, metadata)
         if setup:
             setup(directory, metadata['run_id'])
-        for cycle in range(1, max_cycles + 1):
-            destination = directory / 'state' / f'cycle_{cycle:06d}'
-            destination.mkdir()
-            prior_files = set((directory / 'observations').rglob('*'))
-            value = sense(directory, cycle)
-            with (destination / 'sense.json').open('x', encoding='utf-8') as output:
-                json.dump({'stage': 'sense', 'cycle': cycle, 'output': value}, output, ensure_ascii=False, indent=2)
-            observations = [str(path.relative_to(directory)) for path in sorted(
-                set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()]
-            world_model = generate_world_model(
-                directory, cycle, value, model, observations=observations, pipeline=pipeline,
-                models=models, model_identifier=model_identifier)
-            action = select_action(directory, cycle, world_model, plan, pipeline=pipeline,
-                                   plan_identifier=plan_identifier, model_identifier=model_identifier)
-            perform_action(directory, cycle, action, act)
-            metadata['completed_cycles'] += 1
-            write_metadata(directory, metadata)
+        run_cycles(max_cycles, directory, metadata, sense=sense, model=model, plan=plan,
+                   act=act, pipeline=pipeline, models=models, model_identifier=model_identifier,
+                   plan_identifier=plan_identifier)
         status = 'completed'
         return directory
     except KeyboardInterrupt:
@@ -161,6 +152,8 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
     Backends are supplied independently, so callers control selection and reuse.
     Exceptions propagate to the caller; a failed stage stops the cycle.
     """
+    from smpa_ros.sense import load_prompt as sense_prompt
+
     results = {}
     value = observation
     for name, backend in [('sense', sense), ('model', model), ('plan', plan), ('act', act)]:
@@ -171,7 +164,7 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
         elif name == 'act':
             prompt, config = act_prompt(value)
         else:
-            prompt, config = stage_prompt(name, value)
+            prompt, config = sense_prompt(value)
         value = backend.generate(prompt, **config)
         results[name] = value
     return results
@@ -245,16 +238,10 @@ def main(args=None) -> None:
         nonlocal last_transcript
         if participant.poll() is not None:
             raise RuntimeError('Participating ROS processes exited')
-        outputs = {}
-        if options.service in ('vision', 'all'):
-            from smpa_ros.sense import capture_once
-            outputs['vision'] = capture_once(camera_node, config, directory, executor, options.timeout).read_text()
-        if speech is not None:
-            from smpa_ros_interfaces.action import Listen
-            result = speech.perform(speech.listener, Listen.Goal(language='en', max_duration=10.0))
-            last_transcript = result.transcription
-            outputs['speech'] = result.transcription
-        return json.dumps(outputs, ensure_ascii=False)
+        from smpa_ros.sense import observe
+        observation, last_transcript = observe(
+            camera_node, config, directory, executor, options.timeout, options.service, speech)
+        return observation
 
     def act(action, record):
         execute_action(camera_node, executor, action, record, action_timeout,

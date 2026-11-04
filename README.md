@@ -407,7 +407,7 @@ robot-control design is a separate task.
 
 ## SMPA execution and run storage
 
-`smpa_ros/loop.py` is the single orchestrator. It creates a UUID and run directory,
+`smpa_ros/smpa.py` is the single orchestrator. It creates a UUID and run directory,
 starts the operation servers with that assignment, executes Sense → Model → Plan
 → Act sequentially, counts complete cycles, stops at the configured limit, cleans
 up its servers, and finalizes metadata. Launch files only start and configure
@@ -576,8 +576,9 @@ New runs never relocate or modify existing observations. There is no runtime
 historical migration infrastructure. Synthesized audio is not stored as microphone
 input. Visual Jev remains an unchanged third-party project.
 
-The flow can be read in `loop.py`: `initialize_run()` → `run()` →
-`finalize_run()`. Its `main()` connects that flow to ROS. Imports for ROS and
+In `smpa.py`, `run()` owns `initialize_run()` → `run_cycles()` →
+`finalize_run()`. The 14-line `run_cycles()` expresses Sense → Model → Plan → Act.
+Its `main()` connects that flow to ROS. Imports for ROS and
 speech clients are lazy so other consumers can use the shared `assigned_run()`
 validator without importing ROS or starting orchestration. `run_cycle()` remains
 the original non-persistent text helper. There is no separate run-storage module.
@@ -707,7 +708,7 @@ synchronous, single-cycle Sense–Model–Plan–Act text pipeline and a ROS Sen
   assets are included in the installed Python package, with no model weights.
 - `backends/base.py` defines only `generate(prompt, *, max_new_tokens) -> str`.
   There is no registry, factory, or mandatory inheritance.
-- `loop.py` applies the prompts in order and returns all four outputs. A failed
+- `smpa.py` applies the prompts in order and returns all four outputs. A failed
   stage raises immediately. Backend objects are supplied separately for each
   component, allowing different models or reuse of one loaded instance.
 
@@ -730,7 +731,7 @@ editing any component. For example, after provisioning your own local models:
 ```python
 from smpa_ros.backends.ollama import OllamaBackend
 from smpa_ros.backends.transformers import TransformersBackend
-from smpa_ros.loop import run_cycle
+from smpa_ros.smpa import run_cycle
 
 local = OllamaBackend('your-installed-ollama-model')
 development = TransformersBackend('/absolute/path/outside/repository/to/model')
@@ -909,7 +910,7 @@ available for callers with an explicitly assigned run. Errors stop the run;
 ```bash
 ros2 topic list -t --no-daemon
 ros2 topic type /tiago/camera/color/image_raw --no-daemon
-ros2 run smpa_ros loop --config "$PWD/config.yaml" --run-name camera_run --max-cycles 3
+ros2 run smpa_ros smpa --config "$PWD/config.yaml" --run-name camera_run --max-cycles 3
 ```
 
 The camera must publish `sensor_msgs/msg/Image`. The loop manages the Sense server

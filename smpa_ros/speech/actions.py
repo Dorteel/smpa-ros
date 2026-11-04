@@ -17,7 +17,7 @@ from rclpy.signals import SignalHandlerOptions
 from smpa_ros_interfaces.action import Listen, Talk
 import yaml
 
-from smpa_ros.loop import assigned_run
+from smpa_ros.smpa import assigned_run
 from smpa_ros.speech.observation import AudioObservation
 from smpa_ros.backends.speech import FasterWhisperBackend, PiperBackend
 

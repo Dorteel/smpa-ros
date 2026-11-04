@@ -57,7 +57,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     """Exercise main, real ROS image/service exchange and persistence; mock model/process creation."""
     import json
     import yaml
-    import smpa_ros.loop as module
+    import smpa_ros.smpa as module
     from rclpy.qos import qos_profile_sensor_data
 
     config = {'camera_topic': '/test/smpa_main_camera', 'model': 'smolvlm2', 'prompt': 'describe_scene'}
@@ -95,7 +95,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     monkeypatch.setattr(module.subprocess, 'Popen', launch)
     monkeypatch.setattr(module.os, 'killpg', MagicMock())
     monkeypatch.setattr(rclpy, 'create_node', node)
-    args = ['loop', '--config', str(config_path), '--world-model-root', str(tmp_path / 'world_model'),
+    args = ['smpa', '--config', str(config_path), '--world-model-root', str(tmp_path / 'world_model'),
             '--timeout', '5']
     if override is not None:
         args += ['--max-cycles', str(override)]
@@ -142,12 +142,12 @@ def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
     # from outside the checkout so source imports cannot hide a stale installation.
     if entry_point == 'source':
         environment['PYTHONPATH'] = str(repository) + os.pathsep + environment.get('PYTHONPATH', '')
-        command = [sys.executable, '-c', 'from smpa_ros.loop import main; main()']
+        command = [sys.executable, '-c', 'from smpa_ros.smpa import main; main()']
     else:
         environment['PYTHONPATH'] = os.pathsep.join(
             path for path in environment.get('PYTHONPATH', '').split(os.pathsep)
             if path and Path(path).resolve() != repository)
-        command = [sys.executable, str(Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/loop')]
+        command = [sys.executable, str(Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/smpa')]
     result = subprocess.run(
         command + ['--config', str(config_path), '--max-cycles', '1', '--timeout', '5',
                    '--python', sys.executable, '--world-model-root', str(tmp_path / 'memory')],
