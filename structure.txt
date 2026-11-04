@@ -20,11 +20,7 @@
 │   │   │   ├── python3.12
 │   │   │   │   └── site-packages
 │   │   │   │       ├── smpa_ros
-│   │   │   │       │   ├── act
-│   │   │   │       │   │   ├── models
-│   │   │   │       │   │   │   └── default.json
-│   │   │   │       │   │   └── prompts
-│   │   │   │       │   │       └── default.txt
+│   │   │   │       │   ├── act.py
 │   │   │   │       │   ├── backends
 │   │   │   │       │   │   ├── base.py
 │   │   │   │       │   │   ├── __init__.py
@@ -37,6 +33,8 @@
 │   │   │   │       │   ├── model.py
 │   │   │   │       │   ├── plan.py
 │   │   │   │       │   ├── models
+│   │   │   │       │   │   ├── act
+│   │   │   │       │   │   │   └── default.json
 │   │   │   │       │   │   ├── model
 │   │   │   │       │   │   │   └── default.json
 │   │   │   │       │   │   ├── plan
@@ -44,6 +42,8 @@
 │   │   │   │       │   │   └── sense
 │   │   │   │       │   │       └── default.json
 │   │   │   │       │   ├── prompts
+│   │   │   │       │   │   ├── act
+│   │   │   │       │   │   │   └── default.txt
 │   │   │   │       │   │   ├── model
 │   │   │   │       │   │   │   └── default.txt
 │   │   │   │       │   │   ├── plan
@@ -345,11 +345,7 @@
 ├── setup.cfg
 ├── setup.py
 ├── smpa_ros
-│   ├── act
-│   │   ├── models
-│   │   │   └── default.json
-│   │   └── prompts
-│   │       └── default.txt
+│   ├── act.py
 │   ├── backends
 │   │   ├── base.py
 │   │   ├── __init__.py
@@ -362,6 +358,8 @@
 │   ├── model.py
 │   ├── plan.py
 │   ├── models
+│   │   ├── act
+│   │   │   └── default.json
 │   │   ├── model
 │   │   │   └── default.json
 │   │   ├── plan
@@ -369,6 +367,8 @@
 │   │   └── sense
 │   │       └── default.json
 │   ├── prompts
+│   │   ├── act
+│   │   │   └── default.txt
 │   │   ├── model
 │   │   │   └── default.txt
 │   │   ├── plan

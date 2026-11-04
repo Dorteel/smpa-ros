@@ -386,7 +386,7 @@ def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
     from rclpy.callback_groups import ReentrantCallbackGroup
     from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
     from smpa_ros_interfaces.action import Listen
-    from smpa_ros.loop import execute_action
+    from smpa_ros.act import execute_action
     parent = ModuleType('simulation_actions')
     interface = ModuleType('simulation_actions.action')
     interface.Look = Listen

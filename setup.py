@@ -9,7 +9,8 @@ setup(
     packages=find_packages(include=['smpa_ros', 'smpa_ros.*']),
     package_data={'smpa_ros': ['*/prompts/*.txt', '*/models/*.json', 'prompts/sense/*.txt', 'models/sense/*.json',
                                 'prompts/model/*.txt', 'models/model/*.json',
-                                'prompts/plan/*.txt', 'models/plan/*.json']},
+                                'prompts/plan/*.txt', 'models/plan/*.json',
+                                'prompts/act/*.txt', 'models/act/*.json']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'config.yaml']),

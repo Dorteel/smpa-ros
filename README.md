@@ -701,7 +701,7 @@ synchronous, single-cycle Sense–Model–Plan–Act text pipeline and a ROS Sen
 - `sense/`: prompts for extracting observed facts.
 - `model/`: prompts for describing world state and uncertainty.
 - `plan/`: prompts for proposing actions or requesting missing information.
-- `act/`: prompts for translating plans into proposed command descriptions.
+- `act.py`: ROS action execution and result persistence; prompts live in `prompts/act/`.
 - Each component's `prompts/default.txt` is its input template;
   `models/default.json` supplies inference settings (`max_new_tokens`). These
   assets are included in the installed Python package, with no model weights.

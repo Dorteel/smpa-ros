@@ -65,7 +65,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     model_backend = MagicMock()
     model_backend.generate.side_effect = lambda prompt, **settings: (
         '{"action":"look_left"}' if 'schema' in settings else '# World Model\n\n## Entities\n\n- pixel_1: Red pixel')
-    def execute(node, executor, action, record, timeout):
+    def execute(node, executor, action, record, timeout, **kwargs):
         record.update(goal_accepted=True, result_status=4, success=True)
     monkeypatch.setattr(module, 'execute_action', execute)
     constructor = MagicMock(return_value=model_backend)
