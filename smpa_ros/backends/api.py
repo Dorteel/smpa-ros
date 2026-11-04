@@ -42,12 +42,12 @@ class APIBackend:
             if base_url.endswith('/chat/completions'):
                 base_url = base_url[:-len('/chat/completions')]
         except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
-            raise ValueError('Invalid API configuration: check config/api.yaml provider, endpoint, '
+            raise ValueError('Invalid API configuration: check config.yaml provider, endpoint, '
                              'models, api_key_env, and positive timeout. Do not put credentials in URLs.') from None
         # Source configs resolve to the repository root. Installed configs use
         # the repository cwd established by run_smpa.sh; never search parent homes.
         if key_name not in os.environ:
-            env_path = config_path.parent.parent / '.env'
+            env_path = config_path.parent / '.env'
             if not env_path.is_file():
                 env_path = Path.cwd() / '.env'
             load_dotenv(env_path, override=False)
@@ -86,9 +86,9 @@ class APIBackend:
                 max_completion_tokens=max_new_tokens, temperature=0, **options,
             )
         except APITimeoutError:
-            raise RuntimeError('API request timed out; check connectivity or increase config/api.yaml timeout.') from None
+            raise RuntimeError('API request timed out; check connectivity or increase config.yaml timeout.') from None
         except APIConnectionError:
-            raise RuntimeError('API connection failed; check connectivity and config/api.yaml base_url.') from None
+            raise RuntimeError('API connection failed; check connectivity and config.yaml base_url.') from None
         except APIStatusError as error:
             # Never propagate server bodies/exception text: they may echo credentials.
             if error.status_code in (401, 403):

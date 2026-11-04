@@ -10,9 +10,8 @@ setup(
     package_data={'smpa_ros': ['*/prompts/*.txt', '*/models/*.json']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', 'config.yaml']),
         ('share/' + package_name + '/models', glob('models/*.yaml')),
-        ('share/' + package_name + '/config', ['config/pipeline.yaml', 'config/api.yaml']),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools>=30.3,<80', 'outlines==1.3.3', 'jsonschema==4.26.0',

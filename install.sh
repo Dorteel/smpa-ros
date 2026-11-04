@@ -139,7 +139,7 @@ import yaml
 from scripts.download_models import MODELS
 
 root = Path.cwd()
-pipeline = yaml.safe_load((root / 'config/pipeline.yaml').read_text())
+pipeline = yaml.safe_load((root / 'config.yaml').read_text())
 registry = yaml.safe_load((root / 'models/model_library.yaml').read_text())['models']
 modeling = pipeline['modeling']
 text = ({'backend': 'api'} if modeling.get('backend') == 'api'
@@ -198,7 +198,7 @@ cd "$repo"
 "$repo/.venv/bin/python" - <<'PY'
 from pathlib import Path
 import yaml
-pipeline = yaml.safe_load(Path('config/pipeline.yaml').read_text())
+pipeline = yaml.safe_load(Path('config.yaml').read_text())
 registry = yaml.safe_load(Path('models/model_library.yaml').read_text())['models']
 backend = (pipeline['modeling'].get('backend')
            or registry[pipeline['modeling']['model']]['backend'])

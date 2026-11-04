@@ -402,7 +402,7 @@ def main(args=None) -> None:
 
     parser = argparse.ArgumentParser(description='Execute one run of sequential SMPA cycles.')
     parser.add_argument('--config', type=Path, default=Path(
-        get_package_share_directory('smpa_ros')) / 'config/pipeline.yaml')
+        get_package_share_directory('smpa_ros')) / 'config.yaml')
     parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'memory')
     parser.add_argument('--run-name', default='smpa')
     parser.add_argument('--max-cycles', type=int, default=None)
@@ -502,15 +502,10 @@ def main(args=None) -> None:
 
     registry = Path(get_package_share_directory('smpa_ros')) / 'models'
     registry_entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
-    api_path = options.config.resolve().with_name('api.yaml')
-    api_settings = None
-    if (config['modeling'].get('backend') == 'api'
-            or config.get('vision', {}).get('backend') == 'api'):
-        api_settings = yaml.safe_load(api_path.read_text(encoding='utf-8'))
     if config['modeling'].get('backend') == 'api':
         selected_name = 'api'
         provider = config['modeling'].get('provider', 'openai')
-        settings = api_settings if 'base_url' in api_settings else api_settings[provider]
+        settings = config[provider]
         selected = {'backend': 'api', 'provider': provider, 'model_id': settings['models']['text']}
     else:
         selected_name = config['modeling']['model']
@@ -533,7 +528,7 @@ def main(args=None) -> None:
                 modeling_backend = TransformersBackend(str(path), enable_thinking=selected.get('enable_thinking'))
             elif selected['backend'] == 'api':
                 from smpa_ros.backends.api import APIBackend
-                modeling_backend = APIBackend(api_path, modality='text', provider=selected['provider'])
+                modeling_backend = APIBackend(options.config, modality='text', provider=selected['provider'])
             elif selected['backend'] == 'ollama':
                 from smpa_ros.backends.ollama import OllamaBackend
                 modeling_backend = OllamaBackend(selected['model_id'])
@@ -549,7 +544,7 @@ def main(args=None) -> None:
     if options.service in ('vision', 'all'):
         if config.get('vision', {}).get('backend') == 'api':
             provider = config['vision'].get('provider', 'openai')
-            settings = api_settings if 'base_url' in api_settings else api_settings[provider]
+            settings = config[provider]
             models['vision'] = {'backend': 'api', 'provider': provider, 'model_id': settings['models']['vision']}
         else:
             models['vision'] = yaml.safe_load((registry / (config['model'] + '.yaml')).read_text())

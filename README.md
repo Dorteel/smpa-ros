@@ -96,7 +96,7 @@ retain the setuptools constraint and system ROS packages.
 ### API inference (text and vision)
 
 Local defaults are unchanged. To use API inference, edit the existing sections
-in `config/pipeline.yaml`, preserving the other settings:
+in `config.yaml`, preserving the other settings:
 
 ```yaml
 vision:
@@ -117,12 +117,13 @@ Each API stage selects `provider: openai` or `provider: nebula` independently;
 omitting `provider` selects OpenAI. Plan shares the modeling provider. Local
 inference remains the default when `backend: api` is absent.
 
-`config/api.yaml` contains the named provider sections with endpoint, separate
+`config.yaml` contains the named provider sections with endpoint, separate
 text/vision models, credential variable, and timeout. OpenAI uses its `/v1` base;
 Nebula may specify the full `/api/chat/completions` endpoint, which the backend
-normalizes before the SDK appends `/chat/completions`. The original flat API
-configuration remains supported. Existing Nebula model identifiers are preserved. A custom pipeline config must have
-`api.yaml` beside it. Create `.env` yourself in the repository root:
+normalizes before the SDK appends `/chat/completions`. Existing Nebula model
+identifiers are preserved. A custom configuration contains both the pipeline
+settings and provider sections in the same file. Create `.env` yourself in the
+repository root:
 
 ```dotenv
 OPENAI_API_KEY=your_api_key_here
@@ -158,7 +159,7 @@ and Ollama behavior is unchanged.
 
 For authentication failures, check the configured variable and model access; for
 429 errors check quota/rate limits. For timeouts, check connectivity and increase
-`config/api.yaml`'s `timeout` if necessary, keeping the launch `timeout` longer
+`config.yaml`'s `timeout` if necessary, keeping the launch `timeout` longer
 than the API request timeout (180 seconds by default). Truncated responses require
 adequate existing stage output-token limits. Unsupported strict schemas or image
 inputs require a compatible provider/model; SMPA does not weaken constraints.
@@ -174,7 +175,7 @@ verification requires a running camera and simulation action servers.
 
 ### Models and backend prerequisites
 
-Installation reads `config/pipeline.yaml` and the existing model YAML files.
+Installation reads `config.yaml` and the existing model YAML files.
 Local Transformers vision needs the configured vision weights. API vision does
 not need local weights. Transformers
 text models also need local weights; Ollama text models do not, so their weights
@@ -239,7 +240,7 @@ configuration, and `.venv/bin/python`. Optional launch arguments override defaul
 ./run_smpa.sh
 ./run_smpa.sh max_cycles:=3 run_name:=experiment_01
 ./run_smpa.sh service:=speech max_cycles:=2
-./run_smpa.sh config:=/absolute/path/to/pipeline.yaml
+./run_smpa.sh config:=/absolute/path/to/config.yaml
 ```
 
 Existing arguments such as `model_root`, `world_model_root`, and audio devices
@@ -413,7 +414,7 @@ up its servers, and finalizes metadata. Launch files only start and configure
 processes. Neither services nor action callbacks create runs or initiate cycles.
 
 ```yaml
-# config/pipeline.yaml
+# config.yaml
 execution:
   max_cycles: 1
 ```
@@ -429,7 +430,7 @@ next cycle captures a fresh image. Rejected, aborted, unavailable, or timed-out
 actions stop the run; active goals are canceled on early exit when possible.
 Cancellation failures are recorded rather than reported as success.
 
-The goal is initialized from `goal` in `pipeline.yaml`; it is never autonomously
+The goal is initialized from `goal` in `config.yaml`; it is never autonomously
 modified. Plan reads the file each cycle, so an explicit user edit is observable.
 `execution.action_timeout` (default 30 seconds) bounds server, acceptance, result,
 and cancellation waits separately. The planner uses the registry entry selected
@@ -472,13 +473,13 @@ source /opt/ros/jazzy/setup.bash
 ./install.sh
 source ../../install/setup.bash
 
-# One complete cycle (default limit comes from pipeline.yaml).
+# One complete cycle (default limit comes from config.yaml).
 ros2 launch smpa_ros llm.launch.py service:=vision run_name:=scene_experiment \
-  config:="$PWD/config/pipeline.yaml" python:="$PWD/.venv/bin/python"
+  config:="$PWD/config.yaml" python:="$PWD/.venv/bin/python"
 
 # Three cycles in one run.
 ros2 launch smpa_ros llm.launch.py service:=vision run_name:=three_scenes max_cycles:=3 \
-  config:="$PWD/config/pipeline.yaml" python:="$PWD/.venv/bin/python"
+  config:="$PWD/config.yaml" python:="$PWD/.venv/bin/python"
 
 # Speech-only session, one Listen and echo per cycle.
 ros2 launch smpa_ros speech.launch.py run_name:=dialogue max_cycles:=3 demo:=true \
@@ -520,7 +521,7 @@ use timestamped names (default `smpa`) and UUIDs; historical runs are never rena
 Model selection uses existing configuration and registry files:
 
 ```yaml
-# config/pipeline.yaml
+# config.yaml
 modeling:
   model: qwen3-0.6b
 ```
@@ -793,7 +794,7 @@ ROS parameter. The central `models/` YAML files register all three requested
 models and are installed under `share/smpa_ros/models`. They contain metadata,
 not weights. Relative config names resolve there; absolute YAML paths also work.
 
-Hardware settings live only in `config/pipeline.yaml`; model IDs and paths
+Hardware settings live only in `config.yaml`; model IDs and paths
 are unchanged. Missing settings default to `auto`:
 
 ```yaml
@@ -870,7 +871,7 @@ source /opt/ros/jazzy/setup.bash
 source ../../install/setup.bash
 .venv/bin/python -c 'from smpa_ros.sense.service import main; main()' --ros-args \
   -p world_model_dir:="$RUN_DIR" -p run_id:="$RUN_ID" -r /sense:="$RUN_PREFIX/sense" \
-  -p config:="$PWD/config/pipeline.yaml" -p device:=cpu -p dtype:=auto
+  -p config:="$PWD/config.yaml" -p device:=cpu -p dtype:=auto
 ```
 
 Runtime loading is local-only and reuses the existing download report or cache;
@@ -894,7 +895,7 @@ cleanup. Actual VLM quality and GPU memory use require a manual run.
 
 ## Camera observations within SMPA cycles
 
-`config/pipeline.yaml` selects `/tiago/camera/color/image_raw`, `smolvlm2`, and the
+`config.yaml` selects `/tiago/camera/color/image_raw`, `smolvlm2`, and the
 `describe_scene` prompt. Both the Sense server and loop receive the same config.
 The source config can be selected through the `config` launch argument; otherwise
 the installed config is used. Rebuild after editing installed configuration assets.
@@ -908,7 +909,7 @@ available for callers with an explicitly assigned run. Errors stop the run;
 ```bash
 ros2 topic list -t --no-daemon
 ros2 topic type /tiago/camera/color/image_raw --no-daemon
-ros2 run smpa_ros loop --config "$PWD/config/pipeline.yaml" --run-name camera_run --max-cycles 3
+ros2 run smpa_ros loop --config "$PWD/config.yaml" --run-name camera_run --max-cycles 3
 ```
 
 The camera must publish `sensor_msgs/msg/Image`. The loop manages the Sense server

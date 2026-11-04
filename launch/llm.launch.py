@@ -55,7 +55,7 @@ def generate_launch_description():
         DeclareLaunchArgument('max_cycles', default_value='', description='Override execution.max_cycles'),
         DeclareLaunchArgument('timeout', default_value='', description='Override camera/Sense wait timeout in seconds (default: 120)'),
         DeclareLaunchArgument('world_model_root', default_value=str(Path.cwd() / 'memory')),
-        DeclareLaunchArgument('config', default_value=str(share / 'config/pipeline.yaml')),
+        DeclareLaunchArgument('config', default_value=str(share / 'config.yaml')),
         DeclareLaunchArgument('python', default_value=sys.executable),
         DeclareLaunchArgument('model_root', default_value=str(Path.cwd() / 'models')),
         DeclareLaunchArgument('audio_lock', default_value=str(Path(tempfile.gettempdir()) / f'smpa-speech-{os.getuid()}.lock')),

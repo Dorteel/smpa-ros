@@ -66,7 +66,7 @@ def test_vlm_processor_and_local_loading(monkeypatch):
 def test_sense_service_round_trip(tmp_path, vision, expected_limit):
     """Use real ROS service serialization/discovery with a mock VLM only."""
     import yaml
-    config = tmp_path / 'pipeline.yaml'
+    config = tmp_path / 'config.yaml'
     config.write_text(yaml.safe_dump({'model': 'smolvlm2', 'vision': vision}))
     rclpy.init(args=['--ros-args', '-p', f'config:={config}'])
     executor = SingleThreadedExecutor()
@@ -110,7 +110,7 @@ def test_sense_service_round_trip(tmp_path, vision, expected_limit):
 @pytest.mark.parametrize('value', [0, -1, True, 1.5, '512', None])
 def test_invalid_vision_token_budget(tmp_path, value):
     import yaml
-    config = tmp_path / 'pipeline.yaml'
+    config = tmp_path / 'config.yaml'
     config.write_text(yaml.safe_dump({'model': 'smolvlm2',
                                      'vision': {'max_output_tokens': value}}))
     rclpy.init(args=['--ros-args', '-p', f'config:={config}'])
@@ -175,3 +175,31 @@ def test_api_reasoning_control_and_safe_metadata(effort):
     response.choices[0].message.content = ''
     with pytest.raises(RuntimeError, match='truncated'):
         backend.generate('prompt', reasoning_effort=effort)
+
+
+@pytest.mark.parametrize('provider', ['openai', 'nebula'])
+@pytest.mark.parametrize('modality', ['text', 'vision'])
+def test_unified_provider_config(tmp_path, monkeypatch, provider, modality):
+    from pathlib import Path
+    from unittest.mock import patch
+    import yaml
+    from smpa_ros.backends.api import APIBackend
+
+    source = Path(__file__).resolve().parents[1] / 'config.yaml'
+    config = tmp_path / 'config.yaml'
+    config.write_text(source.read_text())
+    settings = yaml.safe_load(config.read_text())[provider]
+    key_name = settings['api_key_env']
+    monkeypatch.setenv(key_name, 'temporary-test-value')
+    monkeypatch.delenv(key_name)
+    (tmp_path / '.env').write_text(f'{key_name}=test-config-secret\n')
+    monkeypatch.chdir(tmp_path.parent)
+    with patch('openai.OpenAI') as client:
+        backend = APIBackend(config, provider=provider, modality=modality)
+        assert backend.model_id == settings['models'][modality]
+        assert client.call_args.kwargs['base_url'] == settings['base_url'].removesuffix('/chat/completions')
+        assert client.call_args.kwargs['timeout'] == settings['timeout']
+        assert client.call_args.kwargs['api_key'] == 'test-config-secret'
+        monkeypatch.setenv(key_name, 'test-environment-secret')
+        APIBackend(config, provider=provider, modality=modality)
+        assert client.call_args.kwargs['api_key'] == 'test-environment-secret'

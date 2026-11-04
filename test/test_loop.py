@@ -72,7 +72,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend', constructor)
     if configured is not None:
         config['execution'] = {'max_cycles': configured}
-    config_path = tmp_path / 'pipeline.yaml'
+    config_path = tmp_path / 'config.yaml'
     config_path.write_text(yaml.safe_dump(config))
     commands = []
     process = MagicMock()
@@ -114,3 +114,49 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     assert 'participants_only:=true' in commands[0]
     for cycle in range(1, expected + 1):
         assert json.loads((directory / f'state/cycle_{cycle:06d}/act.json').read_text())['status'] == 'succeeded'
+
+
+@pytest.mark.parametrize('entry_point', ['source', 'installed'])
+def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
+    """Start real loop/Sense processes with no sibling configuration files."""
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+    import uuid
+    import yaml
+    from ament_index_python.packages import get_package_prefix
+
+    repository = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((repository / 'config.yaml').read_text())
+    config['camera_topic'] = '/test/config_' + uuid.uuid4().hex
+    config['vision'].update(backend='api', provider='nebula')
+    config['modeling'].update(backend='api', provider='openai')
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(yaml.safe_dump(config))
+    environment = os.environ.copy()
+    for provider in ('openai', 'nebula'):
+        environment[config[provider]['api_key_env']] = 'test-config-secret'
+    environment['ROS_LOG_DIR'] = str(tmp_path / 'ros_logs')
+    # An explicit source path checks main(); otherwise use the installed console script
+    # from outside the checkout so source imports cannot hide a stale installation.
+    if entry_point == 'source':
+        environment['PYTHONPATH'] = str(repository) + os.pathsep + environment.get('PYTHONPATH', '')
+        command = [sys.executable, '-c', 'from smpa_ros.loop import main; main()']
+    else:
+        environment['PYTHONPATH'] = os.pathsep.join(
+            path for path in environment.get('PYTHONPATH', '').split(os.pathsep)
+            if path and Path(path).resolve() != repository)
+        command = [sys.executable, str(Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/loop')]
+    result = subprocess.run(
+        command + ['--config', str(config_path), '--max-cycles', '1', '--timeout', '5',
+                   '--python', sys.executable, '--world-model-root', str(tmp_path / 'memory')],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=45)
+    output = result.stdout + result.stderr
+    assert 'FileNotFoundError' not in output, output
+    assert '/sense service ready' in output, output
+    assert f"No image received on {config['camera_topic']}" in output, output
+    assert result.returncode != 0  # Expected bounded stop: no test camera publishes.
+    directory, = (tmp_path / 'memory/runs').iterdir()
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert metadata['configuration']['pipeline'] == config

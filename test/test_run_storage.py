@@ -241,7 +241,7 @@ def test_participant_launcher_consumes_one_assignment(assigned_test_run, monkeyp
     context = LaunchContext()
     context.launch_configurations.update(participants_only='true', service='all',
         world_model_dir=str(session.directory), run_id=session.run_id, python='python3',
-        config='pipeline.yaml', model_root='/models', audio_lock='/tmp/test.lock',
+        config='config.yaml', model_root='/models', audio_lock='/tmp/test.lock',
         input_device='', output_device='')
     nodes = module.start(context)
     assert [node['executable'] for node in nodes] == ['sense', 'listen', 'talk']

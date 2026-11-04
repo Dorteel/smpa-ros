@@ -1,7 +1,6 @@
 .
 ├── AGENTS.md
-├── config
-│   └── pipeline.yaml
+├── config.yaml
 ├── .gitignore
 ├── install
 │   ├── COLCON_IGNORE
@@ -82,8 +81,7 @@
 │   │       │   └── packages
 │   │       │       └── smpa_ros
 │   │       └── smpa_ros
-│   │           ├── config
-│   │           │   └── pipeline.yaml
+│   │           ├── config.yaml
 │   │           ├── hook
 │   │           │   ├── ament_prefix_path.dsv
 │   │           │   ├── ament_prefix_path.ps1

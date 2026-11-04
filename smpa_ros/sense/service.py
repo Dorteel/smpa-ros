@@ -45,7 +45,7 @@ class SenseService(Node):
             self.get_parameter('world_model_dir').value, self.get_parameter('run_id').value)
         self.get_logger().info('Sense node starting')
         share = Path(get_package_share_directory('smpa_ros'))
-        self.declare_parameter('config', str(share / 'config/pipeline.yaml'))
+        self.declare_parameter('config', str(share / 'config.yaml'))
         pipeline = yaml.safe_load(Path(self.get_parameter('config').value).read_text())
         vision = pipeline.get('vision', {})
         vision_backend = vision.get('backend', 'transformers')
@@ -67,7 +67,7 @@ class SenseService(Node):
         ).read_text(encoding='utf-8').strip()
         if backend is None and vision_backend == 'api':
             from smpa_ros.backends.api import APIBackend
-            api_path = Path(self.get_parameter('config').value).resolve().with_name('api.yaml')
+            api_path = Path(self.get_parameter('config').value).resolve()
             backend = APIBackend(api_path, modality='vision', provider=vision.get('provider', 'openai'))
             self.get_logger().info(f'Using API vision model: {backend.model_id}')
         elif backend is None:
@@ -78,7 +78,7 @@ class SenseService(Node):
             # The downloader report maps configured IDs to its existing local layout.
             model_source = config['model_id']
             pipeline_path = Path(self.get_parameter('config').value).resolve()
-            for root in (pipeline_path.parent.parent / 'models', Path.cwd() / 'models'):
+            for root in (pipeline_path.parent / 'models', Path.cwd() / 'models'):
                 report = root / 'download_report.json'
                 if not report.is_file():
                     continue

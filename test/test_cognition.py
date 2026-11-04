@@ -107,7 +107,9 @@ def test_local_llm_world_model_iterations(tmp_path):
     from smpa_ros.loop import run
 
     repository = Path(__file__).resolve().parents[1]
-    config = yaml.safe_load((repository / 'config/pipeline.yaml').read_text())
+    config = yaml.safe_load((repository / 'config.yaml').read_text())
+    if config['modeling'].get('backend') == 'api':
+        pytest.skip('API modeling is configured; no local modeling checkpoint selected')
     registry = yaml.safe_load((repository / 'models/model_library.yaml').read_text())['models']
     selected = registry[config['modeling']['model']]
     checkpoint = repository / 'models' / selected.get('path', '')

@@ -46,7 +46,7 @@ PY
 # Retain the repository as cwd for existing model and memory path defaults.
 cd "$repo"
 arguments=()
-for default in 'service:=vision' 'max_cycles:=1' "config:=$repo/config/pipeline.yaml" "python:=$repo/.venv/bin/python"; do
+for default in 'service:=vision' 'max_cycles:=1' "config:=$repo/config.yaml" "python:=$repo/.venv/bin/python"; do
     overridden=false
     for argument in "$@"; do
         [[ $argument == "${default%%:=*}:="* ]] && overridden=true

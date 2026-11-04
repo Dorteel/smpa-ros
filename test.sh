@@ -41,7 +41,7 @@ if (( test_status != 0 )); then
 fi
 
 # Run outside the source tree to verify that prompts/configs were installed.
-export SMPA_TEST_PIPELINE_CONFIG="$PWD/config/pipeline.yaml"
+export SMPA_TEST_PIPELINE_CONFIG="$PWD/config.yaml"
 cd "$work_dir"
 python3 - <<'PY'
 import os
@@ -53,7 +53,7 @@ import yaml
 
 assert files('smpa_ros.sense').joinpath('prompts/describe_scene.txt').read_text().strip() == 'Describe the scene.'
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
-pipeline = yaml.safe_load((registry.parent / 'config/pipeline.yaml').read_text())
+pipeline = yaml.safe_load((registry.parent / 'config.yaml').read_text())
 assert pipeline == yaml.safe_load(Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).read_text())
 assert type(pipeline['execution']['max_cycles']) is int and pipeline['execution']['max_cycles'] > 0
 for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):
