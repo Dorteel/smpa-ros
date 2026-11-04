@@ -34,20 +34,20 @@
 │   │   │   │       │   ├── hello.py
 │   │   │   │       │   ├── __init__.py
 │   │   │   │       │   ├── loop.py
-│   │   │   │       │   ├── model
-│   │   │   │       │   │   ├── models
-│   │   │   │       │   │   │   └── default.json
-│   │   │   │       │   │   └── prompts
-│   │   │   │       │   │       └── default.txt
+│   │   │   │       │   ├── model.py
 │   │   │   │       │   ├── plan
 │   │   │   │       │   │   ├── models
 │   │   │   │       │   │   │   └── default.json
 │   │   │   │       │   │   └── prompts
 │   │   │   │       │   │       └── default.txt
 │   │   │   │       │   ├── models
+│   │   │   │       │   │   ├── model
+│   │   │   │       │   │   │   └── default.json
 │   │   │   │       │   │   └── sense
 │   │   │   │       │   │       └── default.json
 │   │   │   │       │   ├── prompts
+│   │   │   │       │   │   ├── model
+│   │   │   │       │   │   │   └── default.txt
 │   │   │   │       │   │   └── sense
 │   │   │   │       │   │       ├── default.txt
 │   │   │   │       │   │       └── describe_scene.txt
@@ -359,20 +359,20 @@
 │   ├── hello.py
 │   ├── __init__.py
 │   ├── loop.py
-│   ├── model
-│   │   ├── models
-│   │   │   └── default.json
-│   │   └── prompts
-│   │       └── default.txt
+│   ├── model.py
 │   ├── plan
 │   │   ├── models
 │   │   │   └── default.json
 │   │   └── prompts
 │   │       └── default.txt
 │   ├── models
+│   │   ├── model
+│   │   │   └── default.json
 │   │   └── sense
 │   │       └── default.json
 │   ├── prompts
+│   │   ├── model
+│   │   │   └── default.txt
 │   │   └── sense
 │   │       ├── default.txt
 │   │       └── describe_scene.txt

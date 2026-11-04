@@ -544,8 +544,8 @@ An existing Ollama backend is also supported for registry entries with
 `backend: ollama` and an already installed `model_id`; no additional text backend
 framework is introduced.
 
-The modeling instructions live in `smpa_ros/model/prompts/default.txt`; generation
-settings live in `smpa_ros/model/models/default.json` (512 new tokens). The prompt
+The modeling instructions live in `smpa_ros/prompts/model/default.txt`; generation
+settings live in `smpa_ros/models/model/default.json` (512 new tokens). The prompt
 requests Entities, Properties, Relations, and Uncertain Information, stable IDs,
 and separation of observations from inferences. These are model instructions,
 not semantic guarantees. Snapshot publication is atomic and exclusive: previous

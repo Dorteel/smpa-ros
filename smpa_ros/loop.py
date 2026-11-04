@@ -17,6 +17,7 @@ from uuid import uuid4
 import yaml
 
 from smpa_ros.backends.base import Backend
+from smpa_ros.model import generate_world_model, load_prompt as model_prompt
 
 DEFAULT_GOAL = '# Goal\n\nExplore the environment to discover previously unobserved objects and relationships.\n'
 AVAILABLE_ACTIONS = {
@@ -131,49 +132,9 @@ def run(max_cycles=1, *, root=None, run_name='smpa', sense,
                 json.dump({'stage': 'sense', 'cycle': cycle, 'output': value}, output, ensure_ascii=False, indent=2)
             observations = [str(path.relative_to(directory)) for path in sorted(
                 set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()]
-            source_record = str((destination / 'sense.json').relative_to(directory))
-            previous = directory / 'world_model' / f'iteration_{cycle - 1:03d}.md' if cycle > 1 else None
-            previous_text = previous.read_text(encoding='utf-8') if previous is not None else ''
-            prompt, settings = stage_prompt('model', value, previous_text)
-            if 'max_output_tokens' in pipeline.get('modeling', {}):
-                settings['max_new_tokens'] = pipeline['modeling']['max_output_tokens']
-            if pipeline.get('modeling', {}).get('reasoning_effort') is not None:
-                settings['reasoning_effort'] = pipeline['modeling']['reasoning_effort']
-            snapshot = directory / 'world_model' / f'iteration_{cycle:03d}.md'
-            backend_id = getattr(model, 'model_id', None) or getattr(model, 'model', None)
-            record = dict(stage='model', cycle=cycle, input=value, prompt=prompt,
-                          source_observations=[source_record, *observations],
-                          previous_iteration=str(previous.relative_to(directory)) if previous else None,
-                          iteration=str(snapshot.relative_to(directory)),
-                          model_identifier=model_identifier or (models or {}).get('model', {}).get('model_id')
-                          or (backend_id if isinstance(backend_id, str) else type(model).__name__))
-            try:
-                if model is None:
-                    raise ValueError('Model stage requires a configured local LLM backend')
-                generate = getattr(model, 'generate', model)
-                world_model = generate(prompt, **settings)
-                if not isinstance(world_model, str) or not world_model.strip():
-                    raise ValueError('Model returned an empty world model')
-                # Publish a complete snapshot exclusively; never replace an earlier iteration.
-                with NamedTemporaryFile(mode='w', encoding='utf-8', dir=snapshot.parent,
-                                        prefix='.iteration-', delete=False) as output:
-                    pending = Path(output.name)
-                    try:
-                        output.write(world_model)
-                        output.flush()
-                        os.fsync(output.fileno())
-                        os.link(pending, snapshot)
-                    finally:
-                        pending.unlink(missing_ok=True)
-                record.update(status='generated', output=world_model)
-            except (Exception, KeyboardInterrupt) as error:
-                record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
-                              error=f'{type(error).__name__}: {error}', iteration=None)
-                with (destination / 'model.json').open('x', encoding='utf-8') as output:
-                    json.dump(record, output, ensure_ascii=False, indent=2)
-                raise
-            with (destination / 'model.json').open('x', encoding='utf-8') as output:
-                json.dump(record, output, ensure_ascii=False, indent=2)
+            world_model = generate_world_model(
+                directory, cycle, value, model, observations=observations, pipeline=pipeline,
+                models=models, model_identifier=model_identifier)
             goal_text = (directory / 'goal.md').read_text(encoding='utf-8')
             prompt, settings = stage_prompt('plan', world_model, goal=goal_text,
                                             available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2))
@@ -253,7 +214,7 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
     results = {}
     value = observation
     for name, backend in [('sense', sense), ('model', model), ('plan', plan), ('act', act)]:
-        prompt, config = stage_prompt(name, value)
+        prompt, config = model_prompt(value) if name == 'model' else stage_prompt(name, value)
         value = backend.generate(prompt, **config)
         results[name] = value
     return results
