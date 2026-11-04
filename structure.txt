@@ -44,14 +44,14 @@
 │   │   │   │       │   │   │   └── default.json
 │   │   │   │       │   │   └── prompts
 │   │   │   │       │   │       └── default.txt
-│   │   │   │       │   ├── sense
-│   │   │   │       │   │   ├── __init__.py
-│   │   │   │       │   │   ├── models
-│   │   │   │       │   │   │   └── default.json
-│   │   │   │       │   │   ├── prompts
-│   │   │   │       │   │   │   ├── default.txt
-│   │   │   │       │   │   │   └── describe_scene.txt
-│   │   │   │       │   │   └── service.py
+│   │   │   │       │   ├── models
+│   │   │   │       │   │   └── sense
+│   │   │   │       │   │       └── default.json
+│   │   │   │       │   ├── prompts
+│   │   │   │       │   │   └── sense
+│   │   │   │       │   │       ├── default.txt
+│   │   │   │       │   │       └── describe_scene.txt
+│   │   │   │       │   ├── sense.py
 │   │   │   │       │   └── speech
 │   │   │   │       │       ├── actions.py
 │   │   │   │       │       ├── demo.py
@@ -369,14 +369,14 @@
 │   │   │   └── default.json
 │   │   └── prompts
 │   │       └── default.txt
-│   ├── sense
-│   │   ├── __init__.py
-│   │   ├── models
-│   │   │   └── default.json
-│   │   ├── prompts
-│   │   │   ├── default.txt
-│   │   │   └── describe_scene.txt
-│   │   └── service.py
+│   ├── models
+│   │   └── sense
+│   │       └── default.json
+│   ├── prompts
+│   │   └── sense
+│   │       ├── default.txt
+│   │       └── describe_scene.txt
+│   ├── sense.py
 │   └── speech
 │       ├── actions.py
 │       ├── demo.py

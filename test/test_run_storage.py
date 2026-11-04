@@ -203,7 +203,7 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
 def test_participant_restarts_share_run(assigned_test_run):
     from unittest.mock import MagicMock
     import rclpy
-    from smpa_ros.sense.service import SenseService
+    from smpa_ros.sense import SenseService
     from smpa_ros.speech.actions import SpeechServer
 
     session = assigned_test_run

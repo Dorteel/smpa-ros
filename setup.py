@@ -7,7 +7,7 @@ setup(
     name=package_name,
     version='0.0.1',
     packages=find_packages(include=['smpa_ros', 'smpa_ros.*']),
-    package_data={'smpa_ros': ['*/prompts/*.txt', '*/models/*.json']},
+    package_data={'smpa_ros': ['*/prompts/*.txt', '*/models/*.json', 'prompts/sense/*.txt', 'models/sense/*.json']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'config.yaml']),
@@ -24,7 +24,7 @@ setup(
     tests_require=['pytest'],
     entry_points={'console_scripts': [
         'hello = smpa_ros.hello:main',
-        'sense = smpa_ros.sense.service:main',
+        'sense = smpa_ros.sense:main',
         'loop = smpa_ros.loop:main',
         'listen = smpa_ros.speech.actions:listen_main',
         'talk = smpa_ros.speech.actions:talk_main',

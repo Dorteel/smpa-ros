@@ -51,7 +51,7 @@ from ament_index_python.packages import get_package_share_directory
 from smpa_ros.loop import run_cycle
 import yaml
 
-assert files('smpa_ros.sense').joinpath('prompts/describe_scene.txt').read_text().strip() == 'Describe the scene.'
+assert files('smpa_ros').joinpath('prompts/sense/describe_scene.txt').read_text().strip() == 'Describe the scene.'
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
 pipeline = yaml.safe_load((registry.parent / 'config.yaml').read_text())
 assert pipeline == yaml.safe_load(Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).read_text())

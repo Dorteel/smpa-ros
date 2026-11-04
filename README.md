@@ -714,7 +714,7 @@ synchronous, single-cycle Sense–Model–Plan–Act text pipeline and a ROS Sen
 The text loop remains unchanged. Sense additionally exposes `/sense`
 using `smpa_ros_interfaces/srv/DescribeScene`: one `sensor_msgs/Image` and a prompt
 produce `description` and `error` strings. An empty/whitespace prompt uses
-`sense/prompts/describe_scene.txt` (`Describe the scene.`). Errors return an empty
+`prompts/sense/describe_scene.txt` (`Describe the scene.`). Errors return an empty
 description and a nonempty error; clients must check the error field.
 
 The small nested `smpa_ros_interfaces` ament_cmake package is necessary to generate
@@ -869,7 +869,7 @@ Supply the assigned run variables described earlier:
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ../../install/setup.bash
-.venv/bin/python -c 'from smpa_ros.sense.service import main; main()' --ros-args \
+.venv/bin/python -c 'from smpa_ros.sense import main; main()' --ros-args \
   -p world_model_dir:="$RUN_DIR" -p run_id:="$RUN_ID" -r /sense:="$RUN_PREFIX/sense" \
   -p config:="$PWD/config.yaml" -p device:=cpu -p dtype:=auto
 ```

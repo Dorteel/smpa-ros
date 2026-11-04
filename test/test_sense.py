@@ -7,7 +7,7 @@ from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import Image
 from smpa_ros_interfaces.srv import DescribeScene
 
-from smpa_ros.sense.service import SenseService, image_to_pil
+from smpa_ros.sense import SenseService, image_to_pil
 from smpa_ros.backends.transformers import TransformersVLM
 
 

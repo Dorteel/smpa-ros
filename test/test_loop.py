@@ -6,8 +6,8 @@ from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
-from smpa_ros.loop import capture_once
-from smpa_ros.sense.service import SenseService
+from smpa_ros.sense import capture_once
+from smpa_ros.sense import SenseService
 
 
 @pytest.mark.parametrize('fails', [False, True])

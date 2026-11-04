@@ -6,7 +6,6 @@ from datetime import datetime
 import json
 from importlib.resources import files
 from pathlib import Path
-from time import perf_counter
 
 import os
 import re
@@ -88,9 +87,11 @@ def finalize_run(directory, metadata, status):
 
 
 def stage_prompt(name, value, previous_world_model='', goal='', available_actions=''):
-    component = files('smpa_ros').joinpath(name)
-    prompt = component.joinpath('prompts/default.txt').read_text(encoding='utf-8').format(input=value, previous_world_model=previous_world_model, goal=goal, available_actions=available_actions)
-    settings = json.loads(component.joinpath('models/default.json').read_text(encoding='utf-8'))
+    component = files('smpa_ros')
+    prompt_path = 'prompts/sense/default.txt' if name == 'sense' else name + '/prompts/default.txt'
+    settings_path = 'models/sense/default.json' if name == 'sense' else name + '/models/default.json'
+    prompt = component.joinpath(prompt_path).read_text(encoding='utf-8').format(input=value, previous_world_model=previous_world_model, goal=goal, available_actions=available_actions)
+    settings = json.loads(component.joinpath(settings_path).read_text(encoding='utf-8'))
     return prompt, settings
 
 
@@ -258,71 +259,6 @@ def run_cycle(observation: str, *, sense: Backend, model: Backend,
     return results
 
 
-def capture_once(node: Node, config: dict, output_dir: Path,
-                 executor: SingleThreadedExecutor, timeout: float = 120) -> Path:
-    """Receive one frame, request its description, and write the exact response."""
-    from rclpy.qos import qos_profile_sensor_data
-    from rclpy.task import Future
-    from sensor_msgs.msg import Image
-    from smpa_ros_interfaces.srv import DescribeScene
-
-    output_dir, _ = assigned_run(output_dir, config.get('run_id', ''))
-    output_dir = output_dir / 'observations' / 'vision'
-    prompt = files('smpa_ros.sense').joinpath(
-        'prompts/' + config['prompt'] + '.txt',
-    ).read_text(encoding='utf-8').strip()
-    client = node.create_client(DescribeScene, '/sense')
-    subscription = None
-    try:
-        node.get_logger().info('Waiting for /sense service')
-        if not client.wait_for_service(timeout_sec=timeout):
-            raise TimeoutError(f'/sense is unavailable after {timeout:g}s')
-        image_future = Future()
-
-        def receive(image: Image) -> None:
-            if not image_future.done():
-                image_future.set_result(image)
-
-        node.get_logger().info(f"Subscribing to camera topic: {config['camera_topic']}")
-        subscription = node.create_subscription(
-            Image, config['camera_topic'], receive, qos_profile_sensor_data,
-        )
-        node.get_logger().info('Waiting for first image')
-        started = perf_counter()
-        executor.spin_until_future_complete(image_future, timeout_sec=timeout)
-        if not image_future.done():
-            raise TimeoutError(f"No image received on {config['camera_topic']} after {timeout:g}s")
-        node.get_logger().info(f'Image received after {perf_counter() - started:.2f}s')
-        node.destroy_subscription(subscription)
-        subscription = None
-        started = perf_counter()
-        response_future = client.call_async(
-            DescribeScene.Request(image=image_future.result(), prompt=prompt),
-        )
-        node.get_logger().info('Request sent to /sense')
-        executor.spin_until_future_complete(response_future, timeout_sec=timeout)
-        if not response_future.done():
-            raise TimeoutError(f'/sense response timed out after {timeout:g}s')
-        response = response_future.result()
-        node.get_logger().info(f'/sense response received after {perf_counter() - started:.2f}s')
-        if response.error:
-            raise RuntimeError(response.error)
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')
-        path = output_dir / f'{timestamp}_sense_output.md'
-        # Exclusive creation prevents an existing observation from being overwritten.
-        with path.open('x', encoding='utf-8', newline='') as output:
-            output.write(response.description)
-        node.get_logger().info(f'Markdown file saved: {path.resolve()}')
-        return path
-    except Exception as error:
-        node.get_logger().error(f'Camera-to-Sense pipeline failed: {error}')
-        raise
-    finally:
-        if subscription is not None:
-            node.destroy_subscription(subscription)
-        node.destroy_client(client)
-
-
 def execute_action(node, executor, action, record, timeout):
     """Send the default Look goal, record feedback/result, and cancel on early exit."""
     from action_msgs.msg import GoalStatus
@@ -463,6 +399,7 @@ def main(args=None) -> None:
             raise RuntimeError('Participating ROS processes exited')
         outputs = {}
         if options.service in ('vision', 'all'):
+            from smpa_ros.sense import capture_once
             outputs['vision'] = capture_once(camera_node, config, directory, executor, options.timeout).read_text()
         if speech is not None:
             from smpa_ros_interfaces.action import Listen
