@@ -17,9 +17,9 @@ from rclpy.signals import SignalHandlerOptions
 from smpa_ros_interfaces.action import Listen, Talk
 import yaml
 
-from smpa_ros.smpa import assigned_run
-from smpa_ros.speech.observation import AudioObservation
-from smpa_ros.backends.speech import FasterWhisperBackend, PiperBackend
+from memory import MemoryManager
+from speech.observation import AudioObservation
+from speech.backends import FasterWhisperBackend, PiperBackend
 
 
 class SpeechServer(Node):
@@ -28,7 +28,7 @@ class SpeechServer(Node):
         self.kind = kind
         self.declare_parameter('world_model_dir', '')
         self.declare_parameter('run_id', '')
-        self.world_model_dir, self.run_id = assigned_run(
+        self.world_model_dir, self.run_id = MemoryManager.assigned_run(
             self.get_parameter('world_model_dir').value, self.get_parameter('run_id').value)
         self.action_type = Listen if kind == 'listen' else Talk
         self.declare_parameter('model', 'faster-whisper-base' if kind == 'listen' else 'piper-lessac-medium')

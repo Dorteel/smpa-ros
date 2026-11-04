@@ -11,9 +11,9 @@ import pytest
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
-from smpa_ros.backends.speech import FasterWhisperBackend, PiperBackend
-from smpa_ros.speech.actions import SpeechServer
-from smpa_ros.speech.demo import ListenerTalker
+from speech.backends import FasterWhisperBackend, PiperBackend
+from speech.actions import SpeechServer
+from speech.demo import ListenerTalker
 from test_speech_audio import InputStream, OutputStream
 
 

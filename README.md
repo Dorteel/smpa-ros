@@ -281,8 +281,7 @@ servers are reused unchanged; SMPA does not launch Webots or implement servers.
 ```text
 <workspace>/src/
 ├── webots_ros2_simulation/simulation_actions/  # The only interface package source
-└── smpa-ros/temp/simulation_actions/
-    └── README.md                             # Provenance/removal notes, not a ROS package
+└── smpa-ros/
 ```
 
 No vendoring is necessary. `install.sh` explicitly builds the upstream
@@ -290,7 +289,7 @@ No vendoring is necessary. `install.sh` explicitly builds the upstream
 ROS type support under the workspace-level `install/`. It reconfigures an old
 CMake cache if it points at a different checkout. This fixes the observed missing
 `Look` import: an older copy from another project's `external/` directory had
-produced the stale installation. No duplicate package is created under `temp/`.
+produced the stale installation. No duplicate interface package is vendored in SMPA.
 For another source location, set `SIMULATION_ACTIONS_SOURCE` to the actual
 upstream `simulation_actions` directory when running `./install.sh`.
 
@@ -399,19 +398,20 @@ Existing regressions passed with `ROS_DOMAIN_ID=86 ./test.sh --unit` (81 tests).
 An initial run on the live simulation domain crashed in native ROS speech-node
 teardown; the isolated-domain rerun passed without changing any tests.
 
-To remove the temporary integration later, remove `temp/simulation_actions/`
-and the upstream-source build/preflight blocks in `install.sh`/`run_smpa.sh`
-after providing the replacement action interface. The current fixed Look
+Keep the upstream-source build/preflight blocks in `install.sh`/`run_smpa.sh`
+until a replacement action interface is provided. The current fixed Look
 registry/executor still requires generated `simulation_actions`; replacing that
 robot-control design is a separate task.
 
 ## SMPA execution and run storage
 
-`smpa_ros/smpa.py` is the single orchestrator. It creates a UUID and run directory,
-starts the operation servers with that assignment, executes Sense → Model → Plan
-→ Act sequentially, counts complete cycles, stops at the configured limit, cleans
-up its servers, and finalizes metadata. Launch files only start and configure
-processes. Neither services nor action callbacks create runs or initiate cycles.
+`smpa_ros/smpa.py` defines the goal, experiment count, cycle boundaries, prompts,
+and stage order. Edit its `run()` function to repeat, skip, or reorder stages.
+`Runner` in `runner.py` configures and wires the stages, starts and cleans up ROS
+participants, and executes individual stage calls. `MemoryManager` in `memory.py` creates run
+directories and goals, tracks completed cycles, and finalizes metadata. Stage
+artifacts remain owned by Sense, Model, Plan, and Act. Launch files only start and
+configure processes; services and action callbacks do not create runs.
 
 ```yaml
 # config.yaml
@@ -545,7 +545,8 @@ An existing Ollama backend is also supported for registry entries with
 framework is introduced.
 
 The modeling instructions live in `smpa_ros/prompts/model/default.txt`; generation
-settings live in `smpa_ros/models/model/default.json` (512 new tokens). The prompt
+defaults live in `config.yaml` under `stage_settings.model` (512 new tokens),
+with the existing `modeling.max_output_tokens` override taking precedence. The prompt
 requests Entities, Properties, Relations, and Uncertain Information, stable IDs,
 and separation of observations from inferences. These are model instructions,
 not semantic guarantees. Snapshot publication is atomic and exclusive: previous
@@ -576,12 +577,28 @@ New runs never relocate or modify existing observations. There is no runtime
 historical migration infrastructure. Synthesized audio is not stored as microphone
 input. Visual Jev remains an unchanged third-party project.
 
-In `smpa.py`, `run()` owns `initialize_run()` → `run_cycles()` →
-`finalize_run()`. The 14-line `run_cycles()` expresses Sense → Model → Plan → Act.
-Its `main()` connects that flow to ROS. Imports for ROS and
-speech clients are lazy so other consumers can use the shared `assigned_run()`
-validator without importing ROS or starting orchestration. `run_cycle()` remains
-the original non-persistent text helper. There is no separate run-storage module.
+Use `with Runner(...) as runner` for failure and interruption cleanup. Each
+`runner.start(goal=GOAL)` creates an independent run; `runner.finish()` closes it.
+`with runner.cycle():` counts a completed cycle only after its body succeeds,
+regardless of how many stages it contains. Stage calls require this explicit cycle.
+The installed `smpa` executable targets `smpa_ros.smpa:main`; both root-level
+infrastructure modules are installed and work outside the source checkout.
+
+Select prompt filename stems with `runner.sense(prompt='describe_scene')`,
+`runner.model(observation, prompt='default')`, `runner.plan(world, prompt='default')`,
+and `runner.act(action, prompt='default')`. Sense's `prompt=None` preserves the
+configured vision prompt. Missing prompts fail clearly. Act records its prompt;
+ROS dispatch still uses the validated action and existing default goal parameters.
+The goal is defined in `smpa.py` and persisted by MemoryManager to `goal.md`.
+
+First invocations retain `sense.json`, `model.json`, `plan.json`, `act.json`, and
+`iteration_001.md`. Repeats use `_002`, `_003`, etc. within the same cycle, including
+`iteration_001_002.md`. Records carry a run-wide sequence, invocation number,
+timestamp, previous-record link, prompt name, and input source. Model uses the
+latest successful snapshot even across skipped cycles. Explicit external inputs
+have no source record; identical output strings refer to the most recent matching
+invocation. No stage implicitly invokes another stage. Plan still requires a
+world-model string, and Act still requires a supported action.
 
 The loop prints the directory and endpoint prefix
 `/run_<uuid_with_underscores>/...`. It uses the existing launcher in
@@ -693,8 +710,8 @@ red for ERROR; green INFO is not configurable through this switch. No custom
 coloring is added. The VLM loader uses the `dtype` argument supported by the
 documented Transformers 4.57+ environment, replacing deprecated `torch_dtype`.
 
-The ROS 2 package remains `smpa_ros`; `ros2 run smpa_ros hello` still logs
-`Hello ROS 2!` and exits. The internal `smpa_ros` module provides a
+The ROS 2 package remains `smpa_ros`. Speech lives in the root-level `speech/`
+Python package and retains its ROS entry points. The `smpa_ros` module provides a
 synchronous, single-cycle Sense–Model–Plan–Act text pipeline and a ROS Sense service.
 
 ## Architecture
@@ -703,14 +720,15 @@ synchronous, single-cycle Sense–Model–Plan–Act text pipeline and a ROS Sen
 - `model/`: prompts for describing world state and uncertainty.
 - `plan/`: prompts for proposing actions or requesting missing information.
 - `act.py`: ROS action execution and result persistence; prompts live in `prompts/act/`.
-- Each component's `prompts/default.txt` is its input template;
-  `models/default.json` supplies inference settings (`max_new_tokens`). These
-  assets are included in the installed Python package, with no model weights.
+- Each stage's `prompts/<stage>/default.txt` is its input template.
+  `config.yaml` supplies independent `stage_settings.<stage>.max_new_tokens`
+  defaults: Sense 128, Model 512, Plan 128, Act 128. Existing Model/Plan
+  `max_output_tokens` overrides retain precedence. Prompt assets are installed
+  with the Python package; configuration is installed under `share/smpa_ros`.
 - `backends/base.py` defines only `generate(prompt, *, max_new_tokens) -> str`.
   There is no registry, factory, or mandatory inheritance.
-- `smpa.py` applies the prompts in order and returns all four outputs. A failed
-  stage raises immediately. Backend objects are supplied separately for each
-  component, allowing different models or reuse of one loaded instance.
+- `smpa.py` calls Sense, Model, Plan, and Act in order and propagates failures.
+  Runner exposes each stage independently and shares the configured text backend.
 
 The text loop remains unchanged. Sense additionally exposes `/sense`
 using `smpa_ros_interfaces/srv/DescribeScene`: one `sensor_msgs/Image` and a prompt
@@ -725,22 +743,10 @@ No other component services, subscriptions, or robot execution are implemented.
 
 ## Backends and independent selection
 
-Construct backend instances explicitly; selecting a backend does not require
-editing any component. For example, after provisioning your own local models:
-
-```python
-from smpa_ros.backends.ollama import OllamaBackend
-from smpa_ros.backends.transformers import TransformersBackend
-from smpa_ros.smpa import run_cycle
-
-local = OllamaBackend('your-installed-ollama-model')
-development = TransformersBackend('/absolute/path/outside/repository/to/model')
-outputs = run_cycle(
-    'Observation: a cup is on the table. Goal: describe a possible next action.',
-    sense=local, model=development, plan=development, act=local,
-)
-print(outputs)
-```
+The configured Model backend is shared by Model and Plan. Select it in
+`config.yaml`; prompt selection and cognitive sequencing belong in `smpa.py`.
+Plan retains its strict schema requirement, so Ollama remains usable for Model
+but cannot execute schema-constrained Plan with the current backend.
 
 Ollama uses its HTTP API through Python's standard library and requires a running
 server with an already installed model. It does not expose internal activations.
@@ -770,7 +776,7 @@ From the repository root with ROS 2 Jazzy, colcon, and pytest installed:
 
 The script builds in a temporary workspace, sources ROS and the install overlay,
 runs tests without downloads or an Ollama server, verifies installed assets from
-outside the source tree, and checks the hello node under a timeout. Temporary
+outside the source tree, and checks the installed Speech entry points. Temporary
 files are removed on exit. Set `ROS_DISTRO` for another installed distribution.
 
 For a persistent local build:
@@ -782,7 +788,7 @@ source ../../install/setup.bash
 (cd ../.. && colcon test --paths src/smpa-ros src/smpa-ros/smpa_ros_interfaces \
   --packages-select smpa_ros --return-code-on-test-failure)
 (cd ../.. && colcon test-result --verbose)
-ros2 run smpa_ros hello
+ros2 run smpa_ros smpa --help
 ```
 
 Real model inference requires separately provisioned models and is outside the
@@ -941,7 +947,7 @@ cached weights; mock tests do not establish VLM quality or GPU memory fit.
 ### Local speech actions (CPU)
 
 `/speech/listen` uses Faster-Whisper; `/speech/talk` uses Piper. Models load once
-per server, independently of ROS in `backends/speech.py`. Their local paths are
+per server, independently of ROS in `speech/backends.py`. Their local paths are
 registered in `models/model_library.yaml`; downloaded weights are ignored by Git.
 Existing vision configuration and interfaces are unchanged.
 

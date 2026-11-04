@@ -2,13 +2,15 @@
 from types import SimpleNamespace
 import pytest
 
-from smpa_ros.smpa import initialize_run, finalize_run
+from memory import MemoryManager
+from smpa_ros.smpa import GOAL
 
 
 @pytest.fixture(autouse=True)
 def assigned_test_run(tmp_path_factory, monkeypatch):
     import rclpy
-    directory, metadata = initialize_run(tmp_path_factory.mktemp('assigned_runs'), 'test')
+    memory = MemoryManager(tmp_path_factory.mktemp('assigned_runs'), 'test', goal=GOAL)
+    directory, metadata = memory.directory, memory.metadata
     original = rclpy.init
 
     def init(*, args=None, **kwargs):
@@ -18,4 +20,4 @@ def assigned_test_run(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(rclpy, 'init', init)
     yield SimpleNamespace(directory=directory, run_id=metadata['run_id'], metadata=metadata)
-    finalize_run(directory, metadata, 'completed')
+    memory.finalize('completed')

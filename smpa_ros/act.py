@@ -1,25 +1,37 @@
 """Execute ROS actions and persist their results before advancing the cycle."""
 from importlib.resources import files
 import json
+from pathlib import Path
+
+import yaml
 
 from smpa_ros.plan import AVAILABLE_ACTIONS
 
 
-def load_prompt(value):
+def load_prompt(value, *, prompt='default', configuration=None):
     component = files('smpa_ros')
-    prompt = component.joinpath('prompts/act/default.txt').read_text(encoding='utf-8').format(
+    if not prompt or '/' in prompt or '\\' in prompt or prompt in ('.', '..'):
+        raise ValueError('Prompt must be a filename stem')
+    prompt = component.joinpath(f'prompts/act/{prompt}.txt').read_text(encoding='utf-8').format(
         input=value, previous_world_model='', goal='', available_actions='')
-    settings = json.loads(component.joinpath('models/act/default.json').read_text(encoding='utf-8'))
+    if configuration is None or 'stage_settings' not in configuration:
+        from ament_index_python.packages import get_package_share_directory
+        configuration = yaml.safe_load(
+            (Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text(encoding='utf-8'))
+    settings = dict(configuration['stage_settings']['act'])
     return prompt, settings
 
 
-def perform_action(directory, cycle, action, act):
+def perform_action(directory, cycle, action, act, *, prompt_name='default',
+                   record_name='act.json', provenance=None, configuration=None):
     """Execute the selected action and record success, failure, or interruption."""
     destination = directory / 'state' / f'cycle_{cycle:06d}'
     record = dict(stage='act', cycle=cycle, requested_action=action,
                   endpoint=AVAILABLE_ACTIONS[action]['endpoint'], goal={}, goal_accepted=None,
                   result_status=None, success=False)
+    record.update(provenance or {})
     try:
+        record['prompt'], _ = load_prompt(action, prompt=prompt_name, configuration=configuration)
         if act is None:
             raise ValueError('Act stage requires a ROS action executor')
         act(action, record)
@@ -30,10 +42,10 @@ def perform_action(directory, cycle, action, act):
     except (Exception, KeyboardInterrupt) as error:
         record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
                       success=False, error=f'{type(error).__name__}: {error}')
-        with (destination / 'act.json').open('x', encoding='utf-8') as output:
+        with (destination / record_name).open('x', encoding='utf-8') as output:
             json.dump(record, output, ensure_ascii=False, indent=2)
         raise
-    with (destination / 'act.json').open('x', encoding='utf-8') as output:
+    with (destination / record_name).open('x', encoding='utf-8') as output:
         json.dump(record, output, ensure_ascii=False, indent=2)
 
 

@@ -46,11 +46,28 @@ cd "$work_dir"
 python3 - <<'PY'
 import os
 from importlib.resources import files
+from importlib.metadata import distribution
+import importlib.util
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
-from smpa_ros.smpa import run_cycle
+from runner import Runner
+from memory import MemoryManager
 import yaml
 
+entries = {entry.name: entry for entry in distribution('smpa-ros').entry_points}
+assert entries['smpa'].value == 'smpa_ros.smpa:main'
+assert callable(entries['smpa'].load())
+import inspect
+assert Path(inspect.getfile(Runner)).parent == Path(inspect.getfile(MemoryManager)).parent
+assert Path(inspect.getfile(Runner)).parent != Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).parent
+for name, target in {'listen': 'speech.actions:listen_main', 'talk': 'speech.actions:talk_main',
+                     'listener_talker': 'speech.demo:main'}.items():
+    assert entries[name].value == target
+    assert callable(entries[name].load())
+assert importlib.util.find_spec('speech.observation') is not None
+assert importlib.util.find_spec('smpa_ros.speech') is None
+assert importlib.util.find_spec('smpa_ros.hello') is None
+assert 'hello' not in entries
 assert files('smpa_ros').joinpath('prompts/sense/describe_scene.txt').read_text().strip() == 'Describe the scene.'
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
 pipeline = yaml.safe_load((registry.parent / 'config.yaml').read_text())
@@ -60,20 +77,17 @@ for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):
     config = yaml.safe_load((registry / (name + '.yaml')).read_text())
     assert config['name'] == name and config['model_id'] and config['vram_gb'] is None
 
-class Echo:
-    def generate(self, prompt, *, max_new_tokens=128):
-        return prompt
+from smpa_ros.smpa import run
+with Runner(root=Path.cwd() / 'memory', sense=lambda directory, cycle: 'observation',
+            model=lambda prompt, **settings: '# World Model',
+            plan=lambda prompt, **settings: '{"action":"look_left"}',
+            act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True)) as runner:
+    run(runner, 1)
+    assert runner.memory.metadata['completed_cycles'] == 1
 
-backend = Echo()
-assert list(run_cycle('test observation', sense=backend, model=backend,
-                      plan=backend, act=backend)) == ['sense', 'model', 'plan', 'act']
 PY
-# The node exits itself; timeout terminates and reaps it if it hangs.
-timeout --kill-after=2s 10s ros2 run smpa_ros hello > "$work_dir/hello.log" 2>&1
-cat "$work_dir/hello.log"
-grep -Fq 'Hello ROS 2!' "$work_dir/hello.log"
 timeout --kill-after=2s 10s ros2 run smpa_ros smpa --help > "$work_dir/smpa-help.txt"
 grep -Fq -- '--max-cycles' "$work_dir/smpa-help.txt"
 timeout --kill-after=2s 10s ros2 launch smpa_ros speech.launch.py --show-args > /dev/null
 timeout --kill-after=2s 10s ros2 launch smpa_ros llm.launch.py --show-args > /dev/null
-echo 'Build, tests (including SMPA cycles and audio persistence), installed assets, hello output, and loop command checks passed.'
+echo 'Build, tests (including SMPA cycles and audio persistence), installed assets, Speech entry points, and SMPA command checks passed.'

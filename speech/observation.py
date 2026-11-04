@@ -5,12 +5,12 @@ import os
 import struct
 from tempfile import mkdtemp
 
-from smpa_ros.smpa import assigned_run
+from memory import MemoryManager
 
 
 class AudioObservation:
     def __init__(self, root: Path, audio, language: str, model: str):
-        root, self.run_id = assigned_run(root)
+        root, self.run_id = MemoryManager.assigned_run(root)
         self.timestamp = datetime.now(timezone.utc)
         parent = root / 'observations' / 'audio'
         # Exclusive directory creation also prevents collisions within a microsecond.

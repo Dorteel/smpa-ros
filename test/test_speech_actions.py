@@ -9,9 +9,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
 from smpa_ros_interfaces.action import Listen, Talk
 
-from smpa_ros.backends.speech import SpeechCanceled
-from smpa_ros.speech.actions import SpeechServer
-from smpa_ros.speech.demo import ListenerTalker
+from speech.backends import SpeechCanceled
+from speech.actions import SpeechServer
+from speech.demo import ListenerTalker
 
 
 def wait(future, timeout=5):
@@ -253,7 +253,7 @@ def test_audio_storage_failure_aborts_action(speech):
 
 
 def test_transcript_storage_failure_aborts_and_preserves_audio(speech, monkeypatch):
-    from smpa_ros.speech.observation import AudioObservation
+    from speech.observation import AudioObservation
     original = AudioObservation.write_transcript
 
     def fail_complete(self, status, text='', error=''):

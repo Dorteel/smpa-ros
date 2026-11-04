@@ -6,11 +6,9 @@ package_name = 'smpa_ros'
 setup(
     name=package_name,
     version='0.0.1',
-    packages=find_packages(include=['smpa_ros', 'smpa_ros.*']),
-    package_data={'smpa_ros': ['*/prompts/*.txt', '*/models/*.json', 'prompts/sense/*.txt', 'models/sense/*.json',
-                                'prompts/model/*.txt', 'models/model/*.json',
-                                'prompts/plan/*.txt', 'models/plan/*.json',
-                                'prompts/act/*.txt', 'models/act/*.json']},
+    py_modules=['runner', 'memory'],
+    packages=find_packages(include=['smpa_ros', 'smpa_ros.*', 'speech', 'speech.*']),
+    package_data={'smpa_ros': ['prompts/*/*.txt']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'config.yaml']),
@@ -26,11 +24,10 @@ setup(
     license='MIT',
     tests_require=['pytest'],
     entry_points={'console_scripts': [
-        'hello = smpa_ros.hello:main',
         'sense = smpa_ros.sense:main',
         'smpa = smpa_ros.smpa:main',
-        'listen = smpa_ros.speech.actions:listen_main',
-        'talk = smpa_ros.speech.actions:talk_main',
-        'listener_talker = smpa_ros.speech.demo:main',
+        'listen = speech.actions:listen_main',
+        'talk = speech.actions:talk_main',
+        'listener_talker = speech.demo:main',
     ]},
 )

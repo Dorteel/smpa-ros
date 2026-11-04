@@ -7,7 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from smpa_ros.smpa import assigned_run, initialize_run, finalize_run, run as run_session
+from memory import MemoryManager
+from runner import Runner
+from smpa_ros.smpa import GOAL, run as experiment
 
 
 
@@ -19,10 +21,13 @@ def completed_action(action, record):
     record.update(goal_accepted=True, result_status=4, success=True)
 
 
-def run(*args, **kwargs):
+def run(max_cycles=1, **kwargs):
     kwargs.setdefault('plan', planned_action)
     kwargs.setdefault('act', completed_action)
-    return run_session(*args, **kwargs)
+    goal = kwargs.pop('goal', GOAL)
+    with Runner(max_cycles=max_cycles, **kwargs) as runner:
+        experiment(runner, runner.limit, goal=goal)
+        return runner.memory.directory
 
 
 def model_snapshot(prompt, **settings):
@@ -40,7 +45,7 @@ def test_concurrent_sessions_are_isolated(tmp_path):
         identities.add(metadata['run_id'])
         assert metadata['run_name'] == 'safe_name'
         for _ in range(3):
-            assert assigned_run(directory, metadata['run_id']) == (directory, metadata['run_id'])
+            assert MemoryManager.assigned_run(directory, metadata['run_id']) == (directory, metadata['run_id'])
     assert len(identities) == 4
     assert len(list((tmp_path / 'runs').iterdir())) == 4
 
@@ -121,7 +126,7 @@ def test_failed_stage_stops_and_preserves_results(tmp_path, stage):
     directory, = (tmp_path / 'runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['status'] == 'failed' and metadata['completed_cycles'] == 0
-    assert len(list((directory / 'state').glob('cycle_*/*.json'))) == names.index(stage) + (stage != 'sense')
+    assert len(list((directory / 'state').glob('cycle_*/*.json'))) == names.index(stage) + 1
 
 
 def test_interruption_retains_completed_cycles(tmp_path):
@@ -149,14 +154,15 @@ def test_invalid_limit_creates_no_run(tmp_path, limit):
 
 def test_missing_or_mismatched_assignment(tmp_path):
     with pytest.raises(ValueError, match='Missing'):
-        assigned_run('')
+        MemoryManager.assigned_run('')
     with pytest.raises(ValueError, match='Invalid'):
-        assigned_run(tmp_path)
-    directory, metadata = initialize_run(tmp_path)
+        MemoryManager.assigned_run(tmp_path)
+    memory = MemoryManager(tmp_path, goal=GOAL)
+    directory, metadata = memory.directory, memory.metadata
     with pytest.raises(ValueError, match='does not match'):
-        assigned_run(directory, 'wrong')
-    finalize_run(directory, metadata, 'completed')
-    finalize_run(directory, metadata, 'failed')
+        MemoryManager.assigned_run(directory, 'wrong')
+    memory.finalize('completed')
+    memory.finalize('failed')
     assert yaml.safe_load((directory / 'metadata.yaml').read_text())['status'] == 'completed'
 
 
@@ -177,10 +183,11 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
         assignments.append(kwargs)
         options = kwargs['arguments']
         root = options[options.index('--world-model-root') + 1]
-        script = ('from smpa_ros.smpa import run; '
-                  f'run(3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model", '
+        script = ('from runner import Runner; from smpa_ros.smpa import run\n'
+                  f'with Runner(max_cycles=3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model", '
                   f'plan=lambda prompt, **kw: ' + repr('{"action":"look_left"}') + ', '
-                  'act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True))')
+                  'act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True)) as runner:\n'
+                  '    run(runner, 3)')
         return ExecuteProcess(cmd=[sys.executable, '-c', script], on_exit=kwargs['on_exit'])
     monkeypatch.setattr(launch_ros.actions, 'Node', fake_node)
     if entrypoint == 'llm':
@@ -204,7 +211,7 @@ def test_participant_restarts_share_run(assigned_test_run):
     from unittest.mock import MagicMock
     import rclpy
     from smpa_ros.sense import SenseService
-    from smpa_ros.speech.actions import SpeechServer
+    from speech.actions import SpeechServer
 
     session = assigned_test_run
     original = (session.directory / 'metadata.yaml').read_bytes()
@@ -506,3 +513,134 @@ def test_independent_stage_reasoning_effort(tmp_path):
     assert received[1]['reasoning_effort'] == 'high'
     assert received[1]['max_new_tokens'] == 128
     assert 'schema' in received[1]
+
+
+@pytest.mark.parametrize('failure', [None, 'setup', 'sense', 'teardown'])
+def test_runner_cleanup_finalizes_run(tmp_path, failure):
+    calls = []
+
+    def setup(directory, identity):
+        calls.append('setup')
+        assert MemoryManager.assigned_run(directory, identity) == (directory, identity)
+        if failure == 'setup':
+            raise RuntimeError('setup failed')
+
+    def sense(directory, cycle):
+        if failure == 'sense':
+            raise RuntimeError('sense failed')
+        return 'observation'
+
+    def teardown():
+        calls.append('teardown')
+        if failure == 'teardown':
+            raise RuntimeError('teardown failed')
+
+    if failure is None:
+        run(root=tmp_path, sense=sense, model=model_snapshot, setup=setup, teardown=teardown)
+    else:
+        with pytest.raises(RuntimeError, match=f'{failure} failed'):
+            run(root=tmp_path, sense=sense, model=model_snapshot, setup=setup, teardown=teardown)
+    directory, = (tmp_path / 'runs').iterdir()
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert calls == ['setup', 'teardown']
+    assert metadata['status'] == ('completed' if failure is None else 'failed')
+    assert metadata['completed_at'] is not None
+    assert metadata['completed_cycles'] == (0 if failure in ('setup', 'sense') else 1)
+
+
+def test_experiment_repeats_skips_and_independent_runs(tmp_path):
+    calls = []
+    def model(prompt, **settings):
+        calls.append(prompt)
+        return f'world {len(calls)}'
+    cleanup = MagicMock()
+    with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed',
+                model=model, plan=planned_action, act=completed_action,
+                teardown=cleanup) as runner:
+        directories = []
+        for _ in range(2):
+            directories.append(runner.start(goal=GOAL))
+            with runner.cycle():
+                observation = runner.sense(prompt='describe_scene')
+                first = runner.model(observation)
+                second = runner.model(observation)
+                action = runner.plan(first)
+                runner.act(action)
+                runner.act(runner.plan(second))
+                runner.sense(prompt='default')
+            with runner.cycle():
+                # Skip Sense/Model and reuse a previous world model.
+                runner.act(runner.plan(second))
+            with runner.cycle():
+                runner.model('explicit observation')
+            runner.finish()
+    assert len(set(directories)) == 2 and cleanup.call_count == 2
+    for directory in directories:
+        records = [json.loads(path.read_text()) for path in directory.glob('state/*/*.json')]
+        records.sort(key=lambda record: record['sequence'])
+        assert [record['sequence'] for record in records] == list(range(1, 12))
+        assert [record['stage'] for record in records] == [
+            'sense', 'model', 'model', 'plan', 'act', 'plan', 'act', 'sense', 'plan', 'act', 'model']
+        state = directory / 'state/cycle_000001'
+        assert {p.name for p in state.iterdir()} == {
+            'sense.json', 'sense_002.json', 'model.json', 'model_002.json',
+            'plan.json', 'plan_002.json', 'act.json', 'act_002.json'}
+        assert {p.name for p in (directory / 'world_model').iterdir()} == {
+            'iteration_001.md', 'iteration_001_002.md', 'iteration_003.md'}
+        assert records[2]['previous_iteration'] == 'world_model/iteration_001.md'
+        assert records[3]['source_record'] == 'state/cycle_000001/model.json'
+        assert records[5]['source_record'] == 'state/cycle_000001/model_002.json'
+        assert records[6]['source_record'] == 'state/cycle_000001/plan_002.json'
+        assert records[-1]['previous_iteration'] == 'world_model/iteration_001_002.md'
+        assert records[-1]['source_record'] is None
+        assert yaml.safe_load((directory / 'metadata.yaml').read_text())['completed_cycles'] == 3
+        assert (directory / 'goal.md').read_text() == GOAL
+
+
+@pytest.mark.parametrize('stage', ['sense', 'model', 'plan', 'act'])
+def test_explicit_prompt_selection(tmp_path, monkeypatch, stage):
+    import importlib
+    module = importlib.import_module('smpa_ros.' + stage)
+    resources = tmp_path / 'resources'
+    (resources / 'prompts' / stage).mkdir(parents=True)
+    (resources / 'prompts' / stage / 'experiment.txt').write_text('Selected experiment: {input}')
+    monkeypatch.setattr(module, 'files', lambda package: resources)
+    with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed',
+                model=model_snapshot, plan=planned_action, act=completed_action) as runner:
+        runner.start(goal=GOAL)
+        with runner.cycle():
+            if stage == 'sense':
+                runner.sense(prompt='experiment')
+            else:
+                getattr(runner, stage)('look_left' if stage == 'act' else 'input', prompt='experiment')
+    record = json.loads((runner.memory.directory / f'state/cycle_000001/{stage}.json').read_text())
+    assert record['prompt'].startswith('Selected experiment:')
+    assert record['prompt_name'] == 'experiment'
+
+
+@pytest.mark.parametrize('stage', ['sense', 'model', 'plan', 'act'])
+def test_missing_prompt_cleans_up(tmp_path, stage):
+    cleanup = MagicMock()
+    with pytest.raises(FileNotFoundError, match='missing_prompt.txt'):
+        with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed',
+                    model=model_snapshot, plan=planned_action, act=completed_action,
+                    teardown=cleanup) as runner:
+            runner.start(goal=GOAL)
+            with runner.cycle():
+                args = () if stage == 'sense' else ('look_left' if stage == 'act' else 'input',)
+                getattr(runner, stage)(*args, prompt='missing_prompt')
+    cleanup.assert_called_once()
+    assert runner.memory.metadata['status'] == 'failed'
+    assert runner.memory.metadata['completed_cycles'] == 0
+
+
+def test_error_between_stages_cleans_up(tmp_path):
+    cleanup = MagicMock()
+    with pytest.raises(KeyboardInterrupt):
+        with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed', teardown=cleanup) as runner:
+            runner.start(goal=GOAL)
+            with runner.cycle():
+                runner.sense()
+                raise KeyboardInterrupt
+    cleanup.assert_called_once()
+    assert runner.memory.metadata['status'] == 'interrupted'

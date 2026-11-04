@@ -16,8 +16,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 def start(context):
     value = lambda name: LaunchConfiguration(name).perform(context)
     if value('participants_only') == 'true':
-        from smpa_ros.smpa import assigned_run
-        directory, identity = assigned_run(value('world_model_dir'), value('run_id'))
+        from memory import MemoryManager
+        directory, identity = MemoryManager.assigned_run(value('world_model_dir'), value('run_id'))
         namespace = '/run_' + identity.replace('-', '_')
         common = {'run_id': identity, 'world_model_dir': str(directory)}
         remaps = [(endpoint, namespace + endpoint)

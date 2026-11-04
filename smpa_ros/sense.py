@@ -16,25 +16,42 @@ from smpa_ros_interfaces.srv import DescribeScene
 import yaml
 
 from smpa_ros.backends.transformers import TransformersVLM
-from smpa_ros.smpa import assigned_run
+from memory import MemoryManager
 
 
-def load_prompt(value):
+def load_prompt(value, *, prompt='default', configuration=None):
     component = files('smpa_ros')
-    prompt = component.joinpath('prompts/sense/default.txt').read_text(encoding='utf-8').format(
+    if not prompt or '/' in prompt or '\\' in prompt or prompt in ('.', '..'):
+        raise ValueError('Prompt must be a filename stem')
+    prompt = component.joinpath(f'prompts/sense/{prompt}.txt').read_text(encoding='utf-8').format(
         input=value, previous_world_model='', goal='', available_actions='')
-    settings = json.loads(component.joinpath('models/sense/default.json').read_text(encoding='utf-8'))
+    if configuration is None or 'stage_settings' not in configuration:
+        from ament_index_python.packages import get_package_share_directory
+        configuration = yaml.safe_load(
+            (Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text(encoding='utf-8'))
+    settings = dict(configuration['stage_settings']['sense'])
     return prompt, settings
 
 
-def record_observation(directory, cycle, sense):
-    """Record Sense output and identify its newly persisted observation files."""
+def record_observation(directory, cycle, sense, *, record_name='sense.json',
+                       provenance=None, prompt_name=None, configuration=None):
+    """Record every Sense invocation and identify new observation files."""
     destination = directory / 'state' / f'cycle_{cycle:06d}'
-    destination.mkdir()
+    destination.mkdir(exist_ok=True)
     prior_files = set((directory / 'observations').rglob('*'))
-    value = sense(directory, cycle)
-    with (destination / 'sense.json').open('x', encoding='utf-8') as output:
-        json.dump({'stage': 'sense', 'cycle': cycle, 'output': value}, output, ensure_ascii=False, indent=2)
+    record = dict(stage='sense', cycle=cycle, **(provenance or {}))
+    try:
+        if prompt_name is not None:
+            record['prompt'], _ = load_prompt('', prompt=prompt_name, configuration=configuration)
+        value = sense(directory, cycle)
+        record.update(output=value, status='generated')
+    except (Exception, KeyboardInterrupt) as error:
+        record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
+                      error=f'{type(error).__name__}: {error}')
+        raise
+    finally:
+        with (destination / record_name).open('x', encoding='utf-8') as output:
+            json.dump(record, output, ensure_ascii=False, indent=2)
     observations = [str(path.relative_to(directory)) for path in sorted(
         set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()]
     return value, observations
@@ -78,7 +95,7 @@ class SenseService(Node):
         super().__init__('sense')
         self.declare_parameter('world_model_dir', '')
         self.declare_parameter('run_id', '')
-        self.world_model_dir, self.run_id = assigned_run(
+        self.world_model_dir, self.run_id = MemoryManager.assigned_run(
             self.get_parameter('world_model_dir').value, self.get_parameter('run_id').value)
         self.get_logger().info('Sense node starting')
         share = Path(get_package_share_directory('smpa_ros'))
@@ -187,7 +204,7 @@ def capture_once(node: Node, config: dict, output_dir: Path,
     from sensor_msgs.msg import Image
     from smpa_ros_interfaces.srv import DescribeScene
 
-    output_dir, _ = assigned_run(output_dir, config.get('run_id', ''))
+    output_dir, _ = MemoryManager.assigned_run(output_dir, config.get('run_id', ''))
     output_dir = output_dir / 'observations' / 'vision'
     prompt = files('smpa_ros').joinpath(
         'prompts/sense/' + config['prompt'] + '.txt',

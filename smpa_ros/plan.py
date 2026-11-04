@@ -1,6 +1,9 @@
 """Select and persist one goal-directed action from the current world model."""
 from importlib.resources import files
 import json
+from pathlib import Path
+
+import yaml
 
 
 AVAILABLE_ACTIONS = {
@@ -12,11 +15,17 @@ ACTION_SCHEMA = {'type': 'object', 'properties': {'action': {'type': 'string',
 
 
 
-def load_prompt(value, goal='', available_actions=''):
+def load_prompt(value, goal='', available_actions='', *, prompt='default', configuration=None):
     component = files('smpa_ros')
-    prompt = component.joinpath('prompts/plan/default.txt').read_text(encoding='utf-8').format(
+    if not prompt or '/' in prompt or '\\' in prompt or prompt in ('.', '..'):
+        raise ValueError('Prompt must be a filename stem')
+    prompt = component.joinpath(f'prompts/plan/{prompt}.txt').read_text(encoding='utf-8').format(
         input=value, previous_world_model='', goal=goal, available_actions=available_actions)
-    settings = json.loads(component.joinpath('models/plan/default.json').read_text(encoding='utf-8'))
+    if configuration is None or 'stage_settings' not in configuration:
+        from ament_index_python.packages import get_package_share_directory
+        configuration = yaml.safe_load(
+            (Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text(encoding='utf-8'))
+    settings = dict(configuration['stage_settings']['plan'])
     return prompt, settings
 
 
@@ -31,20 +40,23 @@ def validate_settings(settings):
 
 
 def select_action(directory, cycle, world_model, plan, *, pipeline,
-                  plan_identifier=None, model_identifier=None):
+                  plan_identifier=None, model_identifier=None, prompt_name='default',
+                  record_name='plan.json', provenance=None):
     """Generate a strict action decision and persist its inputs, output, and status."""
     destination = directory / 'state' / f'cycle_{cycle:06d}'
     goal_text = (directory / 'goal.md').read_text(encoding='utf-8')
-    prompt, settings = load_prompt(world_model, goal=goal_text,
-                                    available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2))
-    if 'max_output_tokens' in pipeline.get('planning', {}):
-        settings['max_new_tokens'] = pipeline['planning']['max_output_tokens']
-    if pipeline.get('planning', {}).get('reasoning_effort') is not None:
-        settings['reasoning_effort'] = pipeline['planning']['reasoning_effort']
     record = dict(stage='plan', cycle=cycle, input=world_model, goal=goal_text,
                   model_identifier=plan_identifier or model_identifier or 'configured planner',
-                  prompt=prompt, available_actions=AVAILABLE_ACTIONS, selected_action=None)
+                  prompt=None, available_actions=AVAILABLE_ACTIONS, selected_action=None)
+    record.update(provenance or {})
     try:
+        prompt, settings = load_prompt(world_model, goal=goal_text,
+                                        available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2), prompt=prompt_name, configuration=pipeline)
+        if 'max_output_tokens' in pipeline.get('planning', {}):
+            settings['max_new_tokens'] = pipeline['planning']['max_output_tokens']
+        if pipeline.get('planning', {}).get('reasoning_effort') is not None:
+            settings['reasoning_effort'] = pipeline['planning']['reasoning_effort']
+        record['prompt'] = prompt
         if plan is None:
             raise ValueError('Plan stage requires a schema-constrained LLM backend')
         generate = getattr(plan, 'generate', plan)
@@ -60,9 +72,9 @@ def select_action(directory, cycle, world_model, plan, *, pipeline,
     except (Exception, KeyboardInterrupt) as error:
         record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
                       error=f'{type(error).__name__}: {error}')
-        with (destination / 'plan.json').open('x', encoding='utf-8') as output:
+        with (destination / record_name).open('x', encoding='utf-8') as output:
             json.dump(record, output, ensure_ascii=False, indent=2)
         raise
-    with (destination / 'plan.json').open('x', encoding='utf-8') as output:
+    with (destination / record_name).open('x', encoding='utf-8') as output:
         json.dump(record, output, ensure_ascii=False, indent=2)
     return decision['action']

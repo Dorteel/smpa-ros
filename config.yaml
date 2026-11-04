@@ -45,3 +45,14 @@ nebula:
     text: SURF.gpt-oss-120b
     vision: SURF.Qwen2.5-VL-32B-Instruct-AWQ
   timeout: 180
+
+# Stage generation defaults; modeling/planning max_output_tokens override these.
+stage_settings:
+  sense:
+    max_new_tokens: 128
+  model:
+    max_new_tokens: 512
+  plan:
+    max_new_tokens: 128
+  act:
+    max_new_tokens: 128

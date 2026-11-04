@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from smpa_ros.backends.speech import FasterWhisperBackend, PiperBackend, SpeechCanceled
+from speech.backends import FasterWhisperBackend, PiperBackend, SpeechCanceled
 
 
 class InputStream:

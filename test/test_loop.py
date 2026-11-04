@@ -57,7 +57,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     """Exercise main, real ROS image/service exchange and persistence; mock model/process creation."""
     import json
     import yaml
-    import smpa_ros.smpa as module
+    import runner as module
     from rclpy.qos import qos_profile_sensor_data
 
     config = {'camera_topic': '/test/smpa_main_camera', 'model': 'smolvlm2', 'prompt': 'describe_scene'}
@@ -99,7 +99,8 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
             '--timeout', '5']
     if override is not None:
         args += ['--max-cycles', str(override)]
-    module.main(args)
+    from smpa_ros.smpa import main
+    main(args)
     directory, = (tmp_path / 'world_model/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['completed_cycles'] == expected and metadata['status'] == 'completed'

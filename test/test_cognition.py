@@ -6,38 +6,30 @@ import pytest
 
 from smpa_ros.backends.ollama import OllamaBackend
 from smpa_ros.backends.transformers import TransformersBackend
-from smpa_ros.smpa import run_cycle
+from runner import Runner
 
 
 def test_cycle_order_and_independent_backends():
-    calls = []
-
-    class RecordingBackend:
-        def __init__(self, name):
-            self.name = name
-
-        def generate(self, prompt, *, max_new_tokens):
-            calls.append((self.name, prompt, max_new_tokens))
-            return self.name + ' output'
-
-    backends = {name: RecordingBackend(name) for name in ('sense', 'model', 'plan', 'act')}
-    result = run_cycle('a red cup', **backends)
-    assert list(result) == list(backends)
-    previous = 'a red cup'
-    for name, prompt, limit in calls:
-        assert previous in prompt
-        assert limit == (512 if name == 'model' else 128)
-        previous = name + ' output'
-        assert result[name] == previous
+    from smpa_ros.smpa import run
+    runner = MagicMock()
+    run(runner, 2)
+    assert [call[0] for call in runner.method_calls] == [
+        'start', 'cycle', 'sense', 'model', 'plan', 'act',
+        'cycle', 'sense', 'model', 'plan', 'act', 'finish']
+    runner.model.assert_called_with(runner.sense.return_value, prompt='default')
+    runner.plan.assert_called_with(runner.model.return_value, prompt='default')
+    runner.act.assert_called_with(runner.plan.return_value, prompt='default')
 
 
 def test_failed_stage_stops_cycle():
-    failed = MagicMock()
-    failed.generate.side_effect = RuntimeError('inference failed')
-    later = MagicMock()
+    from smpa_ros.smpa import run
+    runner = MagicMock()
+    runner.sense.side_effect = RuntimeError('inference failed')
     with pytest.raises(RuntimeError, match='inference failed'):
-        run_cycle('observation', sense=failed, model=later, plan=later, act=later)
-    later.generate.assert_not_called()
+        run(runner, 1)
+    runner.model.assert_not_called()
+    runner.plan.assert_not_called()
+    runner.act.assert_not_called()
 
 
 def test_ollama_request_without_server(monkeypatch):
@@ -104,7 +96,6 @@ def test_local_llm_world_model_iterations(tmp_path):
     import importlib.util
     from pathlib import Path
     import yaml
-    from smpa_ros.smpa import run
 
     repository = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((repository / 'config.yaml').read_text())
@@ -124,6 +115,7 @@ def test_local_llm_world_model_iterations(tmp_path):
         assert isinstance(backend.model, torch.nn.Module)
         observations = ['A white cup is on a wooden table.',
                         'The same white cup is still on the table. A red book is now next to it.']
+        from test.test_run_storage import run
         directory = run(2, root=tmp_path, sense=lambda directory, cycle: observations[cycle - 1],
                         model=backend, model_identifier=selected['model_id'],
                         plan=lambda prompt, **settings: '{"action":"look_left"}',
@@ -173,3 +165,68 @@ def test_transformers_schema_constraints_never_fall_back(monkeypatch, available)
         with pytest.raises(RuntimeError, match='[Nn]o unrestricted fallback'):
             backend.generate('choose', schema=ACTION_SCHEMA)
         backend.model.generate.assert_not_called()
+
+
+@pytest.mark.parametrize('backend_name', ['transformers', 'openai', 'nebula', 'ollama'])
+def test_shared_text_backend_selection(tmp_path, monkeypatch, backend_name):
+    from pathlib import Path
+    import yaml
+    from smpa_ros.model import load_backend
+    from smpa_ros.plan import ACTION_SCHEMA
+
+    repository = Path(__file__).resolve().parents[1]
+    config = yaml.safe_load((repository / 'config.yaml').read_text())
+    vision = dict(config['vision'])
+    registry = yaml.safe_load((repository / 'models/model_library.yaml').read_text())
+    registry['models']['test-ollama'] = {'backend': 'ollama', 'model_id': 'test-model'}
+    (tmp_path / 'model_library.yaml').write_text(yaml.safe_dump(registry))
+    if backend_name in ('openai', 'nebula'):
+        config['modeling'] = {'backend': 'api', 'provider': backend_name}
+        target = 'smpa_ros.backends.api.APIBackend'
+    elif backend_name == 'transformers':
+        config['modeling'] = {'model': 'qwen3-0.6b'}
+        target = 'smpa_ros.backends.transformers.TransformersBackend'
+    else:
+        config['modeling'] = {'model': 'test-ollama'}
+        target = 'smpa_ros.backends.ollama.OllamaBackend'
+    constructor = MagicMock()
+    constructor.return_value.generate.return_value = 'generated text'
+    monkeypatch.setattr(target, constructor)
+    config_path = tmp_path / 'config.yaml'
+    config_path.write_text(yaml.safe_dump(config))
+    generate, metadata = load_backend(config, config_path, tmp_path / 'weights', tmp_path)
+    constructor.assert_not_called()
+    assert config['vision'] == vision
+    assert generate('world', max_new_tokens=37) == 'generated text'
+    if backend_name in ('openai', 'nebula'):
+        constructor.assert_called_once_with(config_path, modality='text', provider=backend_name)
+        assert metadata['model_id'] == config[backend_name]['models']['text']
+    elif backend_name == 'transformers':
+        constructor.assert_called_once_with(str(tmp_path / 'weights/llm/qwen3_0.6b'), enable_thinking=False)
+        assert metadata['model_id'] == 'Qwen/Qwen3-0.6B'
+    else:
+        constructor.assert_called_once_with('test-model')
+        assert metadata['model_id'] == 'test-model'
+    if backend_name == 'ollama':
+        with pytest.raises(RuntimeError, match='schema-constrained planning'):
+            generate('choose', max_new_tokens=11, schema=ACTION_SCHEMA)
+        assert constructor.return_value.generate.call_count == 1
+    else:
+        options = {'reasoning_effort': 'low'} if backend_name in ('openai', 'nebula') else {}
+        generate('choose', max_new_tokens=11, schema=ACTION_SCHEMA, **options)
+        constructor.return_value.generate.assert_called_with(
+            'choose', max_new_tokens=11, schema=ACTION_SCHEMA, **options)
+    assert constructor.call_count == 1
+
+
+@pytest.mark.parametrize('stage, expected', [('sense', 128), ('model', 512), ('plan', 128), ('act', 128)])
+def test_unified_stage_generation_defaults(stage, expected):
+    import importlib
+    from pathlib import Path
+    import yaml
+    module = importlib.import_module('smpa_ros.' + stage)
+    config = yaml.safe_load((Path(__file__).resolve().parents[1] / 'config.yaml').read_text())
+    assert module.load_prompt('input')[1] == {'max_new_tokens': expected}
+    assert module.load_prompt('input', configuration=config)[1] == {'max_new_tokens': expected}
+    config['stage_settings'][stage]['max_new_tokens'] = 37
+    assert module.load_prompt('input', configuration=config)[1] == {'max_new_tokens': 37}
