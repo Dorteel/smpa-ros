@@ -15,21 +15,29 @@ from sensor_msgs.msg import Image
 from smpa_ros_interfaces.srv import DescribeScene
 import yaml
 
+from smpa_ros.backends.base import (stage_generation, generation_arguments, validate_generation,
+                                    generation_capabilities)
+
 from smpa_ros.backends.transformers import TransformersVLM
 from memory import MemoryManager
+from smpa_ros.model import resolve_vision_model
 
 
 def load_prompt(value, *, prompt='default', configuration=None):
     component = files('smpa_ros')
     if not prompt or '/' in prompt or '\\' in prompt or prompt in ('.', '..'):
         raise ValueError('Prompt must be a filename stem')
-    prompt = component.joinpath(f'prompts/sense/{prompt}.txt').read_text(encoding='utf-8').format(
-        input=value, previous_world_model='', goal='', available_actions='')
-    if configuration is None or 'stage_settings' not in configuration:
+    selected = (configuration or {}).get('stage_prompts', {}).get('sense', {})
+    template = (selected['text'] if prompt == selected.get('name') else
+                component.joinpath(f'prompts/sense/{prompt}.txt').read_text(encoding='utf-8'))
+    prompt = (template if prompt == selected.get('name') else template.format(
+        input=value, previous_world_model='', goal='', available_actions=''))
+    if configuration is None:
         from ament_index_python.packages import get_package_share_directory
-        configuration = yaml.safe_load(
+        defaults = yaml.safe_load(
             (Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text(encoding='utf-8'))
-    settings = dict(configuration['stage_settings']['sense'])
+        configuration = dict(defaults, **(configuration or {}))
+    settings = stage_generation(configuration, 'sense')
     return prompt, settings
 
 
@@ -42,7 +50,7 @@ def record_observation(directory, cycle, sense, *, record_name='sense.json',
     record = dict(stage='sense', cycle=cycle, **(provenance or {}))
     try:
         if prompt_name is not None:
-            record['prompt'], _ = load_prompt('', prompt=prompt_name, configuration=configuration)
+            record['prompt'], record['generation_parameters'] = load_prompt('', prompt=prompt_name, configuration=configuration)
         value = sense(directory, cycle)
         record.update(output=value, status='generated')
     except (Exception, KeyboardInterrupt) as error:
@@ -101,21 +109,29 @@ class SenseService(Node):
         share = Path(get_package_share_directory('smpa_ros'))
         self.declare_parameter('config', str(share / 'config.yaml'))
         pipeline = yaml.safe_load(Path(self.get_parameter('config').value).read_text())
-        vision = pipeline.get('vision', {})
+        vision = pipeline['model'] if isinstance(pipeline.get('model'), dict) else pipeline.get('vision', {})
         vision_backend = vision.get('backend', 'transformers')
         if vision_backend not in ('transformers', 'api'):
             raise ValueError('vision.backend must be transformers or api')
-        self.declare_parameter('model_config', pipeline['model'] + '.yaml'
-                               if vision_backend == 'transformers' else '')
+        self.declare_parameter('model_config', (pipeline.get('model', '') if isinstance(pipeline.get('model'), str) else vision.get('model', '')) + '.yaml'
+                               if vision_backend == 'transformers' and not vision.get('path') else '')
         self.declare_parameter('device', vision.get('device', 'auto'))
         self.declare_parameter('dtype', vision.get('dtype', 'auto'))
-        token_limit = vision.get('max_output_tokens', 512 if vision_backend == 'api' else 128)
+        generation = stage_generation(pipeline, 'sense')
+        provider = pipeline.get(vision.get('provider', 'openai'), {})
+        capabilities = generation_capabilities(vision_backend, vision=True, provider=provider,
+            model_id=vision.get('model_id', provider.get('models', {}).get('vision')))
+        if vision_backend == 'api' and not provider.get('generation_capabilities'):
+            capabilities = None
+        validate_generation(generation, backend=vision_backend, capabilities=capabilities)
+        token_limit = generation['max_output_tokens']
         if type(token_limit) is not int or token_limit <= 0:
             raise ValueError('vision.max_output_tokens must be a positive integer')
         self.declare_parameter('max_new_tokens', token_limit)
         self.max_new_tokens = self.get_parameter('max_new_tokens').value
         if type(self.max_new_tokens) is not int or self.max_new_tokens <= 0:
             raise ValueError('max_new_tokens must be a positive integer')
+        self.generation_options = generation_arguments(dict(generation, max_output_tokens=self.max_new_tokens))
         self.default_prompt = files('smpa_ros').joinpath(
             'prompts/sense/describe_scene.txt',
         ).read_text(encoding='utf-8').strip()
@@ -123,36 +139,12 @@ class SenseService(Node):
             from smpa_ros.backends.api import APIBackend
             api_path = Path(self.get_parameter('config').value).resolve()
             backend = APIBackend(api_path, modality='vision', provider=vision.get('provider', 'openai'))
+            backend.model_id = vision.get('model_id', backend.model_id)
             self.get_logger().info(f'Using API vision model: {backend.model_id}')
         elif backend is None:
-            config_path = Path(self.get_parameter('model_config').value)
-            if not config_path.is_absolute():
-                config_path = Path(get_package_share_directory('smpa_ros')) / 'models' / config_path
-            config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
-            # The downloader report maps configured IDs to its existing local layout.
-            model_source = config['model_id']
-            pipeline_path = Path(self.get_parameter('config').value).resolve()
-            for root in (pipeline_path.parent / 'models', Path.cwd() / 'models'):
-                report = root / 'download_report.json'
-                if not report.is_file():
-                    continue
-                try:
-                    records = json.loads(report.read_text())['models']
-                    for record in records:
-                        if record['repo_id'] != config['model_id'] or record['status'] != 'completed':
-                            continue
-                        directory = Path(record['local_dir'])
-                        if ((directory / 'config.json').is_file()
-                                and record.get('files')
-                                and all((directory / name).is_file()
-                                        and (directory / name).stat().st_size == details['size']
-                                        for name, details in record['files'].items())):
-                            model_source = str(directory)
-                            break
-                except (OSError, ValueError, KeyError, TypeError) as error:
-                    self.get_logger().warning(f'Cannot use model download report {report}: {error}')
-                if model_source != config['model_id']:
-                    break
+            config = resolve_vision_model(pipeline, share / 'models', Path.cwd() / 'models',
+                                          model_config=self.get_parameter('model_config').value or None)
+            model_source = config['path']
             self.get_logger().info(
                 f"Selected model: {config['model_id']}; backend: TransformersVLM; "
                 f"device: {self.get_parameter('device').value}; dtype: {self.get_parameter('dtype').value}",
@@ -184,8 +176,8 @@ class SenseService(Node):
             # Bound image size before processor tiling to limit inference memory.
             image.thumbnail((512, 512))
             response.description = self.backend.describe(
-                image, request.prompt.strip() or self.default_prompt,
-                max_new_tokens=self.max_new_tokens,
+                image, request.prompt if request.prompt.strip() else self.default_prompt,
+                **self.generation_options,
             )
             self.get_logger().info(f'Inference completed in {perf_counter() - started:.2f}s')
         except Exception as error:
@@ -206,9 +198,10 @@ def capture_once(node: Node, config: dict, output_dir: Path,
 
     output_dir, _ = MemoryManager.assigned_run(output_dir, config.get('run_id', ''))
     output_dir = output_dir / 'observations' / 'vision'
-    prompt = files('smpa_ros').joinpath(
-        'prompts/sense/' + config['prompt'] + '.txt',
-    ).read_text(encoding='utf-8').strip()
+    selected = config.get('stage_prompts', {}).get('sense', {})
+    prompt = (selected['text'] if config['prompt'] == selected.get('name') else
+              files('smpa_ros').joinpath('prompts/sense/' + config['prompt'] + '.txt')
+              .read_text(encoding='utf-8').strip())
     client = node.create_client(DescribeScene, '/sense')
     subscription = None
     try:

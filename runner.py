@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
+from importlib.resources import files
 from pathlib import Path
 import os
 import signal
@@ -14,10 +16,11 @@ from contextlib import contextmanager
 from threading import current_thread, main_thread
 
 from memory import MemoryManager
+from smpa_ros.backends.base import GENERATION_KEYS, stage_generation
 from smpa_ros.act import execute_action, perform_action
-from smpa_ros.model import (generate_world_model, load_backend,
-                            validate_settings as validate_model_settings)
-from smpa_ros.plan import (select_action,
+from smpa_ros.model import (generate_world_model, resolve_vision_model,
+                            unify_model, validate_settings as validate_model_settings)
+from smpa_ros.plan import (ACTION_SCHEMA, AVAILABLE_ACTIONS, select_action,
                            validate_settings as validate_plan_settings)
 
 
@@ -29,7 +32,8 @@ class Runner:
                  configuration=None, setup=None, teardown=None,
                  model_identifier=None, plan_identifier=None):
         self.participant = None
-        self.camera_node = self.executor = self.speech = None
+        self.camera_node = self.executor = self.speech = self.sense_node = None
+        self.backend = None
         self.last_transcript = ''
 
         self.memory = None
@@ -44,12 +48,26 @@ class Runner:
             self.configure(args)
             self.initialize_backends()
             self.root, self.run_name = self.options.world_model_root, self.options.run_name
-            self.configuration = dict(pipeline=self.config, service=self.options.service, max_cycles=self.limit)
+            self.configuration = dict(pipeline=self.config, service=self.options.service, max_cycles=self.limit,
+                                      available_actions=deepcopy(AVAILABLE_ACTIONS),
+                                      output_schema=deepcopy(self.config['stage_settings']['plan'].get('output_schema', ACTION_SCHEMA)))
+            self.configuration['stage_settings'] = deepcopy(self.config['stage_settings'])
+            self.configuration['stage_models'] = {
+                'sense': deepcopy(self.models.get('vision', {})),
+                'model': deepcopy(self.models.get('model', {})),
+                'plan': deepcopy(self.models.get('plan', self.models.get('model', {}))),
+                'act': dict(backend='ros_action', model_id=None, provider=None)}
+            for stage, model in self.configuration['stage_models'].items():
+                model.setdefault('provider', None)
+                if stage == 'sense':
+                    model.setdefault('backend', self.config.get('vision', {}).get('backend', 'transformers'))
+            if 'stage_prompts' not in self.original_config:
+                self.configuration['stage_prompts'] = self.config['stage_prompts']
             self._sense, self._act = self.observe, self.dispatch
             self._setup, self._teardown = self.setup, self.teardown
         if isinstance(self.limit, bool) or not isinstance(self.limit, int) or self.limit < 1:
             raise ValueError('max_cycles must be a positive integer')
-        self.pipeline = self.configuration.get('pipeline', {})
+        self.pipeline = self.config if hasattr(self, 'config') else self.configuration.get('pipeline', {})
         validate_model_settings(self.pipeline.get('modeling', {}))
         validate_plan_settings(self.pipeline.get('planning', {}))
 
@@ -98,7 +116,24 @@ class Runner:
         if not isinstance(action_timeout, (int, float)) or isinstance(action_timeout, bool) or not math.isfinite(action_timeout) or action_timeout <= 0:
             parser.error('execution.action_timeout must be finite and positive')
         self.options = options
-        self.config = config
+        self.original_config = deepcopy(config)
+        env_path = options.config.resolve().parent / '.env'
+        if env_path.is_file():
+            from dotenv import load_dotenv
+            load_dotenv(env_path, override=False)
+        config = deepcopy(config)
+        prompts = config.setdefault('stage_prompts', {})
+        for stage in ('sense', 'model', 'plan', 'act'):
+            name = config.get('prompt', 'describe_scene') if stage == 'sense' else 'default'
+            if stage not in prompts:
+                prompts[stage] = dict(name=name, text=files('smpa_ros').joinpath(
+                    f'prompts/{stage}/{name}.txt').read_text(encoding='utf-8'))
+        effective = {stage: stage_generation(config, stage) for stage in ('sense', 'model', 'plan', 'act')}
+        config['stage_settings'] = effective
+        for section in ('vision', 'modeling', 'planning'):
+            for key in (*GENERATION_KEYS, 'output_schema'):
+                config.get(section, {}).pop(key, None)
+        self.config = unify_model(config)
         self.limit = limit
         self.action_timeout = action_timeout
 
@@ -108,28 +143,47 @@ class Runner:
         from rclpy.signals import SignalHandlerOptions
         namespace = '/run_' + identity.replace('-', '_')
         command = ['ros2', 'launch', 'smpa_ros', 'llm.launch.py', 'participants_only:=true',
-                   f'service:={self.options.service}', f'world_model_dir:={directory}', f'run_id:={identity}',
+                   'service:=speech', f'world_model_dir:={directory}', f'run_id:={identity}',
                    f'config:={self.options.config.resolve()}', f'python:={self.options.python}',
                    f'model_root:={self.options.model_root}']
         for name in ('audio_lock', 'input_device', 'output_device'):
             if getattr(self.options, name):
                 command.append(f'{name}:={getattr(self.options, name)}')
-        self.participant = subprocess.Popen(command, start_new_session=True)
+        if self.options.service in ('speech', 'all'):
+            self.participant = subprocess.Popen(command, start_new_session=True)
         print(f'World-model run: {directory}\nROS endpoints: {namespace}/...', flush=True)
         rclpy.init(args=['--ros-args', '-r', f'/sense:={namespace}/sense',
                          '-r', f'/speech/listen:={namespace}/speech/listen',
                          '-r', f'/speech/talk:={namespace}/speech/talk',
+                         '-p', f'config:={self.options.config.resolve()}',
                          '-p', f'world_model_dir:={directory}', '-p', f'run_id:={identity}'],
                    signal_handler_options=SignalHandlerOptions.NO)
         self.camera_node = rclpy.create_node('smpa_loop')
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.camera_node)
+        if self.selected['backend'] == 'transformers':
+            from smpa_ros.backends.transformers import TransformersVLM
+            self.backend = TransformersVLM(self.selected['path'], self.selected.get('dtype', 'auto'),
+                                           device=self.selected.get('device', 'auto'))
+        else:
+            from smpa_ros.backends.api import APIBackend
+            self.backend = APIBackend(self.options.config, modality='vision', provider=self.selected['provider'])
+            self.backend.model_id = self.selected['model_id']
+        self._model = self._plan = self.backend
+        if self.options.service in ('vision', 'all'):
+            from smpa_ros.sense import SenseService
+            self.sense_node = SenseService(backend=self.backend)
+            self.executor.add_node(self.sense_node)
+        if self.selected['backend'] == 'transformers':
+            runtime = dict(device=str(self.backend.model.device), dtype=str(self.backend.model.dtype))
+            self.memory.metadata['configuration']['runtime'] = runtime
+            self.memory.write_metadata()
         if self.options.service in ('speech', 'all'):
             from speech.demo import ListenerTalker
             self.speech = ListenerTalker()
 
     def observe(self, directory, cycle, prompt=None):
-        if self.participant.poll() is not None:
+        if self.participant is not None and self.participant.poll() is not None:
             raise RuntimeError('Participating ROS processes exited')
         from smpa_ros.sense import observe
         observation, self.last_transcript = observe(
@@ -147,11 +201,16 @@ class Runner:
                 self.speech.close()
             if self.executor is not None:
                 self.executor.shutdown()
+            if self.sense_node is not None:
+                self.sense_node.destroy_node()
+                self.sense_node = None
             if self.camera_node is not None:
                 self.camera_node.destroy_node()
             if rclpy.ok():
                 rclpy.shutdown()
         finally:
+            if self.backend is not None:
+                self._model = self._plan = self.backend = None
             if self.participant is not None and self.participant.poll() is None:
                 for signum, timeout in ((signal.SIGINT, 15), (signal.SIGTERM, 5),
                                         (signal.SIGKILL, None)):
@@ -166,22 +225,20 @@ class Runner:
         from ament_index_python.packages import get_package_share_directory
 
         registry = Path(get_package_share_directory('smpa_ros')) / 'models'
-        model, selected = load_backend(self.config, self.options.config, self.options.model_root, registry)
-
-        models = {'model': selected}
-        if self.options.service in ('vision', 'all'):
-            if self.config.get('vision', {}).get('backend') == 'api':
-                provider = self.config['vision'].get('provider', 'openai')
-                settings = self.config[provider]
-                models['vision'] = {'backend': 'api', 'provider': provider, 'model_id': settings['models']['vision']}
-            else:
-                models['vision'] = yaml.safe_load((registry / (self.config['model'] + '.yaml')).read_text())
-        if self.options.service in ('speech', 'all'):
-            models.update(yaml.safe_load((registry / 'model_library.yaml').read_text())['models'])
-        self._model = self._plan = model
-        self.model_identifier = self.plan_identifier = selected['model_id']
+        selected = dict(self.config['model'])
+        if selected['backend'] == 'transformers':
+            selected = resolve_vision_model(self.config, registry, self.options.model_root)
+        elif selected['backend'] != 'api':
+            raise ValueError('The global model must support both images and text (Transformers VLM or API)')
+        self.config['model'] = selected
         self.selected = selected
-        self.models = models
+        self.models = {stage: deepcopy(selected) for stage in ('vision', 'model', 'plan')}
+        self.model_identifier = self.plan_identifier = selected['model_id']
+        if self.options.service in ('speech', 'all'):
+            # Speech recognition/synthesis are separate from cognitive inference.
+            entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
+            self.models.update({name: entry for name, entry in entries.items()
+                                if name not in self.models})
 
     def start(self, *, goal):
         """Create one independent run; use inside the Runner context for cleanup."""
@@ -195,6 +252,10 @@ class Runner:
         self.origins = {}
         self.previous_snapshot = ''
         self.last_transcript = ''
+        if hasattr(self, 'options'):
+            # All participants and lazy API backends read this run's frozen copy.
+            self.options.config = self.memory.directory / 'parameters.yaml'
+            self.initialize_backends()
         if self._setup:
             self._setup(self.memory.directory, self.memory.metadata['run_id'])
         return self.memory.directory
@@ -224,6 +285,8 @@ class Runner:
         return value
 
     def model(self, observation, *, prompt='default'):
+        if prompt == 'default':
+            prompt = self.pipeline.get('stage_prompts', {}).get('model', {}).get('name', prompt)
         name, provenance = self.memory.invocation('model', prompt, self.origins.get(observation))
         value = generate_world_model(
             self.memory.directory, self.memory.cycle, observation, self._model,
@@ -236,6 +299,8 @@ class Runner:
         return value
 
     def plan(self, world, *, prompt='default'):
+        if prompt == 'default':
+            prompt = self.pipeline.get('stage_prompts', {}).get('plan', {}).get('name', prompt)
         name, provenance = self.memory.invocation('plan', prompt, self.origins.get(world))
         action = select_action(
             self.memory.directory, self.memory.cycle, world, self._plan,
@@ -246,6 +311,8 @@ class Runner:
         return action
 
     def act(self, action, *, prompt='default'):
+        if prompt == 'default':
+            prompt = self.pipeline.get('stage_prompts', {}).get('act', {}).get('name', prompt)
         name, provenance = self.memory.invocation('act', prompt, self.origins.get(action))
         perform_action(self.memory.directory, self.memory.cycle, action, self._act,
                        prompt_name=prompt, record_name=name, provenance=provenance, configuration=self.pipeline)
@@ -263,4 +330,5 @@ class Runner:
         finally:
             self.memory.finalize(status)
             self.participant = None
-            self.camera_node = self.executor = self.speech = None
+            self.camera_node = self.executor = self.speech = self.sense_node = None
+        self.backend = None

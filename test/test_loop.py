@@ -52,8 +52,9 @@ def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
         rclpy.shutdown()
 
 
+@pytest.mark.parametrize('backend_kind', ['local', 'api'])
 @pytest.mark.parametrize('configured, override, expected', [(None, None, 1), (3, None, 3), (3, 1, 1)])
-def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, override, expected):
+def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, override, expected, backend_kind):
     """Exercise main, real ROS image/service exchange and persistence; mock model/process creation."""
     import json
     import yaml
@@ -69,7 +70,20 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
         record.update(goal_accepted=True, result_status=4, success=True)
     monkeypatch.setattr(module, 'execute_action', execute)
     constructor = MagicMock(return_value=model_backend)
-    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend', constructor)
+    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersVLM', constructor)
+    model_backend.describe.return_value = 'A red pixel.'
+    model_backend.model.device = 'cuda:0'
+    model_backend.model.dtype = 'torch.float16'
+    monkeypatch.setattr(module, 'resolve_vision_model', lambda *args, **kwargs: dict(backend='transformers', path='/local/vlm', model_id='test/vlm'))
+    if backend_kind == 'api':
+        config['model'] = dict(backend='api', provider='test', model_id='shared/vision-model')
+        config['test'] = {'models': {'vision': 'shared/vision-model'}}
+        monkeypatch.setattr('smpa_ros.backends.api.APIBackend', constructor)
+    original_service = SenseService
+    def shared_service(backend):
+        assert backend is model_backend
+        return original_service(backend=backend)
+    monkeypatch.setattr('smpa_ros.sense.SenseService', shared_service)
     if configured is not None:
         config['execution'] = {'max_cycles': configured}
     config_path = tmp_path / 'config.yaml'
@@ -84,9 +98,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
         return process
 
     def node(name):
-        backend = MagicMock()
-        backend.describe.return_value = 'A red pixel.'
-        server = SenseService(backend=backend)
+        server = original_create_node(name)
         publisher = server.create_publisher(Image, config['camera_topic'], qos_profile_sensor_data)
         image = Image(width=1, height=1, encoding='rgb8', step=3, data=[255, 0, 0])
         server.create_timer(0.02, lambda: publisher.publish(image))
@@ -94,6 +106,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
 
     monkeypatch.setattr(module.subprocess, 'Popen', launch)
     monkeypatch.setattr(module.os, 'killpg', MagicMock())
+    original_create_node = rclpy.create_node
     monkeypatch.setattr(rclpy, 'create_node', node)
     args = ['smpa', '--config', str(config_path), '--world-model-root', str(tmp_path / 'world_model'),
             '--timeout', '5']
@@ -104,15 +117,20 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     directory, = (tmp_path / 'world_model/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['completed_cycles'] == expected and metadata['status'] == 'completed'
+    parameters = yaml.safe_load((directory / 'parameters.yaml').read_text())
+    assert parameters.get('execution', {}).get('max_cycles', 1) == (configured or 1)
+    assert parameters['_run']['max_cycles'] == expected
     assert len(list((directory / 'observations' / 'vision').iterdir())) == expected
     assert len(list((directory / 'state').iterdir())) == expected
     constructor.assert_called_once()
     assert model_backend.generate.call_count == expected * 2
     assert len(list((directory / 'world_model').glob('iteration_*.md'))) == expected
-    assert len(commands) == 1
-    assert f'world_model_dir:={directory}' in commands[0]
-    assert f'run_id:={metadata["run_id"]}' in commands[0]
-    assert 'participants_only:=true' in commands[0]
+    assert commands == []  # Sense shares Runner's process and backend.
+    assert model_backend.describe.call_count == expected
+    if backend_kind == 'local':
+        assert metadata['configuration']['runtime']['device'] == 'cuda:0'
+    else:
+        assert metadata['models']['vision']['model_id'] == metadata['models']['model']['model_id'] == 'shared/vision-model'
     for cycle in range(1, expected + 1):
         assert json.loads((directory / f'state/cycle_{cycle:06d}/act.json').read_text())['status'] == 'succeeded'
 
@@ -131,8 +149,7 @@ def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
     repository = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((repository / 'config.yaml').read_text())
     config['camera_topic'] = '/test/config_' + uuid.uuid4().hex
-    config['vision'].update(backend='api', provider='nebula')
-    config['modeling'].update(backend='api', provider='openai')
+    config['model'] = dict(backend='api', provider='openai', model_id=config['openai']['models']['vision'])
     config_path = tmp_path / 'config.yaml'
     config_path.write_text(yaml.safe_dump(config))
     environment = os.environ.copy()
@@ -160,4 +177,5 @@ def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
     assert result.returncode != 0  # Expected bounded stop: no test camera publishes.
     directory, = (tmp_path / 'memory/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
-    assert metadata['configuration']['pipeline'] == config
+    from smpa_ros.model import unify_model
+    assert metadata['configuration']['pipeline'] == unify_model(config)

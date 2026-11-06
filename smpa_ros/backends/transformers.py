@@ -1,8 +1,39 @@
 import json
+from contextlib import nullcontext
+
+from smpa_ros.backends.base import generation_capabilities, validate_generation, validate_output
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from PIL.Image import Image
+
+
+def generation_options(model, tokenizer, temperature, schema):
+    """Prepare independent sampling and schema masks for a single request."""
+    options = {}
+    if temperature is not None:
+        options['do_sample'] = temperature > 0
+        if temperature > 0:
+            options['temperature'] = temperature
+    if schema is not None:
+        try:
+            from outlines import from_transformers
+            from outlines.backends import get_json_schema_logits_processor
+            from jsonschema.validators import validator_for
+
+            validator = validator_for(schema)(schema)
+            validator.check_schema(schema)
+            # Outlines 1.3.3 wraps these existing objects; it loads no weights.
+            # Build a fresh stateful token mask for each generation request.
+            wrapped = from_transformers(model, tokenizer)
+            options['logits_processor'] = [get_json_schema_logits_processor(
+                'outlines_core', wrapped, json.dumps(schema),
+            )]
+        except Exception as error:
+            raise RuntimeError('Cannot prepare Outlines JSON Schema constraints; run ./install.sh '
+                               'and check the schema. No unrestricted fallback is allowed: '
+                               f'{error}') from error
+    return options
 
 
 class TransformersBackend:
@@ -24,26 +55,17 @@ class TransformersBackend:
         )
         self.model.eval()
 
-    def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None) -> str:
-        options = {}
-        if schema is not None:
-            try:
-                from outlines import from_transformers
-                from outlines.backends import get_json_schema_logits_processor
-                from jsonschema.validators import validator_for
-
-                validator = validator_for(schema)(schema)
-                validator.check_schema(schema)
-                # Outlines 1.3.3 wraps these existing objects; it loads no weights.
-                # Build a fresh stateful token mask for each generation request.
-                wrapped = from_transformers(self.model, self.tokenizer)
-                options['logits_processor'] = [get_json_schema_logits_processor(
-                    'outlines_core', wrapped, json.dumps(schema),
-                )]
-            except Exception as error:
-                raise RuntimeError('Cannot prepare Outlines JSON Schema constraints; run ./install.sh '
-                                   'and check the schema. No unrestricted fallback is allowed: '
-                                   f'{error}') from error
+    def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
+                 temperature=None, seed=None, reasoning_effort=None, response_format=None) -> str:
+        response_format = response_format or ('json_schema' if schema is not None else 'text')
+        if schema is not None and response_format != 'json_schema':
+            raise ValueError('A schema requires response_format=json_schema')
+        validate_generation(dict(temperature=temperature, max_output_tokens=max_new_tokens,
+            seed=seed, reasoning_effort=reasoning_effort, response_format=response_format,
+            output_schema=schema), backend='transformers')
+        if response_format == 'json_object':
+            schema = {'type': 'object'}
+        options = generation_options(self.model, self.tokenizer, temperature, schema)
         messages = [{'role': 'user', 'content': prompt}]
         if self.tokenizer.chat_template:
             template_options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
@@ -54,21 +76,17 @@ class TransformersBackend:
         else:
             inputs = self.tokenizer(prompt, return_tensors='pt')
         inputs = inputs.to(self.model.device)
-        with self.torch.no_grad():
-            output = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False, **options,
-            )
+        # fork_rng restores CPU and all CUDA RNG states after this request.
+        with self.torch.random.fork_rng() if seed is not None else nullcontext():
+            if seed is not None:
+                self.torch.manual_seed(seed)
+            with self.torch.no_grad():
+                output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **options)
         # Decode only the continuation, excluding the input prompt.
         text = self.tokenizer.decode(
             output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=True,
         )
-        if schema is not None:
-            try:
-                validator.validate(json.loads(text))
-            except Exception as error:
-                raise RuntimeError('Structured generation did not produce a complete, schema-valid '
-                                   f'JSON response (check max_new_tokens): {error}') from error
-        return text
+        return validate_output(text, response_format, schema)
 
 
 class TransformersVLM:
@@ -106,8 +124,24 @@ class TransformersVLM:
             model_id, local_files_only=True, dtype=getattr(torch, dtype),
         ).to(device)
         self.model.eval()
+        self.tokenizer = self.processor.tokenizer
+        self.enable_thinking = None
 
-    def describe(self, image: 'Image', prompt: str, *, max_new_tokens: int = 128) -> str:
+    # The text path uses the same full VLM and tokenizer; no decoder is reloaded.
+    generate = TransformersBackend.generate
+
+    def describe(self, image: 'Image', prompt: str, *, max_new_tokens: int = 128,
+                 temperature=None, seed=None, reasoning_effort=None, response_format=None, schema=None) -> str:
+        response_format = response_format or ('json_schema' if schema is not None else 'text')
+        if schema is not None and response_format != 'json_schema':
+            raise ValueError('A schema requires response_format=json_schema')
+        validate_generation(dict(temperature=temperature, max_output_tokens=max_new_tokens,
+            seed=seed, reasoning_effort=reasoning_effort, response_format=response_format,
+            output_schema=schema), backend='transformers',
+            capabilities=generation_capabilities('transformers', vision=True))
+        if response_format == 'json_object':
+            schema = {'type': 'object'}
+        options = generation_options(self.model, self.tokenizer, temperature, schema)
         messages = [{'role': 'user', 'content': [
             {'type': 'image'}, {'type': 'text', 'text': prompt},
         ]}]
@@ -118,10 +152,13 @@ class TransformersVLM:
         inputs = self.processor(
             text=text, images=[image], return_tensors='pt', add_special_tokens=False,
         ).to(self.model.device, dtype=self.model.dtype)
-        with self.torch.no_grad():
-            output = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
-            )
-        return self.processor.decode(
+        # fork_rng restores CPU and all CUDA RNG states after this request.
+        with self.torch.random.fork_rng() if seed is not None else nullcontext():
+            if seed is not None:
+                self.torch.manual_seed(seed)
+            with self.torch.no_grad():
+                output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **options)
+        text = self.processor.decode(
             output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=True,
         ).strip()
+        return validate_output(text, response_format, schema)

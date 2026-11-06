@@ -509,7 +509,7 @@ def test_independent_stage_reasoning_effort(tmp_path):
     run(root=tmp_path, sense=lambda directory, cycle: 'observation', model=model, plan=plan,
         configuration={'pipeline': {'modeling': {'reasoning_effort': 'low'},
                                     'planning': {'reasoning_effort': 'high'}}})
-    assert received[0] == {'max_new_tokens': 512, 'reasoning_effort': 'low'}
+    assert received[0] == {'max_new_tokens': 512, 'reasoning_effort': 'low', 'temperature': 0, 'response_format': 'text'}
     assert received[1]['reasoning_effort'] == 'high'
     assert received[1]['max_new_tokens'] == 128
     assert 'schema' in received[1]
@@ -644,3 +644,82 @@ def test_error_between_stages_cleans_up(tmp_path):
                 raise KeyboardInterrupt
     cleanup.assert_called_once()
     assert runner.memory.metadata['status'] == 'interrupted'
+
+
+def test_independent_canonical_generation_snapshot_and_prompts(tmp_path):
+    from copy import deepcopy
+    from smpa_ros.backends.base import GENERATION_KEYS
+    from smpa_ros.plan import ACTION_SCHEMA
+    from importlib.resources import files
+    received = []
+    pipeline = dict(stage_settings={
+        'sense':dict(temperature=.2,max_output_tokens=31,reasoning_effort=None,seed=1,response_format='text'),
+        'model':dict(temperature=.4,max_output_tokens=71,reasoning_effort=None,seed=2,response_format='json_schema',output_schema={
+            'type':'object','properties':{'objects':{'type':'array'}},'required':['objects']}),
+        'plan':dict(temperature=.6,max_output_tokens=91,reasoning_effort=None,seed=3,response_format='json_schema',output_schema=ACTION_SCHEMA),
+        'act':dict.fromkeys(GENERATION_KEYS)}, stage_prompts={
+        stage:dict(name='default' if stage != 'sense' else 'describe_scene',text=files('smpa_ros').joinpath(
+            f"prompts/{stage}/{'describe_scene' if stage == 'sense' else 'default'}.txt").read_text())
+        for stage in ('sense','model','plan','act')})
+    before = deepcopy(pipeline)
+    def model(prompt, **settings):
+        received.append(('model', prompt, settings))
+        return '{"objects":[]}'
+    def plan(prompt, **settings):
+        received.append(('plan', prompt, settings))
+        return '{"action":"look_left"}'
+    directory = run(root=tmp_path, sense=lambda directory,cycle:'observation', model=model, plan=plan,
+                    configuration={'pipeline':pipeline})
+    assert pipeline == before
+    parameters = directory / 'parameters.yaml'
+    snapshot = parameters.read_bytes()
+    saved = yaml.safe_load(snapshot)
+    assert saved['stage_settings'] == pipeline['stage_settings']
+    assert saved['stage_prompts'] == pipeline['stage_prompts']
+    assert received[0][2]['temperature'] == .4 and received[0][2]['seed'] == 2
+    assert received[1][2]['temperature'] == .6 and received[1][2]['seed'] == 3
+    assert received[0][2]['max_new_tokens'] == 71 and received[1][2]['max_new_tokens'] == 91
+    pipeline['stage_settings']['model']['temperature'] = 1.5
+    assert parameters.read_bytes() == snapshot
+    for stage in ('sense','model','plan','act'):
+        record = json.loads((directory / f'state/cycle_000001/{stage}.json').read_text())
+        assert record['generation_parameters'] == before['stage_settings'][stage]
+        assert record['prompt']
+    assert json.loads((directory / 'state/cycle_000001/model.json').read_text())['prompt'] == received[0][1]
+
+
+@pytest.mark.parametrize('unsafe', [{'type':'object'}, dict(type='object', properties={'action':{'type':'string'}},required=['action'],additionalProperties=False)])
+def test_plan_canonical_schema_cannot_bypass_ros_contract(tmp_path, unsafe):
+    attempted = []
+    with pytest.raises(ValueError, match='fixed ROS action contract'):
+        run(root=tmp_path, sense=lambda directory,cycle:'observation', model=model_snapshot,
+            plan=lambda *args,**kwargs: attempted.append('plan'),
+            act=lambda *args: attempted.append('act'),
+            configuration={'pipeline':{'stage_settings':{'plan':{
+                'max_output_tokens':32,'response_format':'json_schema','output_schema':unsafe}}}})
+    assert not attempted
+
+
+def test_unregistered_local_paths_survive_runner_snapshot(tmp_path,monkeypatch):
+    from test_cognition import local_model_directory
+    from smpa_ros.model import resolve_vision_model
+    text=local_model_directory(tmp_path/'models/llm/new_text')
+    vision=local_model_directory(tmp_path/'models/vlm/new_vision',vision=True)
+    config={'vision':{'backend':'transformers','path':str(vision),'model_id':'custom/vision'},
+            'modeling':{'backend':'transformers','path':str(text),'model_id':'custom/text'}}
+    source=tmp_path/'config.yaml'
+    source.write_text(yaml.safe_dump(config))
+    constructor=MagicMock()
+    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend',constructor)
+    with Runner(['smpa','--config',str(source),'--world-model-root',str(tmp_path/'memory')]) as runner:
+        runner._setup=runner._teardown=None
+        directory=runner.start(goal=GOAL)
+        saved=yaml.safe_load((directory/'parameters.yaml').read_text())
+        assert saved['model']['path']==str(vision)
+        assert 'modeling' not in saved and 'planning' not in saved
+        assert saved['_run']['stage_models']['sense']['path']==str(vision)
+        assert saved['_run']['stage_models']['model']['path']==str(vision)
+        assert saved['_run']['stage_models']['sense']['model_id']=='custom/vision'
+        source.write_text('vision: {path: /missing}\n')
+        assert resolve_vision_model(saved,tmp_path/'no_registry',tmp_path/'models')['path']==str(vision)
+        constructor.assert_not_called()

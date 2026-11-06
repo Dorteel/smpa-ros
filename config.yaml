@@ -1,35 +1,21 @@
 camera_topic: /tiago/camera/color/image_raw
-model: smolvlm2
+model:
+  path: /home/dorteel/ros2_ws/src/smpa-ros/models/vlm/qwen3_vl_2b
+  model_id: Qwen/Qwen3-VL-2B-Instruct
+  backend: transformers
+  model: qwen3_vl_2b
+  device: auto
+  dtype: auto
 prompt: describe_scene
-vision:
-  backend: api
-  provider: nebula
-  max_output_tokens: 4096
-  reasoning_effort: low
+goal: '# Goal
 
-modeling:
-  reasoning_effort: low  # Optional API control; omitted preserves provider default.
-  backend: api
-  provider: nebula
-  max_output_tokens: 4096
-# vision:
-#   device: auto
-#   dtype: auto
-# modeling:
-#   model: qwen3-0.6b
-planning:
-  reasoning_effort: low  # Independent of modeling; requires provider support.
-  max_output_tokens: 4096
-goal: |
-  # Goal
 
   Explore the environment to discover previously unobserved objects and relationships.
+
+  '
 execution:
   max_cycles: 1
   action_timeout: 30.0
-
-# Providers used when vision.backend or modeling.backend is api.
-# Keep credentials in the repository .env or process environment, never here.
 openai:
   base_url: https://api.openai.com/v1
   api_key_env: OPENAI_API_KEY
@@ -37,7 +23,27 @@ openai:
     text: gpt-4.1-mini
     vision: gpt-4.1-mini
   timeout: 180
-
+  generation_capabilities:
+    text:
+      parameters:
+      - temperature
+      - max_output_tokens
+      - seed
+      response_formats:
+      - text
+      - json_object
+      - json_schema
+      reasoning_efforts: []
+    vision:
+      parameters:
+      - temperature
+      - max_output_tokens
+      - seed
+      response_formats:
+      - text
+      - json_object
+      - json_schema
+      reasoning_efforts: []
 nebula:
   base_url: https://nebula.cs.vu.nl/api/chat/completions
   api_key_env: NEBULA_API_KEY
@@ -45,14 +51,122 @@ nebula:
     text: SURF.gpt-oss-120b
     vision: SURF.Qwen2.5-VL-32B-Instruct-AWQ
   timeout: 180
-
-# Stage generation defaults; modeling/planning max_output_tokens override these.
+  generation_capabilities:
+    text:
+      parameters:
+      - temperature
+      - max_output_tokens
+      - reasoning_effort
+      response_formats:
+      - text
+      - json_schema
+      reasoning_efforts:
+      - low
+      - medium
+      - high
+    vision:
+      parameters:
+      - temperature
+      - max_output_tokens
+      response_formats:
+      - text
+      reasoning_efforts: []
 stage_settings:
   sense:
-    max_new_tokens: 128
+    temperature: 0.0
+    max_output_tokens: 4096
+    reasoning_effort: null
+    seed: null
+    response_format: json_schema
+    output_schema:
+      type: object
   model:
-    max_new_tokens: 512
+    temperature: 0.0
+    max_output_tokens: 4096
+    reasoning_effort: null
+    seed: null
+    response_format: text
   plan:
-    max_new_tokens: 128
+    temperature: 0.0
+    max_output_tokens: 4096
+    reasoning_effort: null
+    seed: null
+    response_format: json_schema
+    output_schema:
+      type: object
+      properties:
+        action:
+          type: string
+          enum:
+          - look_left
+          - look_right
+      required:
+      - action
+      additionalProperties: false
   act:
-    max_new_tokens: 128
+    temperature: null
+    max_output_tokens: null
+    reasoning_effort: null
+    seed: null
+    response_format: null
+stage_prompts:
+  sense:
+    name: describe_scene
+    text: 'Describe the scene.
+
+      '
+  model:
+    name: default
+    text: 'Create a structured world model from the provided observations. Use the
+      previous world model as context when available. Preserve supported information,
+      update facts when new evidence justifies it, and do not invent observations.
+
+      Return a complete Markdown snapshot with the title "# World Model" and sections
+      "## Entities", "## Properties", "## Relations", and "## Uncertain Information".
+      Preserve stable entity identifiers where possible. Distinguish observed facts
+      from inferences and mark uncertainty explicitly.
+
+
+      Previous world model:
+
+      {previous_world_model}
+
+
+      Observations:
+
+      {input}
+
+      '
+  plan:
+    name: default
+    text: 'Plan the next action to take, given the current world model, the goal,
+      and the available actions. Select exactly one action from the provided list.
+
+      Return a JSON object containing only the action property.
+
+
+      Goal:
+
+      {goal}
+
+
+      Available actions:
+
+      {available_actions}
+
+
+      World state:
+
+      {input}
+
+      '
+  act:
+    name: default
+    text: 'Translate this plan into a proposed command description. Flag missing robot
+      capabilities or parameters. Do not claim execution occurred.
+
+      Plan:
+
+      {input}
+
+      '

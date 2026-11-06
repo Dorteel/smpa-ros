@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from smpa_ros.backends.base import generation_capabilities, validate_generation, validate_output
+
 
 class APIBackend:
     """Reuse the existing generation interfaces through the official OpenAI SDK."""
@@ -25,6 +27,8 @@ class APIBackend:
             if 'base_url' not in config:
                 config = config[provider]
             self.model_id = config['models'][modality]
+            self.provider_settings = config
+            self.modality = modality
             base_url = config['base_url']
             key_name = config['api_key_env']
             timeout = config.get('timeout', 180)
@@ -59,31 +63,39 @@ class APIBackend:
         self._client = OpenAI(api_key=key, base_url=base_url, timeout=timeout, max_retries=0,
                               default_headers={'Accept-Encoding': 'gzip, deflate'})
 
-    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None):
-        from jsonschema.validators import validator_for
+    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None,
+                  temperature=None, seed=None, response_format=None):
         from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
-        if type(max_new_tokens) is not int or max_new_tokens <= 0:
-            raise ValueError('max_new_tokens must be a positive integer')
-        options = {}
-        if reasoning_effort is not None:
-            if reasoning_effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
-                raise ValueError('Unsupported reasoning_effort; use none, minimal, low, medium, high, or xhigh.')
-            options['reasoning_effort'] = reasoning_effort
-        if schema is not None:
-            try:
-                validator = validator_for(schema)(schema)
-                validator.check_schema(schema)
-            except Exception:
-                raise ValueError('Invalid JSON Schema for API structured generation.') from None
+        response_format = response_format or ('json_schema' if schema is not None else 'text')
+        if schema is not None and response_format != 'json_schema':
+            raise ValueError('A schema requires response_format=json_schema')
+        settings = dict(temperature=temperature, max_output_tokens=max_new_tokens,
+                        reasoning_effort=reasoning_effort, seed=seed,
+                        response_format=response_format, output_schema=schema)
+        provider = getattr(self, 'provider_settings', {})
+        modality = getattr(self, 'modality', 'text')
+        declaration = provider.get('generation_capabilities', {}).get(modality)
+        capabilities = generation_capabilities('api', vision=modality == 'vision',
+            provider=provider, model_id=self.model_id) if declaration is not None else None
+        validate_generation(settings, capabilities=capabilities)
+        options = {key: value for key, value in dict(temperature=temperature, seed=seed,
+                   reasoning_effort=reasoning_effort).items() if value is not None}
+        if response_format == 'json_schema':
             options['response_format'] = {
                 'type': 'json_schema',
                 'json_schema': {'name': 'smpa_response', 'strict': True, 'schema': schema},
             }
+        elif response_format == 'json_object':
+            options['response_format'] = {'type': 'json_object'}
+            texts = content if isinstance(content, str) else ' '.join(
+                part.get('text', '') for part in content if part.get('type') == 'text')
+            if 'json' not in texts.lower():
+                raise ValueError('json_object requires an explicit JSON instruction in the prompt')
         try:
             response = self._client.chat.completions.create(
                 model=self.model_id, messages=[{'role': 'user', 'content': content}],
-                max_completion_tokens=max_new_tokens, temperature=0, **options,
+                max_completion_tokens=max_new_tokens, **options,
             )
         except APITimeoutError:
             raise RuntimeError('API request timed out; check connectivity or increase config.yaml timeout.') from None
@@ -152,23 +164,20 @@ class APIBackend:
             raise RuntimeError('API returned empty text despite finish_reason=stop.')
         if self._client.api_key in text:
             raise RuntimeError('API response contained credential data and was rejected.')
-        if schema is not None:
-            try:
-                validator.validate(json.loads(text))
-            except Exception:
-                raise RuntimeError('API returned invalid JSON or a response violating the requested schema; '
-                                   'strict server-side outputs are required. No unrestricted fallback was attempted.') from None
-        return text
+        return validate_output(text, response_format, schema)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
-                 reasoning_effort: str | None = None) -> str:
-        return self._complete(prompt, max_new_tokens, schema, reasoning_effort)
+                 reasoning_effort: str | None = None, temperature=None, seed=None,
+                 response_format=None) -> str:
+        return self._complete(prompt, max_new_tokens, schema, reasoning_effort,
+                              temperature, seed, response_format)
 
-    def describe(self, image, prompt: str, *, max_new_tokens: int = 128) -> str:
+    def describe(self, image, prompt: str, *, max_new_tokens: int = 128, schema=None,
+                 reasoning_effort=None, temperature=None, seed=None, response_format=None) -> str:
         buffer = BytesIO()
         image.convert('RGB').save(buffer, format='PNG')
         encoded = base64.b64encode(buffer.getvalue()).decode('ascii')
         return self._complete([
             {'type': 'text', 'text': prompt},
             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + encoded}},
-        ], max_new_tokens)
+        ], max_new_tokens, schema, reasoning_effort, temperature, seed, response_format)

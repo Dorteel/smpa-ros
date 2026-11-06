@@ -1,5 +1,7 @@
 """Run directories, assignment validation, and lifecycle metadata."""
 from datetime import datetime
+from copy import deepcopy
+from urllib.parse import urlsplit
 import os
 from pathlib import Path
 import re
@@ -13,6 +15,38 @@ class MemoryManager:
     """Own one run's identity and metadata without owning stage artifacts."""
 
     def __init__(self, root, run_name='smpa', *, models=None, configuration=None, goal):
+        configuration = deepcopy(configuration or {})
+        credentials = dict(os.environ)
+        env_path = Path.cwd() / '.env'
+        if env_path.is_file():
+            from dotenv import dotenv_values
+            credentials = {**dotenv_values(env_path), **credentials}
+        pipeline = configuration.get('pipeline', configuration)
+        key_names = {entry['api_key_env'] for entry in pipeline.values()
+                     if isinstance(entry, dict) and isinstance(entry.get('api_key_env'), str)}
+        # Reject inline credentials rather than silently persisting or changing them.
+        def check(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    normalized = str(key).lower()
+                    if (any(word in normalized for word in ('api_key', 'password', 'secret', 'authorization', 'access_token', 'credential'))
+                            or normalized in ('token', 'key', 'api_token', 'bearer_token')) and not normalized.endswith('_env'):
+                        raise ValueError('Credentials must be supplied through environment variables')
+                    check(item)
+            elif isinstance(value, list):
+                for item in value:
+                    check(item)
+            elif isinstance(value, str):
+                if value.startswith(('http://', 'https://')):
+                    url = urlsplit(value)
+                    if url.username or url.password or url.query or url.fragment:
+                        raise ValueError('Credential-bearing URLs are forbidden in run configuration')
+                for key, secret in credentials.items():
+                    if (key in key_names or any(word in key.upper() for word in ('API_KEY', 'PASSWORD', 'SECRET', 'TOKEN', 'CREDENTIAL'))) and secret and secret in value:
+                        raise ValueError('Credential data is forbidden in run configuration')
+        check(configuration)
+        check(models or {})
+        check(goal)
         name = re.sub(r'[^a-zA-Z0-9_-]+', '_', run_name).strip('_-')[:80]
         if not name:
             raise ValueError('run_name must contain a letter, digit, underscore, or hyphen')
@@ -26,6 +60,21 @@ class MemoryManager:
             (directory / category).mkdir(parents=True)
         with (directory / 'goal.md').open('x', encoding='utf-8') as output:
             output.write(goal)
+        parameters = deepcopy(configuration.get('pipeline', configuration))
+        if 'pipeline' in configuration and 'stage_prompts' in configuration:
+            parameters['stage_prompts'] = deepcopy(configuration['stage_prompts'])
+        if 'stage_settings' in configuration and 'pipeline' in configuration:
+            from smpa_ros.backends.base import GENERATION_KEYS
+            parameters['stage_settings'] = deepcopy(configuration['stage_settings'])
+            for section in ('vision', 'modeling', 'planning'):
+                for key in (*GENERATION_KEYS, 'output_schema'):
+                    parameters.get(section, {}).pop(key, None)
+        parameters['_run'] = dict(goal=goal, models=deepcopy(models or {}))
+        if 'pipeline' in configuration:
+            parameters['_run'].update({key: value for key, value in configuration.items()
+                                       if key not in ('pipeline', 'stage_prompts', 'stage_settings')})
+        with (directory / 'parameters.yaml').open('x', encoding='utf-8') as output:
+            yaml.safe_dump(parameters, output, sort_keys=False)
         metadata = dict(run_id=identity, run_name=name, started_at=started.isoformat(),
                         completed_at=None, status='running', completed_cycles=0,
                         models=models or {}, configuration=configuration or {})
@@ -57,6 +106,22 @@ class MemoryManager:
         return path, identity
 
     def write_metadata(self):
+        # Runner supplies measured execution details; persistence stays here.
+        runtime = self.metadata.get('configuration', {}).get('runtime')
+        if runtime is not None:
+            parameters = self.directory / 'parameters.yaml'
+            frozen = yaml.safe_load(parameters.read_text())
+            if frozen.get('_run', {}).get('runtime') != runtime:
+                frozen['_run']['runtime'] = deepcopy(runtime)
+                with NamedTemporaryFile(mode='w', dir=self.directory, prefix='.parameters-', delete=False) as output:
+                    pending = Path(output.name)
+                    try:
+                        yaml.safe_dump(frozen, output, sort_keys=False)
+                        output.flush()
+                        os.fsync(output.fileno())
+                        pending.replace(parameters)
+                    finally:
+                        pending.unlink(missing_ok=True)
         with NamedTemporaryFile(mode='w', dir=self.directory, prefix='.metadata-', delete=False) as output:
             pending = Path(output.name)
             try:

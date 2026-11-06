@@ -5,6 +5,8 @@ from pathlib import Path
 
 import yaml
 
+from smpa_ros.backends.base import stage_generation, generation_arguments
+
 
 AVAILABLE_ACTIONS = {
     'look_left': {'endpoint': '/look_left', 'type': 'simulation_actions/action/Look'},
@@ -19,13 +21,17 @@ def load_prompt(value, goal='', available_actions='', *, prompt='default', confi
     component = files('smpa_ros')
     if not prompt or '/' in prompt or '\\' in prompt or prompt in ('.', '..'):
         raise ValueError('Prompt must be a filename stem')
-    prompt = component.joinpath(f'prompts/plan/{prompt}.txt').read_text(encoding='utf-8').format(
+    selected = (configuration or {}).get('stage_prompts', {}).get('plan', {})
+    template = (selected['text'] if prompt == selected.get('name') else
+                component.joinpath(f'prompts/plan/{prompt}.txt').read_text(encoding='utf-8'))
+    prompt = template.format(
         input=value, previous_world_model='', goal=goal, available_actions=available_actions)
-    if configuration is None or 'stage_settings' not in configuration:
+    if configuration is None:
         from ament_index_python.packages import get_package_share_directory
-        configuration = yaml.safe_load(
+        defaults = yaml.safe_load(
             (Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text(encoding='utf-8'))
-    settings = dict(configuration['stage_settings']['plan'])
+        configuration = dict(defaults, **(configuration or {}))
+    settings = stage_generation(configuration, 'plan')
     return prompt, settings
 
 
@@ -52,15 +58,12 @@ def select_action(directory, cycle, world_model, plan, *, pipeline,
     try:
         prompt, settings = load_prompt(world_model, goal=goal_text,
                                         available_actions=json.dumps(AVAILABLE_ACTIONS, indent=2), prompt=prompt_name, configuration=pipeline)
-        if 'max_output_tokens' in pipeline.get('planning', {}):
-            settings['max_new_tokens'] = pipeline['planning']['max_output_tokens']
-        if pipeline.get('planning', {}).get('reasoning_effort') is not None:
-            settings['reasoning_effort'] = pipeline['planning']['reasoning_effort']
+        record['generation_parameters'] = settings
         record['prompt'] = prompt
         if plan is None:
             raise ValueError('Plan stage requires a schema-constrained LLM backend')
         generate = getattr(plan, 'generate', plan)
-        text = generate(prompt, **settings, schema=ACTION_SCHEMA)
+        text = generate(prompt, **generation_arguments(settings))
         if not isinstance(text, str):
             raise ValueError('Planner must return a JSON string')
         record['output'] = text
