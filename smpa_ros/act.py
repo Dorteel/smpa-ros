@@ -7,7 +7,7 @@ import yaml
 
 from smpa_ros.backends.base import stage_generation, generation_arguments
 
-from smpa_ros.plan import AVAILABLE_ACTIONS
+from smpa_ros.plan import AVAILABLE_ACTIONS, enabled_actions, validate_decision
 
 
 def load_prompt(value, *, prompt='default', configuration=None):
@@ -33,11 +33,12 @@ def perform_action(directory, cycle, action, act, *, prompt_name='default',
     """Execute the selected action and record success, failure, or interruption."""
     destination = directory / 'state' / f'cycle_{cycle:06d}'
     record = dict(stage='act', cycle=cycle, requested_action=action,
-                  endpoint=AVAILABLE_ACTIONS[action]['endpoint'], goal={}, goal_accepted=None,
+                  endpoint=AVAILABLE_ACTIONS.get(action, {}).get('endpoint'), goal={}, goal_accepted=None,
                   result_status=None, success=False)
     record.update(provenance or {})
     try:
         record['prompt'], record['generation_parameters'] = load_prompt(action, prompt=prompt_name, configuration=configuration)
+        validate_decision(dict(action=action, **record.get('parameters', {})), enabled_actions(configuration))
         if act is None:
             raise ValueError('Act stage requires a ROS action executor')
         act(action, record)
@@ -55,19 +56,20 @@ def perform_action(directory, cycle, action, act, *, prompt_name='default',
         json.dump(record, output, ensure_ascii=False, indent=2)
 
 
-def execute_action(node, executor, action, record, timeout, *, speech=None, transcript=''):
-    """Send the default Look goal, record feedback/result, and cancel on early exit."""
+def execute_action(node, executor, action, record, timeout, *, speech=None, transcript='', configuration=None):
+    """Send a registered movement goal and retain cancellation/result checks."""
     from action_msgs.msg import GoalStatus
     from rclpy.action import ActionClient
     from rosidl_runtime_py.convert import message_to_ordereddict
-    if action not in AVAILABLE_ACTIONS:
+    if action not in enabled_actions(configuration) or AVAILABLE_ACTIONS.get(action, {}).get('type') is None:
         raise ValueError(f'Unsupported action: {action}')
     try:
-        from simulation_actions.action import Look
-    except ImportError as error:
-        raise RuntimeError('simulation_actions/action/Look is unavailable; run ./install.sh to rebuild '
+        from importlib import import_module
+        kind = getattr(import_module('simulation_actions.action'), AVAILABLE_ACTIONS[action]['type'].rsplit('/', 1)[1])
+    except (ImportError, AttributeError) as error:
+        raise RuntimeError(f"{AVAILABLE_ACTIONS[action]['type']} is unavailable; run ./install.sh to rebuild "
                            'the current Webots interfaces and source the workspace installation') from error
-    client = ActionClient(node, Look, AVAILABLE_ACTIONS[action]['endpoint'])
+    client = ActionClient(node, kind, AVAILABLE_ACTIONS[action]['endpoint'])
     pending = handle = None
     result_future = None
     terminal = False
@@ -81,8 +83,8 @@ def execute_action(node, executor, action, record, timeout, *, speech=None, tran
     try:
         if not client.wait_for_server(timeout_sec=timeout):
             raise TimeoutError(f'{action}: action server unavailable')
-        # Look's default angle is zero: the server selects its configured angle.
-        goal = Look.Goal()
+        # Look/Turn use angle zero for the server default; LookAhead has an empty goal.
+        goal = kind.Goal()
         record['goal'] = dict(message_to_ordereddict(goal))
         record['feedback'] = []
 

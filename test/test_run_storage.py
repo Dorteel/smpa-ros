@@ -381,8 +381,10 @@ def test_goal_file_is_the_planning_source(tmp_path):
     assert planned.generate.call_args.kwargs['schema'] == ACTION_SCHEMA
 
 
-@pytest.mark.parametrize('mode', ['success', 'rejected', 'aborted', 'timeout', 'unavailable'])
-def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('mode, actions', [('success', ('look_left', 'look_right')),
+    ('success', ('look_ahead', 'turn_left')), ('success', ('turn_right', 'look_ahead')),
+    *[(mode, ('look_left', 'look_right')) for mode in ('rejected', 'aborted', 'timeout', 'unavailable')]])
+def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode, actions):
     """Real rclpy round trip; substitute Listen for unavailable simulation Look and remap endpoints."""
     import sys
     from types import ModuleType
@@ -396,7 +398,7 @@ def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
     from smpa_ros.act import execute_action
     parent = ModuleType('simulation_actions')
     interface = ModuleType('simulation_actions.action')
-    interface.Look = Listen
+    interface.Look = interface.LookAhead = interface.Turn = Listen
     monkeypatch.setitem(sys.modules, 'simulation_actions', parent)
     monkeypatch.setitem(sys.modules, 'simulation_actions.action', interface)
     rclpy.init(args=['--ros-args', '-r', '/look_left:=/test_smpa/look_left',
@@ -423,9 +425,10 @@ def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
             handle.succeed()
         finished.set()
         return Listen.Result(success=mode == 'success')
+    pipeline = {'enabled_actions': list(actions)}
     servers = []
     if mode != 'unavailable':
-        for endpoint in ('/look_left', '/look_right'):
+        for endpoint in ('/' + name for name in actions):
             servers.append(ActionServer(server, Listen, endpoint, execute,
                 goal_callback=lambda request: GoalResponse.REJECT if mode == 'rejected' else GoalResponse.ACCEPT,
                 cancel_callback=lambda handle: CancelResponse.ACCEPT, callback_group=ReentrantCallbackGroup()))
@@ -435,20 +438,20 @@ def test_ros_action_dispatch_and_cycle_order(tmp_path, monkeypatch, mode):
         if cycle > 1:
             assert finished.is_set(), 'Next Sense began before previous action completed'
         return f'seen {cycle}'
-    choices = iter(['look_left', 'look_right', 'look_left'])
+    choices = iter([actions[0], actions[1], actions[0]])
     def plan(prompt, **settings):
         return json.dumps({'action': next(choices)})
     def act(action, record):
-        execute_action(client, client_executor, action, record, 0.3 if mode in ('timeout', 'unavailable') else 3.0)
+        execute_action(client, client_executor, action, record, 0.3 if mode in ('timeout', 'unavailable') else 3.0, configuration=pipeline)
     try:
         if mode == 'success':
-            directory = run(3, root=tmp_path, sense=sense, model=model_snapshot, plan=plan, act=act)
+            directory = run(3, root=tmp_path, sense=sense, model=model_snapshot, plan=plan, act=act, configuration={'pipeline':pipeline})
             assert len(accepted) == 3
             assert yaml.safe_load((directory / 'metadata.yaml').read_text())['completed_cycles'] == 3
-            assert json.loads((directory / 'state/cycle_000002/act.json').read_text())['requested_action'] == 'look_right'
+            assert json.loads((directory / 'state/cycle_000002/act.json').read_text())['requested_action'] == actions[1]
         else:
             with pytest.raises((RuntimeError, TimeoutError)):
-                run(3, root=tmp_path, sense=sense, model=model_snapshot, plan=plan, act=act)
+                run(3, root=tmp_path, sense=sense, model=model_snapshot, plan=plan, act=act, configuration={'pipeline':pipeline})
             directory, = (tmp_path / 'runs').iterdir()
             metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
             assert metadata['completed_cycles'] == 0 and metadata['status'] == 'failed'
@@ -723,3 +726,98 @@ def test_unregistered_local_paths_survive_runner_snapshot(tmp_path,monkeypatch):
         source.write_text('vision: {path: /missing}\n')
         assert resolve_vision_model(saved,tmp_path/'no_registry',tmp_path/'models')['path']==str(vision)
         constructor.assert_not_called()
+
+
+def test_action_whitelist_filters_schema_and_rejects_execution(tmp_path):
+    from smpa_ros.plan import enabled_actions
+    from smpa_ros.backends.base import stage_generation
+    pipeline = {'enabled_actions': ['look_right']}
+    assert list(enabled_actions(pipeline)) == ['look_right']
+    assert stage_generation(pipeline, 'plan')['output_schema']['properties']['action']['enum'] == ['look_right']
+    executor = MagicMock()
+    with pytest.raises(ValueError, match='enabled whitelist'):
+        run(root=tmp_path, sense=lambda *args: 'scene', model=model_snapshot,
+            plan=planned_action, act=executor, configuration={'pipeline': pipeline})
+    executor.assert_not_called()
+    with Runner(root=tmp_path / 'direct', sense=lambda *args: 'scene', act=executor,
+                configuration={'pipeline': pipeline}) as runner:
+        runner.start(goal=GOAL)
+        with runner.cycle():
+            with pytest.raises(ValueError, match='enabled whitelist'):
+                runner.act('look_left')
+    executor.assert_not_called()
+
+
+@pytest.mark.parametrize('limit, expected_status, expected_cycles', [(10, 'completed', 4), (2, 'cycle_limit', 2), (1, 'cycle_limit', 1)])
+def test_finite_question_refinement_and_consolidation(tmp_path, monkeypatch, limit, expected_status, expected_cycles):
+    from types import SimpleNamespace
+    from PIL import Image
+    from smpa_ros.sense import SenseService
+    from smpa_ros.plan import refinement_settings
+    pipeline = {'enabled_actions': ['observe'], 'scene_refinement': {
+        'enabled': True, 'properties': ['color', 'material', 'texture']}}
+    backend = MagicMock()
+    def generate(prompt, **options):
+        properties = options.get('schema', {}).get('properties', {})
+        if 'entities' in properties:
+            return '{"entities":[{"id":"cup_1","description":"cup on table"}]}'
+        if 'action' in properties:
+            return json.dumps(dict(action='observe', target=properties['target']['enum'][0],
+                                   question=properties['question']['enum'][0]))
+        return '# World Model\n' + prompt
+    backend.generate.side_effect = generate
+    backend.describe.side_effect = [json.dumps(dict(status=status, answer=answer)) for status,answer in
+        [('answered','red'), ('visually_indeterminable','Cannot infer material'), ('unanswered','No conclusion')]]
+    view = SimpleNamespace(backend=backend, image=Image.new('RGB',(2,2),'red'),
+        image_sha256='frozen-hash', pipeline=pipeline, refinement=refinement_settings(pipeline), default_prompt='Describe the scene.')
+    view.focus = lambda target,question,**options: SenseService.focus(view,target,question,**options)
+    constructors = MagicMock(side_effect=AssertionError('No new inference instance is permitted'))
+    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersVLM', constructors)
+    with Runner(root=tmp_path, max_cycles=limit, sense=lambda *args:'A cup on a table.',
+                model=backend, plan=backend, configuration={'pipeline':pipeline}) as runner:
+        runner.backend = backend
+        runner.sense_node = view
+        runner._act = runner.dispatch
+        assert runner._model is runner._plan is view.backend
+        experiment(runner, runner.limit)
+        directory = runner.memory.directory
+        state = json.loads((directory/'state/refinement.json').read_text())
+        assert state['status'] == expected_status
+        assert runner.memory.metadata['completed_cycles'] == expected_cycles
+        assert state['image_sha256']=='frozen-hash'
+        attempted = [entry for entry in state['questions'] if entry['attempted']]
+        assert len(attempted)==min(limit-1,3)
+        assert len({entry['question'] for entry in attempted})==len(attempted)
+        assert [entry['status'] for entry in attempted] == ['answered','visually_indeterminable','unanswered'][:len(attempted)]
+        assert backend.describe.call_count == len(attempted)
+        final_model=json.loads((directory/f'state/cycle_{expected_cycles:06d}/model.json').read_text())
+        assert all(entry['answer'] in final_model['prompt'] for entry in attempted)
+        assert json.loads((directory/f'state/cycle_{expected_cycles:06d}/act.json').read_text())['requested_action'] is None
+        for call in backend.describe.call_args_list:
+            assert call.args[0].getpixel((0,0)) == (255,0,0)
+            assert 'cup_1' in call.args[1]
+            assert call.kwargs['response_format']=='json_schema'
+        if expected_status=='completed':
+            last_model=json.loads((directory/'state/cycle_000004/model.json').read_text())
+            assert 'No conclusion' in last_model['prompt']
+            assert json.loads((directory/'state/cycle_000004/act.json').read_text())['requested_action'] is None
+            assert runner.experiment_complete is True
+        if attempted:
+            runner.sense_node = view  # Run cleanup releases it; inspect duplicate protection with the same supplied view.
+            with pytest.raises(ValueError, match='unattempted'):
+                runner.focused_observation({'parameters': {key: attempted[0][key] for key in ('target','question')}})
+        parameters=yaml.safe_load((directory/'parameters.yaml').read_text())
+        assert parameters['_run']['enabled_actions']==['observe']
+        assert parameters['scene_refinement']==refinement_settings(pipeline)
+        assert len(list((directory/'observations/vision').glob('observe_*.json')))==len(attempted)
+    constructors.assert_not_called()
+
+
+@pytest.mark.parametrize('decision', [
+    {'action':'observe'}, {'action':'observe','question':''},
+    {'action':'observe','question':'Color?','target':42},
+    {'action':'look_left','question':'Color?'}, {'action':'look_left','extra':True}])
+def test_parameterized_action_validation_remains_strict(decision):
+    from smpa_ros.plan import validate_decision, AVAILABLE_ACTIONS
+    with pytest.raises(ValueError):
+        validate_decision(decision, AVAILABLE_ACTIONS)

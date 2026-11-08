@@ -178,4 +178,7 @@ def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
     directory, = (tmp_path / 'memory/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     from smpa_ros.model import unify_model
-    assert metadata['configuration']['pipeline'] == unify_model(config)
+    from smpa_ros.plan import enabled_actions
+    expected = unify_model(config)
+    expected['enabled_actions'] = list(enabled_actions(config))
+    assert metadata['configuration']['pipeline'] == expected

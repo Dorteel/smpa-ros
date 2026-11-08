@@ -395,3 +395,34 @@ def test_shared_vlm_image_text_and_fresh_schema_requests(monkeypatch):
     assert calls[0].kwargs['logits_processor'][0] is not calls[2].kwargs['logits_processor'][0]
     assert all(call.args[0] is backend.model and call.args[1] is tokenizer
                for call in outlines.from_transformers.call_args_list)
+
+
+def test_frozen_image_and_focused_observation_share_backend(tmp_path, assigned_test_run, monkeypatch):
+    import yaml
+    from PIL import Image as PILImage
+    source=tmp_path/'config.yaml'
+    source.write_text(yaml.safe_dump({'model':'smolvlm2','enabled_actions':['observe'],
+        'scene_refinement':{'enabled':True,'properties':['color']}}))
+    backend=MagicMock()
+    backend.describe.return_value='A red scene.'
+    constructor=MagicMock(side_effect=AssertionError('Weights must not be loaded again'))
+    monkeypatch.setattr('smpa_ros.sense.TransformersVLM',constructor)
+    rclpy.init(args=['--ros-args','-p',f'config:={source}'])
+    server=None
+    try:
+        server=SenseService(backend=backend)
+        for pixel in ([255,0,0],[0,0,255]):
+            request=DescribeScene.Request(image=Image(width=1,height=1,encoding='rgb8',step=3,data=pixel),prompt='Describe')
+            assert not server.describe(request,DescribeScene.Response()).error
+        digest=server.image_sha256
+        for target in (None,'cup_1','upper left'):
+            result,prompt,settings=server.focus(target,'What color is visible?')
+            assert result=='A red scene.'
+            assert (target or 'the entire image') in prompt
+        assert all(call.args[0].getpixel((0,0))==(255,0,0) for call in backend.describe.call_args_list)
+        assert PILImage.open(assigned_test_run.directory/'observations/vision/frozen_image.png').getpixel((0,0))==(255,0,0)
+        assert server.image_sha256==digest and server.backend is backend
+        constructor.assert_not_called()
+    finally:
+        if server is not None:server.destroy_node()
+        rclpy.shutdown()

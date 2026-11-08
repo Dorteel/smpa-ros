@@ -14,7 +14,7 @@ goal: '# Goal
 
   '
 execution:
-  max_cycles: 1
+  max_cycles: 3
   action_timeout: 30.0
 openai:
   base_url: https://api.openai.com/v1

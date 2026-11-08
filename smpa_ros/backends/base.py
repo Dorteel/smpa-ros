@@ -43,11 +43,12 @@ def stage_generation(configuration, stage):
         if key in section:
             result[key] = deepcopy(section[key])
     if stage == 'plan':
-        from smpa_ros.plan import ACTION_SCHEMA
+        from smpa_ros.plan import ACTION_SCHEMA, action_schema, enabled_actions
         result.setdefault('output_schema', deepcopy(ACTION_SCHEMA))
         if result['response_format'] != 'json_schema':
             raise ValueError('Plan requires json_schema and its fixed action contract')
         validate_action_schema(result['output_schema'])
+        result['output_schema'] = action_schema(enabled_actions(configuration))
     validate_generation(result)
     return result
 
@@ -159,9 +160,9 @@ def validate_output(text, response_format='text', schema=None):
     return text
 
 
-def validate_action_schema(schema):
+def validate_action_schema(schema, actions=None):
     """Annotations may change; the ROS action contract cannot."""
-    from smpa_ros.plan import ACTION_SCHEMA
+    from smpa_ros.plan import ACTION_SCHEMA, AVAILABLE_ACTIONS, action_schema
     def contract(value):
         if isinstance(value, dict):
             return {key: contract(item) for key, item in value.items()
@@ -170,5 +171,8 @@ def validate_action_schema(schema):
             return [contract(item) for item in value]
         return value
     validate_generation(dict(response_format='json_schema', output_schema=schema))
-    if contract(schema) != ACTION_SCHEMA:
+    names = schema.get('properties', {}).get('action', {}).get('enum', []) if isinstance(schema, dict) else []
+    valid_names = isinstance(names, list) and bool(names) and all(isinstance(name, str) and name in AVAILABLE_ACTIONS for name in names) and len(set(names)) == len(names)
+    expected = action_schema(actions if actions is not None else names)
+    if contract(schema) != ACTION_SCHEMA and (not valid_names or contract(schema) != expected):
         raise ValueError('Plan schema must preserve the fixed ROS action contract')

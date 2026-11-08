@@ -69,7 +69,12 @@ class MemoryManager:
             for section in ('vision', 'modeling', 'planning'):
                 for key in (*GENERATION_KEYS, 'output_schema'):
                     parameters.get(section, {}).pop(key, None)
-        parameters['_run'] = dict(goal=goal, models=deepcopy(models or {}))
+        from smpa_ros.plan import enabled_actions, refinement_settings
+        parameters['enabled_actions'] = list(enabled_actions(parameters))
+        if 'scene_refinement' in parameters:
+            parameters['scene_refinement'] = refinement_settings(parameters)
+        parameters['_run'] = dict(goal=goal, models=deepcopy(models or {}),
+                                  enabled_actions=list(enabled_actions(parameters)))
         if 'pipeline' in configuration:
             parameters['_run'].update({key: value for key, value in configuration.items()
                                        if key not in ('pipeline', 'stage_prompts', 'stage_settings')})
@@ -129,6 +134,19 @@ class MemoryManager:
                 output.flush()
                 os.fsync(output.fileno())
                 pending.replace(self.directory / 'metadata.yaml')
+            finally:
+                pending.unlink(missing_ok=True)
+
+    def write_refinement(self, state):
+        """Persist the current finite question queue and its answer provenance."""
+        import json
+        with NamedTemporaryFile(mode='w', dir=self.directory / 'state', prefix='.refinement-', delete=False) as output:
+            pending = Path(output.name)
+            try:
+                json.dump(state, output, ensure_ascii=False, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+                pending.replace(self.directory / 'state/refinement.json')
             finally:
                 pending.unlink(missing_ok=True)
 

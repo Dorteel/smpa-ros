@@ -6,6 +6,7 @@ from copy import deepcopy
 from importlib.resources import files
 from pathlib import Path
 import os
+import json
 import signal
 import subprocess
 import sys
@@ -16,11 +17,11 @@ from contextlib import contextmanager
 from threading import current_thread, main_thread
 
 from memory import MemoryManager
-from smpa_ros.backends.base import GENERATION_KEYS, stage_generation
+from smpa_ros.backends.base import GENERATION_KEYS, stage_generation, generation_arguments, validate_output
 from smpa_ros.act import execute_action, perform_action
 from smpa_ros.model import (generate_world_model, resolve_vision_model,
                             unify_model, validate_settings as validate_model_settings)
-from smpa_ros.plan import (ACTION_SCHEMA, AVAILABLE_ACTIONS, select_action,
+from smpa_ros.plan import (ACTION_SCHEMA, AVAILABLE_ACTIONS, select_action, enabled_actions, refinement_settings, validate_decision,
                            validate_settings as validate_plan_settings)
 
 
@@ -34,6 +35,7 @@ class Runner:
         self.participant = None
         self.camera_node = self.executor = self.speech = self.sense_node = None
         self.backend = None
+        self.experiment_complete = False
         self.last_transcript = ''
 
         self.memory = None
@@ -49,7 +51,7 @@ class Runner:
             self.initialize_backends()
             self.root, self.run_name = self.options.world_model_root, self.options.run_name
             self.configuration = dict(pipeline=self.config, service=self.options.service, max_cycles=self.limit,
-                                      available_actions=deepcopy(AVAILABLE_ACTIONS),
+                                      available_actions=deepcopy(enabled_actions(self.config)),
                                       output_schema=deepcopy(self.config['stage_settings']['plan'].get('output_schema', ACTION_SCHEMA)))
             self.configuration['stage_settings'] = deepcopy(self.config['stage_settings'])
             self.configuration['stage_models'] = {
@@ -68,6 +70,8 @@ class Runner:
         if isinstance(self.limit, bool) or not isinstance(self.limit, int) or self.limit < 1:
             raise ValueError('max_cycles must be a positive integer')
         self.pipeline = self.config if hasattr(self, 'config') else self.configuration.get('pipeline', {})
+        enabled_actions(self.pipeline)
+        self.refinement_config = refinement_settings(self.pipeline)
         validate_model_settings(self.pipeline.get('modeling', {}))
         validate_plan_settings(self.pipeline.get('planning', {}))
 
@@ -134,6 +138,11 @@ class Runner:
             for key in (*GENERATION_KEYS, 'output_schema'):
                 config.get(section, {}).pop(key, None)
         self.config = unify_model(config)
+        self.config['enabled_actions'] = list(enabled_actions(self.config))
+        if 'scene_refinement' in self.config:
+            self.config['scene_refinement'] = refinement_settings(self.config)
+        if refinement_settings(self.config)['enabled'] and options.service == 'speech':
+            raise ValueError('Scene refinement requires the vision service')
         self.limit = limit
         self.action_timeout = action_timeout
 
@@ -185,14 +194,91 @@ class Runner:
     def observe(self, directory, cycle, prompt=None):
         if self.participant is not None and self.participant.poll() is not None:
             raise RuntimeError('Participating ROS processes exited')
+        if self.refinement_config['enabled'] and self.initial_observation is not None:
+            return self.initial_observation
         from smpa_ros.sense import observe
         observation, self.last_transcript = observe(
             self.camera_node, dict(self.config, prompt=prompt or self.config['prompt']), directory, self.executor, self.options.timeout, self.options.service, self.speech)
         return observation
 
     def dispatch(self, action, record):
+        validate_decision(dict(action=action, **record.get('parameters', {})), enabled_actions(self.pipeline))
+        if action == 'observe':
+            self.focused_observation(record)
+            return
         execute_action(self.camera_node, self.executor, action, record, self.action_timeout,
-                       speech=self.speech if self.options.demo == 'true' else None, transcript=self.last_transcript)
+                       speech=self.speech if self.options.demo == 'true' else None, transcript=self.last_transcript, configuration=self.pipeline)
+
+    def identify_questions(self, observation):
+        """Identify entities once; enumerate a finite, deterministic property queue."""
+        schema = {'type': 'object', 'properties': {'entities': {'type': 'array', 'items': {
+            'type': 'object', 'properties': {'id': {'type': 'string'}, 'description': {'type': 'string'}},
+            'required': ['id', 'description'], 'additionalProperties': False}}},
+            'required': ['entities'], 'additionalProperties': False}
+        settings = dict(stage_generation(self.pipeline, 'sense'), response_format='json_schema', output_schema=schema)
+        prompt = 'Identify distinct visible entities in this initial observation. Assign unique stable entity identifiers. Do not invent entities. Return JSON.\n' + observation
+        text = self.backend.generate(prompt, **generation_arguments(settings))
+        validate_output(text, 'json_schema', schema)
+        entities = json.loads(text)['entities']
+        if any(not entry['id'].strip() or not entry['description'].strip() for entry in entities) or len({entry['id'] for entry in entities}) != len(entities):
+            raise ValueError('Entity identification requires unique nonempty identifiers and descriptions')
+        questions = [dict(target=entity['id'], property=prop,
+            question=f"What is the {prop} of {entity['id']} ({entity['description']})?",
+            attempted=False, status='unanswered', answer=None) for entity in entities
+            for prop in self.refinement_config['properties']]
+        self.refinement = dict(status='running', entities=entities, questions=questions,
+            image='observations/vision/frozen_image.png', image_sha256=self.sense_node.image_sha256,
+            identification=dict(prompt=prompt, generation_parameters=settings, output=text))
+        self.memory.write_refinement(self.refinement)
+
+    def focused_observation(self, record):
+        if self.sense_node is None:
+            raise RuntimeError('Observe requires the shared Sense service and an initial camera image')
+        parameters = record.get('parameters', {})
+        target, question = parameters.get('target'), parameters['question']
+        item = None
+        settings = stage_generation(self.pipeline, 'sense')
+        if self.refinement is not None:
+            item = next((entry for entry in self.refinement['questions'] if
+                         entry['target'] == target and entry['question'] == question), None)
+            if item is None or item['attempted']:
+                raise ValueError('Observe must select a previously unattempted generated question')
+            item.update(attempted=True, attempted_cycle=self.memory.cycle)
+            self.memory.write_refinement(self.refinement)
+            settings = dict(settings, response_format='json_schema', output_schema={
+                'type': 'object', 'properties': {'status': {'type': 'string',
+                'enum': ['answered', 'visually_indeterminable', 'unanswered']}, 'answer': {'type': 'string'}},
+                'required': ['status', 'answer'], 'additionalProperties': False})
+        try:
+            result, prompt, settings = self.sense_node.focus(target, question, settings=settings)
+            validate_output(result, settings['response_format'], settings.get('output_schema') if settings['response_format'] == 'json_schema' else None)
+            if not isinstance(result, str) or not result.strip():
+                raise ValueError('Observe returned an empty observation')
+            if item is not None:
+                answer = json.loads(result)
+                if answer['status'] == 'answered' and not answer['answer'].strip():
+                    raise ValueError('Answered questions require a nonempty answer')
+                item.update(status=answer['status'], answer=answer['answer'])
+            filename = f"observe_{self.memory.cycle:06d}_{self.memory.counts.get('act', 1):03d}.json"
+            path = self.memory.directory / 'observations/vision' / filename
+            observation = dict(target=target, question=question, output=result, prompt=prompt,
+                generation_parameters=settings, image_sha256=self.sense_node.image_sha256,
+                model_identifier=self.model_identifier)
+            with path.open('x') as output:
+                json.dump(observation, output, ensure_ascii=False, indent=2)
+            source = str(path.relative_to(self.memory.directory))
+            self.pending_observations.append(dict(observation, source_record=source))
+            record.update(goal_accepted=True, result_status=4, success=True, result=observation,
+                          observation_record=source)
+            if item is not None:
+                item['source_record'] = source
+        except BaseException as error:
+            if item is not None:
+                item.update(status='unanswered', error=f'{type(error).__name__}: {error}')
+            raise
+        finally:
+            if self.refinement is not None:
+                self.memory.write_refinement(self.refinement)
 
     def teardown(self):
         import rclpy
@@ -248,6 +334,11 @@ class Runner:
                                     configuration=self.configuration, goal=goal)
         self.memory.metadata['max_cycles'] = self.limit
         self.memory.write_metadata()
+        self.experiment_complete = False
+        self.refinement = None
+        self.initial_observation = None
+        self.pending_observations = []
+        self.action_parameters = {}
         self.sources = {}
         self.origins = {}
         self.previous_snapshot = ''
@@ -280,6 +371,17 @@ class Runner:
         value, sources = record_observation(
             self.memory.directory, self.memory.cycle, callback,
             record_name=name, provenance=provenance, prompt_name=prompt, configuration=self.pipeline)
+        if self.refinement_config['enabled'] and self.initial_observation is None:
+            self.initial_observation = value
+            self.identify_questions(value)
+        if self.pending_observations:
+            value = json.dumps(dict(initial_observation=value, focused_observations=self.pending_observations), ensure_ascii=False)
+            sources += [entry['source_record'] for entry in self.pending_observations]
+            self.pending_observations = []
+            record_path = self.memory.directory / self.memory.record_path(name)
+            record = json.loads(record_path.read_text())
+            record['output'] = value
+            record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2))
         self.origins[value] = str(self.memory.record_path(name))
         self.sources[value] = sources
         return value
@@ -296,17 +398,30 @@ class Runner:
         suffix = name[len('model'):-len('.json')]
         self.previous_snapshot = f'world_model/iteration_{self.memory.cycle:03d}{suffix}.md'
         self.origins[value] = str(self.memory.record_path(name))
+        if self.refinement is not None and all(item['attempted'] for item in self.refinement['questions']):
+            self.experiment_complete = True
+            self.refinement['status'] = 'completed'
+            self.memory.write_refinement(self.refinement)
         return value
 
     def plan(self, world, *, prompt='default'):
         if prompt == 'default':
             prompt = self.pipeline.get('stage_prompts', {}).get('plan', {}).get('name', prompt)
         name, provenance = self.memory.invocation('plan', prompt, self.origins.get(world))
+        if self.refinement_config['enabled'] and (self.experiment_complete or self.memory.cycle >= self.limit):
+            record = dict(stage='plan', status='completed', selected_action=None, reason='All attempted questions incorporated into Model' if self.experiment_complete else 'Cycle limit reached after consolidation', **provenance)
+            (self.memory.directory / self.memory.record_path(name)).write_text(json.dumps(record, indent=2))
+            return None
+        pipeline = self.pipeline
+        if self.refinement is not None:
+            pending = next(item for item in self.refinement['questions'] if not item['attempted'])
+            pipeline = dict(self.pipeline, _pending_question=dict(target=pending['target'], question=pending['question']))
         action = select_action(
             self.memory.directory, self.memory.cycle, world, self._plan,
-            pipeline=self.pipeline, plan_identifier=self.plan_identifier,
+            pipeline=pipeline, plan_identifier=self.plan_identifier,
             model_identifier=self.model_identifier, prompt_name=prompt,
             record_name=name, provenance=provenance)
+        self.action_parameters = json.loads((self.memory.directory / self.memory.record_path(name)).read_text()).get('parameters', {})
         self.origins[action] = str(self.memory.record_path(name))
         return action
 
@@ -314,6 +429,11 @@ class Runner:
         if prompt == 'default':
             prompt = self.pipeline.get('stage_prompts', {}).get('act', {}).get('name', prompt)
         name, provenance = self.memory.invocation('act', prompt, self.origins.get(action))
+        if action is None and self.refinement_config['enabled'] and (self.experiment_complete or self.memory.cycle >= self.limit):
+            record = dict(stage='act', status='completed', requested_action=None, reason='Refinement finished or at cycle limit; no execution required', **provenance)
+            (self.memory.directory / self.memory.record_path(name)).write_text(json.dumps(record, indent=2))
+            return
+        provenance['parameters'] = dict(self.action_parameters)
         perform_action(self.memory.directory, self.memory.cycle, action, self._act,
                        prompt_name=prompt, record_name=name, provenance=provenance, configuration=self.pipeline)
 
@@ -322,6 +442,9 @@ class Runner:
         if self.memory is None or self.memory.metadata['status'] != 'running':
             return
         try:
+            if getattr(self, 'refinement', None) is not None and self.refinement['status'] != 'completed':
+                self.refinement['status'] = 'cycle_limit' if status == 'completed' else status
+                self.memory.write_refinement(self.refinement)
             if self._teardown:
                 self._teardown()
         except BaseException:

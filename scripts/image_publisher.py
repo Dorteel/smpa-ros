@@ -10,7 +10,7 @@ from sensor_msgs.msg import Image
 
 # Configuration: edit these values directly.
 IMAGE_PATH = "/home/dorteel/ros2_ws/src/smpa-ros/images/test.png"
-TOPIC = "/camera/color/image_raw"
+TOPIC = "/tiago/camera/color/image_raw"
 FPS = 1.0
 
 

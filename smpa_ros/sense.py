@@ -21,6 +21,7 @@ from smpa_ros.backends.base import (stage_generation, generation_arguments, vali
 from smpa_ros.backends.transformers import TransformersVLM
 from memory import MemoryManager
 from smpa_ros.model import resolve_vision_model
+from smpa_ros.plan import refinement_settings
 
 
 def load_prompt(value, *, prompt='default', configuration=None):
@@ -109,6 +110,10 @@ class SenseService(Node):
         share = Path(get_package_share_directory('smpa_ros'))
         self.declare_parameter('config', str(share / 'config.yaml'))
         pipeline = yaml.safe_load(Path(self.get_parameter('config').value).read_text())
+        self.refinement = refinement_settings(pipeline)
+        self.image = None
+        self.image_sha256 = None
+        self.pipeline = pipeline
         vision = pipeline['model'] if isinstance(pipeline.get('model'), dict) else pipeline.get('vision', {})
         vision_backend = vision.get('backend', 'transformers')
         if vision_backend not in ('transformers', 'api'):
@@ -172,7 +177,13 @@ class SenseService(Node):
         self.get_logger().info('Sense request received')
         started = perf_counter()
         try:
-            image = image_to_pil(request.image)
+            if self.image is None or not self.refinement['enabled']:
+                self.image = image_to_pil(request.image)
+                if self.refinement['enabled']:
+                    import hashlib
+                    self.image_sha256 = hashlib.sha256(self.image.tobytes()).hexdigest()
+                    self.image.save(self.world_model_dir / 'observations/vision/frozen_image.png')
+            image = self.image.copy()
             # Bound image size before processor tiling to limit inference memory.
             image.thumbnail((512, 512))
             response.description = self.backend.describe(
@@ -186,6 +197,27 @@ class SenseService(Node):
                 f'Sense request failed after {perf_counter() - started:.2f}s: {error}',
             )
         return response
+
+    def focus(self, target, question, *, settings=None):
+        """Attend to a named entity/region in the cached image without another model."""
+        if self.image is None:
+            raise RuntimeError('Observe requires an initial Sense image')
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError('Observe requires a nonempty question')
+        if target is not None and (not isinstance(target, str) or not target.strip()):
+            raise ValueError('Observe target must be a nonempty entity/region or null')
+        prompt = self.pipeline.get('stage_prompts', {}).get('sense', {}).get('text', self.default_prompt)
+        prompt += '\nFocus on: ' + (target or 'the entire image') + '\nQuestion: ' + question
+        prompt += '\nUse only visible evidence. State when the answer cannot be determined visually.'
+        if self.refinement['enabled']:
+            prompt += ('\nReturn JSON with status answered when visible evidence answers the question, '
+                       'visually_indeterminable when the property cannot be established from this image, '
+                       'or unanswered when no conclusion was reached. Put the answer or explanation in answer.')
+        generation = settings or stage_generation(self.pipeline, 'sense')
+        image = self.image.copy()
+        image.thumbnail((512, 512))
+        result = self.backend.describe(image, prompt, **generation_arguments(generation))
+        return result, prompt, generation
 
 
 def capture_once(node: Node, config: dict, output_dir: Path,

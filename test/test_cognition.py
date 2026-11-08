@@ -12,6 +12,7 @@ from runner import Runner
 def test_cycle_order_and_independent_backends():
     from smpa_ros.smpa import run
     runner = MagicMock()
+    runner.experiment_complete = False
     run(runner, 2)
     assert [call[0] for call in runner.method_calls] == [
         'start', 'cycle', 'sense', 'model', 'plan', 'act',
@@ -19,6 +20,42 @@ def test_cycle_order_and_independent_backends():
     runner.model.assert_called_with(runner.sense.return_value, prompt='default')
     runner.plan.assert_called_with(runner.model.return_value, prompt='default')
     runner.act.assert_called_with(runner.plan.return_value, prompt='default')
+
+
+@pytest.mark.parametrize('complete, expected', [(False, 3), (True, 1)])
+def test_experiment_completion_between_full_cycles(tmp_path, complete, expected):
+    from smpa_ros.smpa import run
+    events = []
+
+    def sense(directory, cycle):
+        events.append('sense')
+        # Even a flag set during Sense must allow the full cycle to finish.
+        runner.experiment_complete = complete
+        return 'A red cup.'
+
+    def model(prompt, **settings):
+        events.append('model')
+        return '# World Model\nA red cup.'
+
+    def plan(prompt, **settings):
+        events.append('plan')
+        return '{"action":"look_left"}'
+
+    def act(action, record):
+        events.append('act')
+        record.update(goal_accepted=True, result_status=4, success=True)
+
+    with Runner(root=tmp_path, max_cycles=3, sense=sense, model=model, plan=plan, act=act) as runner:
+        assert runner.experiment_complete is False
+        run(runner, runner.limit)
+        assert events == ['sense', 'model', 'plan', 'act'] * expected
+        assert runner.memory.metadata['completed_cycles'] == expected
+        assert runner.memory.metadata['status'] == 'completed'
+        assert runner.memory.in_cycle is False
+        assert runner.limit == 3
+        runner.experiment_complete = True
+        runner.start(goal='# Another experiment')
+        assert runner.experiment_complete is False
 
 
 def test_failed_stage_stops_cycle():
@@ -358,6 +395,9 @@ def test_gui_canonical_load_edit_save_and_schema_preservation(tmp_path, monkeypa
         assert not set(gui.GENERATION_KEYS) & set(config.get(section, {}))
     config['stage_settings']['model'].update(temperature=.35, max_output_tokens=87, response_format='json_schema',
         output_schema={'type':'object','properties':{'objects':{'type':'array'}},'required':['objects'],'additionalProperties':False})
+    config['enabled_actions'] = ['look_right', 'observe']
+    config['scene_refinement'] = {'enabled': False, 'properties': ['color', 'material']}
+    config['stage_settings']['plan'] = gui.stage_generation(config, 'plan')
     config.setdefault('execution', {})['max_cycles'] = 3
     destination = tmp_path / 'config.yaml'
     gui.save_configuration(config, destination)

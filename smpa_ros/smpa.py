@@ -13,6 +13,8 @@ def run(runner, cycles, *, goal=GOAL):
                 world = runner.model(observation, prompt='default')
                 action = runner.plan(world, prompt='default')
                 runner.act(action, prompt='default')
+            if runner.experiment_complete:
+                break
         runner.finish()
 
 

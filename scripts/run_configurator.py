@@ -20,7 +20,8 @@ from jsonschema.validators import validator_for
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from smpa_ros.plan import ACTION_SCHEMA, AVAILABLE_ACTIONS
+from smpa_ros.plan import (ACTION_SCHEMA, AVAILABLE_ACTIONS, enabled_actions, action_schema,
+                           refinement_settings)
 from smpa_ros.model import local_model_info, resolve_vision_model, unify_model
 from smpa_ros.backends.base import (GENERATION_KEYS, stage_generation, generation_capabilities,
                                     validate_generation, validate_action_schema)
@@ -148,6 +149,10 @@ def validate(config):
                 if parsed.username or parsed.password or parsed.query or parsed.fragment:
                     raise ValueError('Provider URLs must not contain credentials, queries, or fragments')
     check(config)
+    enabled_actions(config)
+    experiment = refinement_settings(config)
+    if experiment['enabled'] and 'json_schema' not in stage_capabilities(config, 'sense')['response_formats']:
+        raise ValueError('Scene refinement requires JSON Schema support from the shared model')
     execution = config.get('execution', {})
     cycles = execution.get('max_cycles', 1)
     if type(cycles) is not int or cycles < 1:
@@ -259,6 +264,15 @@ def main():
         validate='key', validatecommand=(root.register(lambda value: value == '' or
             value.isascii() and value.isdecimal() and int(value) >= 1), '%P'))
     cycle_input.pack(side='left', padx=(8, 0))
+    action_variables = {name: tk.BooleanVar(value=name in enabled_actions(config)) for name in AVAILABLE_ACTIONS}
+    experiment_panel = ttk.Frame(root, padding=(12, 0, 12, 0))
+    experiment_panel.pack(fill='x')
+    experiment = tk.BooleanVar(value=refinement_settings(config)['enabled'])
+    properties = tk.StringVar(value=', '.join(refinement_settings(config)['properties']))
+    ttk.Checkbutton(experiment_panel, text='Frozen-image scene refinement', variable=experiment,
+                    command=lambda: experiment_changed()).pack(side='left')
+    ttk.Label(experiment_panel, text='Candidate properties').pack(side='left', padx=8)
+    ttk.Entry(experiment_panel, textvariable=properties).pack(side='left', fill='x', expand=True)
     notebook = ttk.Notebook(root)
     notebook.pack(fill='both', expand=True, padx=12, pady=12)
     widgets = {}
@@ -276,6 +290,17 @@ def main():
     def format_changed(stage):
         ui = widgets[stage]
         ui['schema'].configure(state='normal' if ui['variables']['response_format'].get() == 'json_schema' else 'disabled')
+
+    def actions_changed():
+        if 'plan' in widgets:
+            editor = widgets['plan']['schema']
+            editor.configure(state='normal')
+            replace(editor, json.dumps(action_schema([name for name, value in action_variables.items() if value.get()]), indent=2))
+
+    def experiment_changed():
+        if experiment.get():
+            action_variables['observe'].set(True)
+        actions_changed()
 
     def populate(stage):
         ui = widgets[stage]
@@ -359,10 +384,15 @@ def main():
         schema.grid(row=3, column=0, sticky='nsew', padx=(0, 16), pady=6)
         replace(schema, json.dumps(stage_generation(config, stage).get('output_schema', ACTION_SCHEMA if stage == 'plan' else {'type': 'object'}), indent=2))
         ttk.Label(tab, text='Available tools / actions').grid(row=4, column=0, sticky='w')
-        tools = ScrolledText(tab, wrap='word', width=55, height=5)
+        tools = ttk.Frame(tab)
         tools.grid(row=5, column=0, sticky='nsew', padx=(0, 16))
-        replace(tools, json.dumps(AVAILABLE_ACTIONS, indent=2) if stage in ('plan', 'act') else 'No stage tools are exposed by the backend.')
-        tools.configure(state='disabled')
+        for column, group in enumerate(dict.fromkeys(entry['group'] for entry in AVAILABLE_ACTIONS.values())):
+            panel = ttk.LabelFrame(tools, text=group, padding=6)
+            panel.grid(row=0, column=column, sticky='nw', padx=(0, 12))
+            for action, entry in AVAILABLE_ACTIONS.items():
+                if entry['group'] == group:
+                    ttk.Checkbutton(panel, text=entry['label'], variable=action_variables[action],
+                                    command=actions_changed).pack(anchor='w')
         side = ttk.Frame(tab)
         side.grid(row=0, column=1, rowspan=6, sticky='nsew')
         ttk.Label(side, text='Generation parameters').pack(anchor='w')
@@ -397,6 +427,8 @@ def main():
 
     def collect():
         candidate = deepcopy(config)
+        candidate['enabled_actions'] = [name for name, variable in action_variables.items() if variable.get()]
+        candidate['scene_refinement'] = dict(enabled=experiment.get(), properties=[item.strip() for item in properties.get().split(',')])
         value = cycles.get()
         if not value.isascii() or not value.isdecimal() or int(value) < 1:
             raise ValueError('Cycles must be a positive integer (minimum 1)')
@@ -459,6 +491,10 @@ def main():
         try:
             config = load_config()
             cycles.set(str(config.get('execution', {}).get('max_cycles', 1)))
+            for name, variable in action_variables.items():
+                variable.set(name in enabled_actions(config))
+            experiment.set(refinement_settings(config)['enabled'])
+            properties.set(', '.join(refinement_settings(config)['properties']))
             choices = model_choices(config, 'sense')
             dropdown['values'] = list(choices)
             model.set(selected_model_label(config, 'sense', choices))
