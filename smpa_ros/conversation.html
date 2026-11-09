@@ -6,6 +6,7 @@
 <style>
 :root{font-family:system-ui,sans-serif;color:#213532;background:#f4f6f3}*{box-sizing:border-box}body{margin:0}header{height:76px;padding:18px 28px;border-bottom:1px solid #d7dfd9;display:flex;align-items:center;gap:18px}header strong{letter-spacing:.12em}header span{color:#64756d;font-size:14px}main{display:grid;grid-template-columns:1fr 1fr;height:calc(100dvh - 76px)}section{min-width:0;padding:24px;display:flex;flex-direction:column;min-height:0}section+section{border-left:1px solid #d7dfd9}h1,h2{font-size:18px;font-weight:600;margin:0 0 18px}#history{overflow-y:auto;flex:1;min-height:0;padding-right:8px}.message{padding:16px 18px;margin:0 0 16px;border:1px solid #dbe3dd;border-radius:12px;background:white;white-space:pre-wrap;overflow-wrap:anywhere}.message.user{background:#e6eee7;margin-left:32px}.role{display:block;text-transform:uppercase;font-size:11px;letter-spacing:.1em;color:#61766a;margin-bottom:8px}form{display:flex;gap:10px;margin-top:12px}textarea{resize:vertical;min-height:64px;max-height:180px;flex:1;min-width:0;border:1px solid #bbcabe;border-radius:10px;padding:12px;font:inherit}button{background:#285c48;color:white;border:0;border-radius:10px;padding:12px 22px;font:inherit;cursor:pointer}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #87b899;outline-offset:3px}#status{min-height:24px;font-size:14px;margin:8px 0 0;color:#65766d}#status.error{color:#a03333}#graph{flex:1;min-height:200px;border:1px solid #dbe3dd;border-radius:12px;background:#fafbf9;display:grid;place-content:center;text-align:center;color:#6c7d72}#graph p{font-size:14px;margin:8px 16px}small{color:#718076;font-size:12px}#empty{color:#718076;line-height:1.6;margin-top:32px}@media(max-width:700px){main{height:auto;grid-template-columns:1fr}section:first-child{height:70dvh}section+section{border-left:0;border-top:1px solid #d7dfd9;min-height:280px}header{padding:18px}}
 .conversation-heading{margin-bottom:16px}.conversation-heading h1{margin-bottom:10px}.agent-label{display:block;font-size:13px;margin-bottom:6px}#agent{width:100%;padding:9px;border:1px solid #bbcabe;border-radius:8px;background:white;color:inherit;font:inherit;font-size:13px}#agent-details{display:block;margin-top:6px;overflow-wrap:anywhere}.agent-provenance{display:block;margin-top:10px;font-size:11px;color:#61766a}
+details.thinking{margin:12px 0;border-top:1px solid #dbe3dd;padding-top:10px}details.thinking summary{cursor:pointer;font-size:13px;color:#61766a}details.thinking .trace{margin-top:10px}
 </style>
 <header><strong>SMPA</strong><span>Conversational workspace</span></header>
 <main>
@@ -41,7 +42,15 @@ function render(data){
   for(const message of data.messages){
     const box=document.createElement('div');box.className='message '+message.role;
     const role=document.createElement('strong');role.className='role';role.textContent=message.role;
-    box.append(role,document.createTextNode(message.content));
+    box.append(role);
+    const answer=document.createElement('div');answer.dataset.messageType=message.role==='assistant'?'response':'user';
+    answer.textContent=message.response??message.content;box.append(answer);
+    if(message.thinking){
+      const thinking=document.createElement('details');thinking.className='thinking';thinking.open=false;
+      const summary=document.createElement('summary');summary.textContent='Thinking';
+      const trace=document.createElement('div');trace.className='trace';trace.dataset.messageType='thinking';
+      trace.textContent=message.thinking;thinking.append(summary,trace);box.append(thinking);
+    }
     if(message.role==='assistant'){
       const provenance=document.createElement('small');provenance.className='agent-provenance';
       provenance.textContent=message.agent ? message.agent.label : 'Earlier response · agent not recorded';

@@ -1,5 +1,7 @@
 """Conversation tests run with unittest without ROS, or in the repository suite."""
 import json
+import os
+import shutil
 from pathlib import Path
 import tempfile
 import subprocess
@@ -189,8 +191,8 @@ class ConversationTests(unittest.TestCase):
                 return json.load(response)
         with patch('smpa_ros.backends.api.APIBackend') as api, \
                 patch('smpa_ros.backends.transformers.TransformersBackend') as local:
-            local.return_value.generate.return_value = 'Local reply'
-            api.return_value.generate.return_value = 'API reply'
+            local.return_value.generate_conversation.return_value = {'response': 'Local reply'}
+            api.return_value.generate_conversation.return_value = {'response': 'API reply'}
             with urlopen(base + '/api/agents') as response:
                 self.assertEqual(json.load(response)['active_agent']['id'], default)
             post('/api/message', {'message': 'Remember a red cup', 'agent_id': default})
@@ -201,8 +203,8 @@ class ConversationTests(unittest.TestCase):
             state = post('/api/message', {'message': 'What color?', 'agent_id': alternate})
             api.assert_called_once_with(path, modality='text', provider='openai')
             local.assert_called_once()
-            self.assertIn('Remember a red cup', api.return_value.generate.call_args.args[0])
-            self.assertIn('Local reply', api.return_value.generate.call_args.args[0])
+            self.assertIn('Remember a red cup', api.return_value.generate_conversation.call_args.args[0])
+            self.assertIn('Local reply', api.return_value.generate_conversation.call_args.args[0])
             self.assertEqual(state['messages'][1]['agent']['id'], default)
             self.assertEqual(state['messages'][3]['agent']['id'], alternate)
             root = self.memory.directory
@@ -264,6 +266,203 @@ class ConversationTests(unittest.TestCase):
         changed, new_default = discover_agents(config, path, Path(self.temporary.name) / 'models', repository / 'models')
         self.assertNotEqual(new_default, default)
         self.assertEqual(changed[new_default]['agent']['generation']['max_new_tokens'], 64)
+
+    def test_api_explicit_reasoning_and_unchanged_plain_generation(self):
+        from types import SimpleNamespace as N
+        from smpa_ros.backends.api import APIBackend
+        backend = APIBackend.__new__(APIBackend)
+        backend.model_id = 'requested-model'
+        backend._client = Mock(api_key='test-secret-key')
+        message = N(content='Final answer', refusal=None)
+        completion = N(model='actual-model', choices=[N(finish_reason='stop', message=message)], usage=None)
+        backend._client.chat.completions.create.return_value = completion
+        for field in ('reasoning_content', 'reasoning'):
+            with self.subTest(field=field):
+                setattr(message, field, 'Model supplied trace')
+                result = backend.generate_conversation('Question')
+                self.assertEqual(result, {'response': 'Final answer', 'thinking': 'Model supplied trace',
+                                          'reasoning_source': field, 'model_id': 'actual-model'})
+                self.assertEqual(backend.generate('Question'), 'Final answer')
+                delattr(message, field)
+        # Counts and opaque objects are not traces and must not be converted to text.
+        message.reasoning = {'encrypted_content': 'opaque'}
+        self.assertNotIn('thinking', backend.generate_conversation('Question'))
+        message.reasoning_content = 'test-secret-key'
+        with self.assertRaisesRegex(RuntimeError, 'credential'):
+            backend.generate_conversation('Question')
+        message.reasoning_content = 'trace'
+        message.content = ''
+        with self.assertRaisesRegex(RuntimeError, 'empty text'):
+            backend.generate_conversation('Question')
+
+    def test_qwen_delimiters_are_model_specific_and_never_synthesized(self):
+        from types import SimpleNamespace
+        from smpa_ros.backends.transformers import TransformersBackend
+        backend = TransformersBackend.__new__(TransformersBackend)
+        backend.model = SimpleNamespace(config=SimpleNamespace(model_type='qwen3'))
+        backend.generate = Mock(return_value='<think>Model trace</think>Final answer')
+        self.assertEqual(backend.generate_conversation('Question'),
+                         {'response': 'Final answer', 'thinking': 'Model trace', 'reasoning_source': 'qwen3:<think>'})
+        for text in ('Final answer', '<think>\n\n</think>\nFinal answer'):
+            backend.generate.return_value = text
+            self.assertEqual(backend.generate_conversation('Question'), {'response': 'Final answer'})
+        backend.generate.return_value = '<think>Incomplete trace'
+        with self.assertRaisesRegex(RuntimeError, 'Incomplete'):
+            backend.generate_conversation('Question')
+        backend.model.config.model_type = 'other-model'
+        literal = '<think>Quoted markup</think>Literal example'
+        backend.generate.return_value = literal
+        self.assertEqual(backend.generate_conversation('Question'), {'response': literal})
+
+    def test_ollama_reasoning_field_and_plain_interface(self):
+        from unittest.mock import MagicMock
+        from smpa_ros.backends.ollama import OllamaBackend
+        response = MagicMock()
+        body = {'response': 'Final answer', 'thinking': 'Model trace', 'model': 'actual-local-model'}
+        response.__enter__.return_value.read.side_effect = lambda: json.dumps(body).encode()
+        with patch('smpa_ros.backends.ollama.urlopen', return_value=response):
+            backend = OllamaBackend('requested-model')
+            self.assertEqual(backend.generate_conversation('Question'),
+                             {'response': 'Final answer', 'thinking': 'Model trace',
+                              'reasoning_source': 'thinking', 'model_id': 'actual-local-model'})
+            self.assertEqual(backend.generate('Question'), 'Final answer')
+            del body['thinking']
+            self.assertNotIn('thinking', backend.generate_conversation('Question'))
+
+    def test_thinking_tags_roundtrip_provenance_and_history(self):
+        agents, default, _, _ = self.configured_agents()
+        agent = agents[default]['agent']
+        thinking = 'Model trace ☕\nLiteral </thinking>\n<response> and ## Assistant'
+        answer = 'Final answer\nLiteral </response>'
+        self.generate.return_value = {'response': answer, 'thinking': thinking,
+                                      'reasoning_source': 'provider-field', 'model_id': 'reported-model'}
+        exchange(self.memory, 'Question', self.generate, {}, agent=agent)
+        transcript = (self.memory.directory / 'conversation.md').read_text()
+        self.assertIn('<thinking>\n' + thinking + '\n</thinking>\n\n<response>\n' + answer + '\n</response>', transcript)
+        message = read_messages(self.memory.directory)[1]
+        self.assertEqual(message['thinking'], thinking)
+        self.assertEqual(message['response'], answer)
+        self.assertEqual(message['content'], answer)
+        self.assertEqual([part['type'] for part in message['parts']], ['thinking', 'response'])
+        self.assertEqual(message['agent']['model_id'], 'reported-model')
+        self.assertEqual(message['agent']['requested_model_id'], agent['model_id'])
+        self.assertEqual(message['agent']['provider'], agent['provider'])
+        record = json.loads((self.memory.directory / 'state/cycle_000001/act.json').read_text())
+        self.assertEqual(record['thinking'], thinking)
+        self.assertEqual(record['response'], answer)
+        self.assertEqual(record['agent'], message['agent'])
+        self.assertEqual(record['reasoning_source'], 'provider-field')
+        self.memory.finalize('interrupted')
+        self.memory = open_conversation(None, resume=self.memory.directory)
+        self.assertEqual(read_messages(self.memory.directory)[1], message)
+        self.generate.return_value = {'response': 'Another answer'}
+        exchange(self.memory, 'Next question', self.generate, {}, agent=agent)
+        prompt = self.generate.call_args.args[0]
+        self.assertIn('Final answer', prompt)
+        self.assertNotIn('Model trace', prompt)
+        self.assertNotIn('thinking', read_messages(self.memory.directory)[3])
+
+    def test_legacy_literal_tags_and_response_only_do_not_create_traces(self):
+        from smpa_ros.conversation import append_message
+        literal = '<thinking>Only quoted text</thinking>\n<response>Example</response>'
+        append_message(self.memory.directory, 'Assistant', literal)
+        self.assertNotIn('thinking', read_messages(self.memory.directory)[0])
+        self.assertEqual(read_messages(self.memory.directory)[0]['content'], literal)
+        before = (self.memory.directory / 'conversation.md').read_bytes()
+        for result in ('Plain response', {'response': 'Plain response'},
+                       {'response': 'Plain response', 'thinking': None},
+                       {'response': 'Plain response', 'thinking': '  '}):
+            self.generate.return_value = result
+            exchange(self.memory, 'Question', self.generate, {})
+            self.assertNotIn('thinking', read_messages(self.memory.directory)[-1])
+        transcript = (self.memory.directory / 'conversation.md').read_bytes()[len(before):]
+        self.assertNotIn(b'<thinking>', transcript)
+        self.assertEqual(transcript.count(b'<response>\nPlain response\n</response>'), 4)
+
+    def test_http_returns_typed_reasoning_with_final_response(self):
+        self.generate.return_value = {'response': 'Visible answer', 'thinking': 'Backend trace'}
+        server = make_server(self.memory, self.generate, {}, port=0)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            request = Request(f'http://127.0.0.1:{server.server_port}/api/message',
+                              data=b'{"message":"Question"}', headers={'Content-Type': 'application/json'})
+            with urlopen(request) as response:
+                message = json.load(response)['messages'][-1]
+            self.assertEqual(message['content'], 'Visible answer')
+            self.assertEqual(message['thinking'], 'Backend trace')
+            self.assertEqual(message['parts'], [{'type': 'thinking', 'text': 'Backend trace'},
+                                               {'type': 'response', 'text': 'Visible answer'}])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    @unittest.skipUnless(os.environ.get('SMPA_BROWSER_TEST') == '1' and shutil.which('firefox'),
+                         'Set SMPA_BROWSER_TEST=1 with Firefox installed for browser verification')
+    def test_browser_thinking_collapsed_expand_and_hide(self):
+        """Exercise the production rendering script in a real optional browser."""
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        repository = Path(__file__).resolve().parents[1]
+        page = (repository / 'smpa_ros/conversation.html').read_text()
+        script = """<script>
+        function reportCheck(value){
+          const request=new XMLHttpRequest();request.open('POST','/check',false);
+          request.send(JSON.stringify(value));
+        }
+        try{
+          render(TEST_STATE);
+          const details=document.querySelector('details.thinking');
+          const answer=document.querySelector('[data-message-type="response"]');
+          const closed=!details.open;
+          details.querySelector('summary').click();const expanded=details.open;
+          details.querySelector('summary').click();const collapsed=!details.open;
+          reportCheck({closed,expanded,collapsed,answer:answer.textContent,
+                       thinking:details.querySelector('.trace').textContent});
+        }catch(error){reportCheck({error:String(error)});}
+        </script>"""
+        self.generate.return_value = {'response': 'Visible answer', 'thinking': 'Backend trace'}
+        exchange(self.memory, 'Question', self.generate, {})
+        state = {'active_agent': None, 'agents': [], 'graph': {'nodes': [], 'edges': []},
+                 'messages': read_messages(self.memory.directory)}
+        # Finish the assertion before screenshot mode exits; asynchronous fetch
+        # can otherwise race Firefox's page-load screenshot completion.
+        page = page.replace('</html>', script.replace('TEST_STATE', json.dumps(state)) + '</html>').encode()
+        report = {}
+        completed = threading.Event()
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                data = page if self.path == '/' else json.dumps(state).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html' if self.path == '/' else 'application/json')
+                self.end_headers()
+                self.wfile.write(data)
+            def do_POST(self):
+                report.update(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                self.send_response(200)
+                self.end_headers()
+                completed.set()
+            def log_message(self, *args):
+                pass
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            # A non-hidden checkout-local profile also works with Ubuntu's Firefox snap.
+            # Screenshot mode exits itself; wait before removing its temporary profile.
+            with tempfile.TemporaryDirectory(prefix='browser-check-', dir=repository) as folder:
+                result = subprocess.run(['firefox', '--headless', '--no-remote', '--profile', folder,
+                                         '--screenshot', str(Path(folder) / 'check.png'),
+                                         f'http://127.0.0.1:{server.server_port}/'],
+                                        capture_output=True, timeout=45)
+                self.assertEqual(result.returncode, 0, result.stderr.decode())
+                self.assertTrue(completed.wait(2), 'No browser rendering report received')
+                self.assertEqual(report, {'closed': True, 'expanded': True, 'collapsed': True,
+                                          'answer': 'Visible answer', 'thinking': 'Backend trace'})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
 
     def test_resume_rejects_robot_run(self):
         from memory import MemoryManager

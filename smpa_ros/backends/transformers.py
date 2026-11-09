@@ -71,6 +71,27 @@ class TransformersBackend:
         return text
 
 
+    def generate_conversation(self, prompt: str, *, max_new_tokens: int = 128) -> dict:
+        """Separate Qwen3's documented leading think block from its final answer.
+
+        The existing template and enable_thinking setting are preserved. A trace
+        is never requested or reconstructed here. Other model families retain
+        their ordinary text, even if it happens to contain similar markup.
+        """
+        text = self.generate(prompt, max_new_tokens=max_new_tokens)
+        result = {'response': text}
+        if getattr(self.model.config, 'model_type', None) == 'qwen3':
+            stripped = text.lstrip()
+            if stripped.startswith('<think>'):
+                thinking, separator, response = stripped[len('<think>'):].partition('</think>')
+                if not separator or not response.strip():
+                    raise RuntimeError('Incomplete Qwen thinking block or missing final response; increase the output budget')
+                result['response'] = response.strip()
+                if thinking.strip():
+                    result.update(thinking=thinking.strip(), reasoning_source='qwen3:<think>')
+        return result
+
+
 class TransformersVLM:
     """CPU or single-GPU image inference from an already downloaded checkpoint."""
 

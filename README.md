@@ -1188,3 +1188,58 @@ The downloader retains its 5 GiB free-disk reserve. It is never invoked by the
 GUI. The full environment installation remains `./install.sh`; updating only
 the GUI in an existing environment uses the `pip install --no-deps .` command
 above. No new runtime dependencies were introduced for agent selection.
+
+### Conversational reasoning traces
+
+Conversational inference returns a final `response` and, only when explicitly
+provided by the backend, a separate `thinking` field. Supported sources are:
+
+- OpenAI-compatible API responses with plain-text `reasoning_content` or
+  `reasoning` fields. Token counts, encrypted objects, and absent fields do not
+  produce traces; no separate request is made to explain an answer.
+- Ollama's explicit `thinking` response field.
+- Local Qwen3's documented leading `<think>…</think>` block. These delimiters
+  are interpreted only for the Qwen3 model family; other models' literal markup
+  is not reclassified as reasoning. Incomplete thinking blocks or missing final
+  answers fail instead of displaying reasoning as the answer.
+
+This captures emitted reasoning; it does not enable reasoning, change prompts,
+or alter generation defaults. In particular, the registry's local Qwen default
+still has `enable_thinking: false`. Providers that do not expose a reasoning
+trace continue to return and persist only the response. Model and Plan keep
+using the existing string-returning inference path; only the conversation opts
+into structured results through the shared backend loader.
+
+New assistant transcript entries use `<response>` tags and include a preceding
+`<thinking>` section when a trace exists. Byte lengths in the existing message
+marker delimit both sections, so literal tags or headings within model output
+cannot break the association. Old transcripts are read unchanged; old literal
+reasoning-looking tags are not interpreted as new traces.
+
+Each trace shares its response's agent provenance. If an API or Ollama response
+reports a different actual model identifier, that identifier is recorded along
+with the requested model. The corresponding Act record stores `response`, optional
+`thinking`, and its backend field/delimiter source. Run selection remains unchanged.
+
+The GUI displays the final response normally and a native, keyboard-accessible
+**Thinking** disclosure, collapsed by default, for available traces. Both parts
+are rendered as text. Message JSON exposes typed `parts` (`user`, `thinking`,
+`response`) for future filtering. Subsequent inference receives the chronological
+user/final-response history, not prior thinking traces.
+
+Run mocked conversation tests, including backward compatibility:
+
+```bash
+.venv/bin/python -m unittest discover -s test -p test_conversation.py -v
+```
+
+Run the full regression suite and the optional real-browser expand/collapse
+check using an existing Firefox installation (no browser dependency is added):
+
+```bash
+SMPA_BROWSER_TEST=1 ./test.sh --unit
+```
+
+Without the environment flag or Firefox, the browser test is skipped; the other
+unit tests still run with `./test.sh --unit`. No live API or Ollama service is
+needed for these tests.

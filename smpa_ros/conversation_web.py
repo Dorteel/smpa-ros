@@ -49,7 +49,7 @@ def discover_agents(config, config_path, model_root, registry):
             settings['reasoning_effort'] = pipeline['modeling']['reasoning_effort']
         if selection['backend'] != 'api':
             settings.pop('reasoning_effort', None)
-        generate, selected = load_backend(pipeline, config_path, model_root, registry)
+        generate, selected = load_backend(pipeline, config_path, model_root, registry, conversation=True)
         agent = dict(source=source, backend=selected['backend'],
                      provider=selected.get('provider', selected['backend']),
                      model_id=selected['model_id'], generation=settings,

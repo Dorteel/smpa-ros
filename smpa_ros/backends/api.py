@@ -59,7 +59,7 @@ class APIBackend:
         self._client = OpenAI(api_key=key, base_url=base_url, timeout=timeout, max_retries=0,
                               default_headers={'Accept-Encoding': 'gzip, deflate'})
 
-    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None):
+    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None, *, conversation=False):
         from jsonschema.validators import validator_for
         from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
@@ -119,7 +119,8 @@ class APIBackend:
         if type(reasoning_tokens) is not int:
             reasoning_tokens = None
         # Some compatible endpoints expose reasoning separately without usage counts.
-        # Never log or return that content, even when the visible answer is empty.
+        # Never log that content; only the explicit conversation path returns it.
+        # An empty final answer is still rejected rather than replaced by reasoning.
         reasoning_present = bool(getattr(message, 'reasoning', None))
         reasoning_content_present = bool(getattr(message, 'reasoning_content', None))
         content_kind = ('text' if isinstance(text, str) else
@@ -158,7 +159,27 @@ class APIBackend:
             except Exception:
                 raise RuntimeError('API returned invalid JSON or a response violating the requested schema; '
                                    'strict server-side outputs are required. No unrestricted fallback was attempted.') from None
+        if conversation:
+            result = {'response': text}
+            reported_model = getattr(response, 'model', None)
+            if isinstance(reported_model, str) and reported_model:
+                result['model_id'] = reported_model
+            # These compatible-provider fields contain plain reasoning text.
+            # Opaque objects, token counts, and summaries are not inferred traces.
+            for field in ('reasoning_content', 'reasoning'):
+                thinking = getattr(message, field, None)
+                if isinstance(thinking, str) and thinking.strip():
+                    if self._client.api_key in thinking:
+                        raise RuntimeError('API reasoning contained credential data and was rejected.')
+                    result.update(thinking=thinking, reasoning_source=field)
+                    break
+            return result
         return text
+
+    def generate_conversation(self, prompt: str, *, max_new_tokens: int = 128,
+                              reasoning_effort: str | None = None) -> dict:
+        """Return only reasoning explicitly supplied by the provider, without logging it."""
+        return self._complete(prompt, max_new_tokens, reasoning_effort=reasoning_effort, conversation=True)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
                  reasoning_effort: str | None = None) -> str:

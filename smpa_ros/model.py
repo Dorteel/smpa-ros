@@ -8,8 +8,8 @@ from tempfile import NamedTemporaryFile
 import yaml
 
 
-def load_backend(config, config_path, model_root, registry):
-    """Return the shared lazy text generator and its model metadata."""
+def load_backend(config, config_path, model_root, registry, *, conversation=False):
+    """Return lazy inference; only conversational callers opt into structured results."""
     registry_entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
     if config['modeling'].get('backend') == 'api':
         selected_name = 'api'
@@ -47,7 +47,8 @@ def load_backend(config, config_path, model_root, registry):
             if selected['backend'] not in ('transformers', 'api'):
                 raise RuntimeError('Selected backend does not provide the required schema-constrained planning')
             return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, schema=schema, **generation_options)
-        return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, **generation_options)
+        generate = modeling_backend.generate_conversation if conversation else modeling_backend.generate
+        return generate(prompt, max_new_tokens=max_new_tokens, **generation_options)
 
     return model, dict(selected, name=selected_name)
 
