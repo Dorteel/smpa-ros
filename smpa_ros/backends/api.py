@@ -59,7 +59,7 @@ class APIBackend:
         self._client = OpenAI(api_key=key, base_url=base_url, timeout=timeout, max_retries=0,
                               default_headers={'Accept-Encoding': 'gzip, deflate'})
 
-    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None, *, conversation=False):
+    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None, *, conversation=False, messages=None):
         from jsonschema.validators import validator_for
         from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
@@ -82,7 +82,7 @@ class APIBackend:
             }
         try:
             response = self._client.chat.completions.create(
-                model=self.model_id, messages=[{'role': 'user', 'content': content}],
+                model=self.model_id, messages=messages if messages is not None else [{'role': 'user', 'content': content}],
                 max_completion_tokens=max_new_tokens, temperature=0, **options,
             )
         except APITimeoutError:
@@ -176,10 +176,11 @@ class APIBackend:
             return result
         return text
 
-    def generate_conversation(self, prompt: str, *, max_new_tokens: int = 128,
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128,
                               reasoning_effort: str | None = None) -> dict:
         """Return only reasoning explicitly supplied by the provider, without logging it."""
-        return self._complete(prompt, max_new_tokens, reasoning_effort=reasoning_effort, conversation=True)
+        return self._complete(prompt, max_new_tokens, reasoning_effort=reasoning_effort, conversation=True,
+                              messages=prompt if isinstance(prompt, list) else None)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
                  reasoning_effort: str | None = None) -> str:

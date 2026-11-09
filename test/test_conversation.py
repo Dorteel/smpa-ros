@@ -35,10 +35,11 @@ class ConversationTests(unittest.TestCase):
         exchange(self.memory, 'What color is it?', self.generate, {'max_new_tokens': 128})
         history = read_messages(root)
         self.assertEqual([m['role'] for m in history], ['user', 'assistant', 'user', 'assistant'])
-        prompt = self.generate.call_args.args[0]
-        self.assertIn('There is a red cup.', prompt)
-        self.assertIn('The cup is red.', prompt)
-        self.assertIn('What color is it?', prompt)
+        self.assertEqual(self.generate.call_args.args[0], [
+            {'role': 'user', 'content': 'There is a red cup.'},
+            {'role': 'assistant', 'content': 'The cup is red.'},
+            {'role': 'user', 'content': 'What color is it?'},
+        ])
         transcript = (root / 'conversation.md').read_text()
         self.assertLess(transcript.index('## User'), transcript.index('## Assistant'))
         self.assertLess(transcript.index('There is a red cup.'), transcript.index('What color is it?'))
@@ -54,7 +55,7 @@ class ConversationTests(unittest.TestCase):
         record = json.loads((self.memory.directory / 'state/cycle_000001/act.json').read_text())
         self.assertEqual(record['status'], 'failed')
         exchange(self.memory, 'Continue.', self.generate, {})
-        self.assertIn('Remember this.', self.generate.call_args.args[0])
+        self.assertEqual(self.generate.call_args.args[0][0], {'role': 'user', 'content': 'Remember this.'})
         self.assertEqual(len(read_messages(self.memory.directory)), 3)
 
     def test_reload_preserves_arbitrary_markdown_and_provenance(self):
@@ -203,8 +204,11 @@ class ConversationTests(unittest.TestCase):
             state = post('/api/message', {'message': 'What color?', 'agent_id': alternate})
             api.assert_called_once_with(path, modality='text', provider='openai')
             local.assert_called_once()
-            self.assertIn('Remember a red cup', api.return_value.generate_conversation.call_args.args[0])
-            self.assertIn('Local reply', api.return_value.generate_conversation.call_args.args[0])
+            self.assertEqual(api.return_value.generate_conversation.call_args.args[0], [
+                {'role': 'user', 'content': 'Remember a red cup'},
+                {'role': 'assistant', 'content': 'Local reply'},
+                {'role': 'user', 'content': 'What color?'},
+            ])
             self.assertEqual(state['messages'][1]['agent']['id'], default)
             self.assertEqual(state['messages'][3]['agent']['id'], alternate)
             root = self.memory.directory
@@ -358,8 +362,8 @@ class ConversationTests(unittest.TestCase):
         self.generate.return_value = {'response': 'Another answer'}
         exchange(self.memory, 'Next question', self.generate, {}, agent=agent)
         prompt = self.generate.call_args.args[0]
-        self.assertIn('Final answer', prompt)
-        self.assertNotIn('Model trace', prompt)
+        self.assertEqual(prompt[1], {'role': 'assistant', 'content': answer})
+        self.assertNotIn('Model trace', json.dumps(prompt))
         self.assertNotIn('thinking', read_messages(self.memory.directory)[3])
 
     def test_legacy_literal_tags_and_response_only_do_not_create_traces(self):
@@ -463,6 +467,147 @@ class ConversationTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_four_turn_history_reaches_qwen_template_without_flattening(self):
+        from unittest.mock import MagicMock
+        from smpa_ros.backends.transformers import TransformersBackend
+        backend = TransformersBackend.__new__(TransformersBackend)
+        backend.enable_thinking = False
+        backend.torch = MagicMock()
+        backend.model = MagicMock()
+        backend.model.config.model_type = 'qwen3'
+        backend.tokenizer = MagicMock()
+        backend.tokenizer.chat_template = 'Qwen template'
+        backend.tokenizer.apply_chat_template.return_value = 'formatted turns'
+        backend.tokenizer.return_value.to.return_value['input_ids'].shape = (1, 5)
+        answers = ['Hello!', 'I am a language model.', 'A local Qwen model.', 'Let us continue.']
+        backend.tokenizer.decode.side_effect = answers
+        expected = []
+        for user, answer in zip(('Hello', 'Who are you?', 'No, I mean WHO are you?',
+                                 'This conversation seems stuck.'), answers):
+            expected.append({'role': 'user', 'content': user})
+            exchange(self.memory, user, backend.generate_conversation, {'max_new_tokens': 4096})
+            backend.tokenizer.apply_chat_template.assert_called_with(
+                expected, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            expected.append({'role': 'assistant', 'content': answer})
+        self.assertEqual(backend.model.generate.call_count, 4)
+        for call in backend.model.generate.call_args_list:
+            self.assertEqual(call.kwargs['max_new_tokens'], 4096)
+            self.assertIs(call.kwargs['do_sample'], False)
+        self.assertEqual([item['content'] for item in read_messages(self.memory.directory)[1::2]], answers)
+
+    def test_api_and_ollama_conversations_preserve_role_messages(self):
+        from types import SimpleNamespace as N
+        from unittest.mock import MagicMock
+        from smpa_ros.backends.api import APIBackend
+        from smpa_ros.backends.ollama import OllamaBackend
+        history = [{'role': 'user', 'content': 'Hello'}, {'role': 'assistant', 'content': 'Hello!'},
+                   {'role': 'user', 'content': 'Who are you?'}]
+        api = APIBackend.__new__(APIBackend)
+        api.model_id = 'test-model'
+        api._client = Mock(api_key='test-key')
+        api._client.chat.completions.create.return_value = N(
+            choices=[N(finish_reason='stop', message=N(content='An assistant', refusal=None))], usage=None)
+        self.assertEqual(api.generate_conversation(history)['response'], 'An assistant')
+        self.assertEqual(api._client.chat.completions.create.call_args.kwargs['messages'], history)
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {'model': 'test-model', 'message': {'content': 'An assistant', 'thinking': 'Trace'}}).encode()
+        with patch('smpa_ros.backends.ollama.urlopen', return_value=response) as request:
+            result = OllamaBackend('test-model').generate_conversation(history)
+            self.assertEqual(result['response'], 'An assistant')
+            self.assertEqual(result['thinking'], 'Trace')
+            self.assertEqual(request.call_args.args[0].full_url, 'http://localhost:11434/api/chat')
+            payload = json.loads(request.call_args.args[0].data)
+            self.assertEqual(payload['messages'], history)
+            self.assertNotIn('prompt', payload)
+
+    @unittest.skipUnless(os.environ.get('SMPA_QWEN_TEST') == '1',
+                         'Set SMPA_QWEN_TEST=1 to compare actual local Qwen and GUI inference')
+    def test_qwen_four_turn_http_matches_direct(self):
+        """Compare real GUI inference, direct chat, and the former JSON wrapper.
+
+        Only existing local weights are used. The separate debug report captures
+        synthetic prompts and raw continuations; transcript framing is unchanged.
+        """
+        import logging
+        import torch
+        from smpa_ros.backends.transformers import TransformersBackend
+        repository = Path(__file__).resolve().parents[1]
+        checkpoint = repository / 'models/llm/qwen3_0.6b'
+        if not (checkpoint / 'model.safetensors').is_file():
+            self.skipTest('Existing Qwen3-0.6B weights are unavailable; no download attempted')
+        previous_threads = torch.get_num_threads()
+        torch.set_num_threads(2)
+        self.addCleanup(torch.set_num_threads, previous_threads)
+        backend = TransformersBackend(str(checkpoint), enable_thinking=False)
+        config_path = repository / 'config.yaml'
+        config = yaml.safe_load(config_path.read_text())
+        agents, default = discover_agents(config, config_path, repository / 'models', repository / 'models')
+        restore_agent(self.memory, agents, default)
+        settings = agents[default]['agent']['generation']
+        report = {'settings': settings, 'effective_do_sample': False,
+                  'generation_defaults': backend.model.generation_config.to_dict(), 'turns': []}
+        if os.environ.get('SMPA_QWEN_LOG'):
+            log_path = Path(os.environ['SMPA_QWEN_LOG'])
+        else:
+            with tempfile.NamedTemporaryFile(prefix='smpa-qwen-', suffix='.json', delete=False) as output:
+                log_path = Path(output.name)
+        server = make_server(self.memory, None, None, port=0, agents=agents)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        logger = 'smpa_ros.backends.transformers'
+        legacy_history, replies = [], []
+        try:
+            with patch('smpa_ros.backends.transformers.TransformersBackend', return_value=backend), \
+                    patch('smpa_ros.backends.api.APIBackend', side_effect=AssertionError('Unexpected API inference')):
+                for user in ('Hello', 'Who are you?', 'No, I mean WHO are you?', 'This conversation seems stuck.'):
+                    # The real HTTP route loads history from the persisted transcript.
+                    with self.assertLogs(logger, level=logging.DEBUG) as logs:
+                        request = Request(f'http://127.0.0.1:{server.server_port}/api/message',
+                                          data=json.dumps({'message': user, 'agent_id': default}).encode(),
+                                          headers={'Content-Type': 'application/json'})
+                        with urlopen(request, timeout=300) as response:
+                            state = json.load(response)
+                    gui_log = json.loads(logs.records[-1].getMessage())
+                    gui_answer = state['messages'][-1]['response']
+                    history = [{key: message[key] for key in ('role', 'content')}
+                               for message in read_messages(self.memory.directory)[:-1]]
+                    # Direct inference bypasses exchange(), the HTTP route, and
+                    # generate_conversation(), but uses identical weights/settings.
+                    formatted = backend.tokenizer.apply_chat_template(
+                        history, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+                    inputs = backend.tokenizer(formatted, return_tensors='pt', add_special_tokens=False).to(backend.model.device)
+                    with torch.no_grad():
+                        output = backend.model.generate(**inputs, **settings, do_sample=False)
+                    tokens = output[0, inputs['input_ids'].shape[-1]:]
+                    direct = backend.tokenizer.decode(tokens, skip_special_tokens=True)
+                    raw = backend.tokenizer.decode(tokens, skip_special_tokens=False)
+                    # Retain the old input construction only as a diagnostic control.
+                    legacy_history.append({'role': 'user', 'content': user})
+                    legacy_prompt = ('Continue this conversation. Respond to the latest user message as the assistant. '
+                                     'Conversation history follows as JSON; its role labels identify the speakers.\n\n'
+                                     + json.dumps(legacy_history, ensure_ascii=False))
+                    with self.assertLogs(logger, level=logging.DEBUG) as old_logs:
+                        legacy = backend.generate_conversation(legacy_prompt, **settings)['response']
+                    legacy_history.append({'role': 'assistant', 'content': legacy})
+                    report['turns'].append({'user': user, 'history': history,
+                        'gui': dict(gui_log, response=gui_answer),
+                        'direct': {'formatted_prompt': formatted, 'raw_output': raw, 'response': direct},
+                        'legacy_wrapper': dict(json.loads(old_logs.records[-1].getMessage()), response=legacy)})
+                    log_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+                    self.assertEqual(gui_log['formatted_prompt'], formatted)
+                    self.assertEqual(gui_log['raw_output'], raw)
+                    self.assertEqual(gui_answer, direct)
+                    self.assertEqual(history[-1], {'role': 'user', 'content': user})
+                    replies.append(gui_answer)
+                self.assertNotEqual(replies[1], "I'm here to help! What can I do for you?")
+                self.assertGreater(len(set(replies)), 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+            print(f'Qwen reproduction debug report: {log_path}', flush=True)
 
     def test_resume_rejects_robot_run(self):
         from memory import MemoryManager

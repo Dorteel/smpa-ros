@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ class TransformersBackend:
         )
         self.model.eval()
 
-    def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None) -> str:
+    def generate(self, prompt: str | list[dict], *, max_new_tokens: int = 128, schema: dict | None = None) -> str:
         options = {}
         if schema is not None:
             try:
@@ -44,7 +45,7 @@ class TransformersBackend:
                 raise RuntimeError('Cannot prepare Outlines JSON Schema constraints; run ./install.sh '
                                    'and check the schema. No unrestricted fallback is allowed: '
                                    f'{error}') from error
-        messages = [{'role': 'user', 'content': prompt}]
+        messages = prompt if isinstance(prompt, list) else [{'role': 'user', 'content': prompt}]
         if self.tokenizer.chat_template:
             template_options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
             prompt = self.tokenizer.apply_chat_template(
@@ -52,6 +53,8 @@ class TransformersBackend:
             )
             inputs = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
         else:
+            if isinstance(prompt, list):
+                raise ValueError('Conversational inference requires a model chat template')
             inputs = self.tokenizer(prompt, return_tensors='pt')
         inputs = inputs.to(self.model.device)
         with self.torch.no_grad():
@@ -62,6 +65,16 @@ class TransformersBackend:
         text = self.tokenizer.decode(
             output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=True,
         )
+        # Opt-in debugging records the actual template and raw continuation,
+        # including EOS tokens, without changing persisted conversation messages.
+        logger = logging.getLogger(__name__)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(json.dumps({
+                'formatted_prompt': prompt,
+                'raw_output': self.tokenizer.decode(
+                    output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=False),
+                'max_new_tokens': max_new_tokens, 'do_sample': False,
+            }, ensure_ascii=False))
         if schema is not None:
             try:
                 validator.validate(json.loads(text))
@@ -71,7 +84,7 @@ class TransformersBackend:
         return text
 
 
-    def generate_conversation(self, prompt: str, *, max_new_tokens: int = 128) -> dict:
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128) -> dict:
         """Separate Qwen3's documented leading think block from its final answer.
 
         The existing template and enable_thinking setting are preserved. A trace

@@ -1243,3 +1243,74 @@ SMPA_BROWSER_TEST=1 ./test.sh --unit
 Without the environment flag or Firefox, the browser test is skipped; the other
 unit tests still run with `./test.sh --unit`. No live API or Ollama service is
 needed for these tests.
+
+### Reproducing Qwen conversation repetition
+
+The conversational history is passed to each backend as actual `user` and
+`assistant` messages. Previously, the complete history was serialized as JSON
+inside one user prompt. Although no history was lost, Qwen's chat template saw
+only a single user role. With the existing Qwen3-0.6B checkpoint this reproduced
+"I'm here to help! What can I do for you?" on both identity questions below.
+
+The fix preserves role boundaries through Qwen's native chat template, including
+`add_generation_prompt=True` and the existing `enable_thinking=False`. API
+conversations likewise use role-separated Chat Completions messages; Ollama
+conversations use `/api/chat`. Robot stages still use their original string
+prompts. Transcript framing and reasoning extraction are unchanged.
+
+The investigation used the existing 4096-token conversational limit and greedy
+`do_sample=False` generation. Checkpoint sampling defaults (temperature 0.6,
+top-p 0.95, top-k 20) are inactive under greedy decoding. Repetition penalty is
+1.0, EOS IDs are `[151645, 151643]`, and padding ID is `151643`. The reproduced
+outputs ended normally at `<|im_end|>`. Each turn invokes generation anew;
+reusing loaded weights does not cache assistant responses. No sampling changes,
+repetition penalties, EOS changes, or model replacement were needed for the fix.
+
+The optional real-model regression runs these inputs consecutively:
+
+1. Hello
+2. Who are you?
+3. No, I mean WHO are you?
+4. This conversation seems stuck.
+
+For each turn it compares the real GUI HTTP route with direct model inference
+using identical history, weights, and generation settings. It asserts equality
+of the formatted prompt, raw generated continuation, and final answer. A separate
+control reconstructs the former JSON wrapper to show the difference. Only
+already-downloaded weights are used; no model is fetched. Run from the checkout:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+SMPA_QWEN_TEST=1 SMPA_QWEN_LOG=/tmp/smpa-qwen-repetition.json \
+.venv/bin/python -m unittest discover -s test -p test_conversation.py \
+  -k test_qwen_four_turn_http_matches_direct -v
+
+./test.sh --unit
+```
+
+The JSON report includes the complete synthetic histories, formatted prompts,
+raw outputs with EOS tokens, final responses, and generation configuration for
+GUI, direct, and legacy-wrapper comparisons. The ordinary unit suite uses mocked
+inference and skips this optional real-model test unless `SMPA_QWEN_TEST=1`.
+
+In the verified run, all four GUI results matched direct inference. The model
+still repeated its identity answer on the emphatic third turn in both paths;
+fixing transport/template semantics does not guarantee that this small model's
+answers will always be varied or useful.
+
+To log formatted prompts and raw continuations during an interactive GUI session,
+enable only the Transformers backend's DEBUG logger. These logs include complete
+message contents and are separate from conversation transcripts:
+
+```bash
+.venv/bin/python - <<'PY'
+import logging
+from smpa_ros.conversation_web import main
+logger = logging.getLogger('smpa_ros.backends.transformers')
+handler = logging.FileHandler('/tmp/smpa-qwen-debug.jsonl', encoding='utf-8')
+handler.setFormatter(logging.Formatter('%(message)s'))
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
+main(['--config', 'config.yaml'])
+PY
+```

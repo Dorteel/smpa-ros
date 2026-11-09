@@ -140,10 +140,9 @@ def exchange(memory, message, generate, settings, *, agent=None):
         try:
             history = [{key: item[key] for key in ('role', 'content')}
                        for item in read_messages(memory.directory)]
-            prompt = ('Continue this conversation. Respond to the latest user message as the assistant. '
-                      'Conversation history follows as JSON; its role labels identify the speakers.\n\n'
-                      + json.dumps(history, ensure_ascii=False))
-            result = generate(prompt, **settings)
+            # Preserve actual chat turns: flattening history into one user message
+            # makes small chat models treat prior replies as text to imitate.
+            result = generate(history, **settings)
             # String callbacks remain supported; they never imply a trace.
             result = {'response': result} if isinstance(result, str) else result
             if not isinstance(result, dict):
