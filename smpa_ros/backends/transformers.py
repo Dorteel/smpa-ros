@@ -117,14 +117,14 @@ class TransformersBackend:
         return text
 
 
-    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128, **settings) -> dict:
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128, schema=None, **settings) -> dict:
         """Separate Qwen3's documented leading think block from its final answer.
 
         The existing template and enable_thinking setting are preserved. A trace
         is never requested or reconstructed here. Other model families retain
         their ordinary text, even if it happens to contain similar markup.
         """
-        text = self.generate(prompt, max_new_tokens=max_new_tokens, _conversation_settings=settings)
+        text = self.generate(prompt, max_new_tokens=max_new_tokens, schema=schema, _conversation_settings=settings)
         result = {'response': text}
         if getattr(self.model.config, 'model_type', None) == 'qwen3':
             stripped = text.lstrip()

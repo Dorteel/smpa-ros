@@ -183,9 +183,9 @@ class APIBackend:
         return text
 
     def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128,
-                              reasoning_effort: str | None = None, **settings) -> dict:
+                              reasoning_effort: str | None = None, schema=None, **settings) -> dict:
         """Return only reasoning explicitly supplied by the provider, without logging it."""
-        return self._complete(prompt, max_new_tokens, reasoning_effort=reasoning_effort, conversation=True,
+        return self._complete(prompt, max_new_tokens, schema=schema, reasoning_effort=reasoning_effort, conversation=True,
                               messages=prompt if isinstance(prompt, list) else None, generation=settings)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,

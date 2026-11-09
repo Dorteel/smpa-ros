@@ -25,7 +25,7 @@ def load_backend(config, config_path, model_root, registry, *, conversation=Fals
 
     def model(prompt, *, max_new_tokens, schema=None, reasoning_effort=None, **conversation_options):
         nonlocal modeling_backend
-        if conversation_options and (not conversation or schema is not None):
+        if conversation_options and not conversation:
             raise ValueError('Interactive generation settings are supported only in conversations')
         generation_options = dict(conversation_options)
         if reasoning_effort is not None:
@@ -48,7 +48,8 @@ def load_backend(config, config_path, model_root, registry, *, conversation=Fals
         if schema is not None:
             if selected['backend'] not in ('transformers', 'api'):
                 raise RuntimeError('Selected backend does not provide the required schema-constrained planning')
-            return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, schema=schema, **generation_options)
+            generate = modeling_backend.generate_conversation if conversation else modeling_backend.generate
+            return generate(prompt, max_new_tokens=max_new_tokens, schema=schema, **generation_options)
         generate = modeling_backend.generate_conversation if conversation else modeling_backend.generate
         return generate(prompt, max_new_tokens=max_new_tokens, **generation_options)
 

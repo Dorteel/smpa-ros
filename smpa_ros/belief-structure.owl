@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns:rdfs="http://www.w3.org/2000/01/rdf-schema#" xmlns:owl="http://www.w3.org/2002/07/owl#" xmlns:b="urn:smpa:belief#">
+  <owl:Ontology rdf:about="urn:smpa:belief"><rdfs:comment>Phase 1: attributed propositions, not objective world assertions. Specific semantics remain in proposition text and evidence.
+Example pattern for a speaker saying "A ball is blue": create ball a Entity,
+speaker a Entity, and claim1 a Proposition. claim1 has text "A ball is blue",
+about ball, attributedTo speaker. The ball is NOT a Belief or Proposition.
+Every target, including the speaker, needs its own type triple. Do not add an
+Evidence individual unless the source actually identifies supporting evidence.
+For a new statement create a fresh proposition identifier; reuse ball only when
+reference is unambiguous. Never reuse a proposition as the physical object.
+For "Alice believes Bob may recover", create Alice and Bob as Entity, a Belief
+attributedTo Alice, and a nested Proposition with text "Bob may recover", about
+Bob, withinScope that Belief. Recovery is not asserted outside this scope.</rdfs:comment></owl:Ontology>
+  <owl:Class rdf:about="urn:smpa:belief#Entity"><rdfs:comment>An object, person, place or other referent. Distinct from propositions about it.</rdfs:comment></owl:Class>
+  <owl:Class rdf:about="urn:smpa:belief#Proposition"><rdfs:comment>Attributed statement content, not an objective fact and not the object described. Use for ordinary conversational claims.</rdfs:comment></owl:Class>
+  <owl:Class rdf:about="urn:smpa:belief#Belief"><rdfs:subClassOf rdf:resource="urn:smpa:belief#Proposition"/><rdfs:comment>An explicitly reported belief attitude, distinct from its holder and from its nested content.</rdfs:comment></owl:Class>
+  <owl:Class rdf:about="urn:smpa:belief#Evidence"><rdfs:comment>Identified supporting source or observation. Do not invent supporting evidence.</rdfs:comment></owl:Class>
+  <owl:ObjectProperty rdf:about="urn:smpa:belief#about"><rdfs:comment>Entity mentioned by a proposition; does not assert its contents.</rdfs:comment></owl:ObjectProperty>
+  <owl:ObjectProperty rdf:about="urn:smpa:belief#attributedTo"/>
+  <owl:ObjectProperty rdf:about="urn:smpa:belief#supportedBy"/>
+  <owl:ObjectProperty rdf:about="urn:smpa:belief#withinScope"><rdfs:comment>Nested proposition scoped inside another proposition or belief.</rdfs:comment></owl:ObjectProperty>
+  <owl:DatatypeProperty rdf:about="urn:smpa:belief#text"/>
+  <owl:AnnotationProperty rdf:about="http://purl.org/dc/terms/source"/>
+</rdf:RDF>

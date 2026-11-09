@@ -56,3 +56,9 @@ stage_settings:
     max_new_tokens: 128
   act:
     max_new_tokens: 128
+
+# Independent conversational defaults; robot inference above remains unchanged.
+conversation:
+  agent: local:qwen3-4b
+  modelling_agent: local:qwen3-4b
+  # ontology: /absolute/path/to/alternative.owl  # default: packaged belief-structure.owl

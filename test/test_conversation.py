@@ -461,7 +461,12 @@ class ConversationTests(unittest.TestCase):
           const greedyDisabled=document.querySelector('#setting-temperature').disabled&&document.querySelector('#setting-top_k').disabled;
           generation.unsupported.top_k='Unsupported by this provider';renderSettings();
           const unsupportedExplained=document.querySelector('#settings-fields').textContent.includes('Unsupported by this provider');
-          reportCheck({settingsClosed,busyDisabled,temperatureEnabled,greedyDisabled,unsupportedExplained,
+          const graphVisible=document.querySelectorAll('#graph svg circle').length===1
+              &&document.querySelectorAll('#graph svg rect').length===1;
+          document.querySelector('#graph svg g').dispatchEvent(new Event('click'));
+          const provenanceVisible=document.querySelector('#node-details').textContent.includes('conversation.md#user');
+          const sdsLink=document.querySelector('a[href="/api/sds"]')!==null;
+          reportCheck({graphVisible,provenanceVisible,sdsLink,settingsClosed,busyDisabled,temperatureEnabled,greedyDisabled,unsupportedExplained,
                        closed,expanded,collapsed,answer:answer.textContent,
                        thinking:details.querySelector('.trace').textContent});
         }catch(error){reportCheck({error:String(error)});}
@@ -470,6 +475,8 @@ class ConversationTests(unittest.TestCase):
         exchange(self.memory, 'Question', self.generate, {})
         state = {'active_agent': None, 'agents': [], 'graph': {'nodes': [], 'edges': []},
                  'messages': read_messages(self.memory.directory)}
+        state['graph'] = {'nodes': [{'id': 'urn:cup', 'label': 'Cup', 'properties': [{'property':'source', 'value':'conversation.md#user'}]}],
+                          'edges': [{'source':'urn:cup', 'target':'urn:Entity', 'label':'type', 'kind':'concept'}]}
         state['generation'] = {'values': {'max_new_tokens': 512, 'temperature': 0.7, 'do_sample': True,
                                           'seed': 42, 'top_p': 0.9, 'top_k': 20, 'repetition_penalty': 1.0,
                                           'enable_thinking': False},
@@ -506,7 +513,7 @@ class ConversationTests(unittest.TestCase):
                                         capture_output=True, timeout=45)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
                 self.assertTrue(completed.wait(2), 'No browser rendering report received')
-                self.assertEqual(report, {'settingsClosed': True, 'busyDisabled': True, 'temperatureEnabled': True,
+                self.assertEqual(report, {'graphVisible': True, 'provenanceVisible': True, 'sdsLink': True, 'settingsClosed': True, 'busyDisabled': True, 'temperatureEnabled': True,
                                           'greedyDisabled': True, 'unsupportedExplained': True,
                                           'closed': True, 'expanded': True, 'collapsed': True,
                                           'answer': 'Visible answer', 'thinking': 'Backend trace'})

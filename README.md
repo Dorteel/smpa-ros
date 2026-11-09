@@ -1064,16 +1064,17 @@ hardware is required for these tests.
 
 ## Local conversational GUI
 
-The conversational entry point runs an epistemic **Sense → Act** loop: receive
-and save a user message, then generate and save a response. New conversations
+The conversational entry point runs an epistemic **Sense → Model → Act** loop:
+receive and save a user message, update its attributed belief representation,
+then generate and save a response. New conversations
 default to **Qwen/Qwen3-4B**, using the existing local Transformers backend and
 registry entry `qwen3-4b`. This GUI default is independent of the robot pipeline
 in `config.yaml`, which is unchanged. No API credentials or internet connection
 are required for local inference once the weights and dependencies are installed.
-It does not initialize ROS, call Model/Plan, or execute robot actions. No camera,
+It does not initialize ROS, invoke physical Model/Plan stages, or execute robot actions. No camera,
 speech models, Webots, or action servers are required to run the GUI.
 
-From the checkout, reuse the existing environment (no new dependencies):
+From the checkout, use the prepared environment (install RDFLib as described under Phase 1 below):
 
 ```bash
 cd ~/ros2_ws/src/smpa-ros
@@ -1124,15 +1125,15 @@ agent's configuration require the original settings to resume reproducibly.
 Restart after editing configuration; changes during inference are rejected.
 
 The left panel supports Enter-to-send and Shift+Enter for newlines. The right
-panel is an empty belief graph; there are no generated beliefs or placeholder
-entities. Its frontend receives an empty `{nodes: [], edges: []}` graph object
-for a future Model stage. No graph library or frontend build is needed yet.
+panel displays the persisted belief graph, with node properties and provenance
+inspection and a link to cumulative SDS. It uses SVG without a frontend dependency.
 
 Each server process owns one active conversation at a time. New, Clear context,
 and Resume switch the active run without deleting previous transcripts.
 Refreshing the page reloads its history and settings. The server prints the run directory under `memory/runs/`; it contains
-`goal.md`, `metadata.yaml`, `conversation.md`, and the standard MemoryManager
-subdirectories. `state/cycle_*/sense.json` and `act.json` record each exchange.
+`goal.md`, `metadata.yaml`, `conversation.md`, `conversation-sds.md`,
+`belief-state.ttl`, and the standard MemoryManager subdirectories.
+`state/cycle_*/sense.json`, `model*.json`, and `act.json` record each exchange.
 The transcript is append-only Markdown with hidden byte-length comments that
 allow exact reloading even when messages contain Markdown role headings.
 Incomplete or malformed transcripts are rejected and preserved unchanged.
@@ -1538,3 +1539,138 @@ env -u PYTHONPATH .venv/bin/python -m smpa_ros.conversation_web --config "$PWD/c
 
 The installed HTML and module entry point were verified outside the checkout
 with this override removed; the ROS environment and experiment launch remain unchanged.
+
+### Conversational belief modelling (Phase 1)
+
+The browser conversation now runs **Sense → Model → Act** independently of the
+robot experiment. Sense saves the original message first. Model translates it
+into attributed Simple Declarative Sentences (SDS), asks the existing inference
+backend for RDF additions using the ontology and current graph, validates them,
+and atomically replaces the graph. Act receives the complete chat history and
+current attributed graph. A second modelling pass records the new assistant
+message too, so SDS covers both speakers without including internal thinking.
+
+Each run contains `conversation.md`, append-only `conversation-sds.md`, and
+`belief-state.ttl`. SDS links to stable original-message anchors (role-heading links for legacy entries). Model JSON records
+under `state/cycle_*/model*.json` retain returned inference output, actual reported
+model, effective generation settings, configured agent and ontology SHA-256.
+Every touched individual receives application-owned `dcterms:source` and
+`dcterms:provenance` links; the model cannot supply or override these fields.
+Resuming reads these existing artifacts; older runs can acquire them on first
+modelling use. Earlier SDS entries are never rewritten.
+
+`conversation.agent` and `conversation.modelling_agent` select existing registry
+sources (`local:qwen3-4b`, `local:qwen3-0.6b`, `api:openai`, etc.). The GUI agent
+selector and generation controls affect the conversational response agent;
+modelling uses its separately configured agent, a 2048-token output budget and
+greedy local decoding. Both defaults are local Qwen3-4B, sharing its lazy backend
+when selected together. No download or cloud fallback occurs. Qwen3-4B has about
+16 GiB of float32 weights; allow additional RAM for loading and inference
+(previous offline smoke peak approximately 16.3 GiB). CPU modelling can take
+several minutes per turn because it makes multiple inference calls. On machines
+where thread oversubscription slows generation, prefix the launch command with
+`OMP_NUM_THREADS=4 MKL_NUM_THREADS=4` (the offline acceptance check uses four threads).
+
+Set `conversation.ontology` to a local RDF/XML OWL file (relative to `config.yaml`
+or absolute) to replace the packaged `smpa_ros/belief-structure.owl`. All vocabulary
+is read from that file; imports are not fetched. Its hash is pinned per run and
+changes are rejected. The application never writes the ontology. The existing Outlines/strict-API JSON Schema support constrains generated
+properties, classes and object shapes directly from this vocabulary. Compact
+`#localName` instance identifiers expand into the run namespace. Ollama proposals
+use the same post-generation validation without decoder constraints. RDFLib checks
+syntax; explicit checks enforce declared types/properties, typed individuals,
+object/literal shapes, run-local names and resolved individual references.
+There is no OWL reasoner, ontology editing, graph database or automatic ontology
+extension.
+
+The right panel draws individuals as circles and referenced ontology classes as
+squares. Select a node (mouse or keyboard) to inspect its properties and source
+records. **Open conversation SDS** opens the cumulative text. `/api/graph` returns
+the conversation state including graph nodes/edges; `/api/sds` returns Markdown
+as plain text. State and graph refresh after each response and on resume.
+
+For “There is a red cup on the table”, an illustrative SDS is:
+
+```text
+There is a red cup on the table.
+```
+
+An illustrative accepted graph fragment (run namespace abbreviated) is:
+
+```turtle
+@prefix b: <urn:smpa:belief#> .
+@prefix run: <urn:smpa:EXAMPLE:> .
+@prefix dc: <http://purl.org/dc/terms/> .
+run:cup a b:Entity ; dc:source "conversation.md#user" .
+run:claim a b:Proposition ; b:about run:cup ; b:attributedTo run:user ;
+    b:text "There is a red cup on the table." ;
+    dc:source "conversation.md#user" .
+run:user a b:Entity .
+```
+
+A later ownership proposition can refer to the same `run:cup`. The initial
+ontology deliberately has no dedicated color, spatial-location or ownership
+predicate. These details remain in proposition text/SDS, with `about` links to
+entities. Beliefs can contain propositions through `withinScope`; the doctor’s
+belief in recovery does not assert recovery as an objective fact. Entity reuse,
+SDS fidelity and scope selection are model-generated proposals, not formally
+proved semantic conclusions. Vocabulary/reference validation cannot guarantee
+that the model interpreted natural language correctly.
+
+Invalid RDF proposals receive at most one repair attempt through the same agent;
+both outputs and validation errors remain in the Model record. Failed modelling
+attempts leave the original conversation and last accepted
+graph intact, preserve any SDS already produced, and show a warning while chat
+continues. Failed graph proposals remain in Model records for inspection; they
+are not automatically replayed. The warning retains unresolved failure history.
+Long conversations send the full graph/context and may exceed a model’s context
+capacity; Phase 1 does not introduce retrieval or summarisation.
+
+Install the added RDF dependency and package, then launch offline from the repo:
+
+```bash
+cd /home/kai/ros2_ws/src/smpa-ros
+.venv/bin/python -m pip install 'rdflib==7.1.4'
+.venv/bin/python -m pip install --no-deps --no-build-isolation .
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+```
+
+Open `http://127.0.0.1:8000`. Use **Resume conversation** after restart, or pass
+`--resume /absolute/path/to/memory/runs/RUN_DIRECTORY`. If Qwen3-4B is not installed,
+explicitly download it first (this command requires network access):
+
+```bash
+.venv/bin/python scripts/download_models.py --model qwen3-4b
+```
+
+Run the mocked tests and optional real-browser graph/provenance check:
+
+```bash
+./test.sh --unit
+SMPA_BROWSER_TEST=1 .venv/bin/python -m pytest test/test_belief.py test/test_conversation.py -q
+```
+
+With the server running, reproduce the two acceptance turns from another terminal:
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8000/api/message -H 'Content-Type: application/json' -d '{"message":"There is a red cup on the table."}'
+curl --fail --silent --show-error http://127.0.0.1:8000/api/message -H 'Content-Type: application/json' -d '{"message":"The cup belongs to John."}'
+curl --fail --silent --show-error http://127.0.0.1:8000/api/sds
+curl --fail --silent --show-error http://127.0.0.1:8000/api/graph
+```
+
+Phase 1 verification: `SMPA_BROWSER_TEST=1 ./test.sh --unit` passed with 177 tests,
+1 optional model test skipped, and 2 integration tests deselected. The real
+Firefox check covers graph rendering, node provenance, SDS access and existing
+conversation controls. An offline Qwen3-4B run processed the two acceptance
+utterances with a restart between them: the same cup URI was reused, all 23
+initial triples survived, and the final graph had 42 triples and 5 individuals.
+Reopening through the HTTP server restored all 4 messages and left the transcript,
+SDS, TTL and ontology bytes unchanged. One intermediate assistant graph attempt
+was deliberately interrupted while diagnosing provenance generation; both user
+updates and the final assistant update succeeded.
+
+The local model's accepted mapping was coarse: some claims were stored as
+attributed text on entities rather than separate Proposition individuals. Thus
+structural validation and source preservation are verified; faithful semantic
+normalisation by a small local model remains a limitation requiring inspection.

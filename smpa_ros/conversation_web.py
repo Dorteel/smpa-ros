@@ -1,7 +1,8 @@
 """Local browser transport for one conversational run; no ROS initialization.
 
 A single HTTP server serializes exchanges and owns the transcript lock. The
-existing lazy text-backend loader supplies inference without Model or Plan calls.
+existing lazy text-backend loader supplies conversation and belief inference;
+physical robot stages are not invoked.
 """
 import argparse
 from copy import deepcopy
@@ -18,6 +19,7 @@ import yaml
 
 from smpa_ros.conversation import (exchange, open_conversation, read_messages,
                                    GENERATION_FIELDS, validate_generation)
+from smpa_ros.belief import graph_view
 from smpa_ros.model import load_backend, validate_settings
 
 
@@ -146,10 +148,10 @@ def discover_agents(config, config_path, model_root, registry):
         agents[agent['id']] = dict(agent=agent, generate=checked_generate, availability=availability,
                                   available=available, defaults=defaults, origins=origins, revision=revision,
                                   supported=sorted(supported), unsupported=unsupported)
-        if source == 'local:qwen3-4b':
+        if source == config.get('conversation', {}).get('agent', 'local:qwen3-4b'):
             default = agent['id']
     if default is None:
-        raise ValueError('The conversational default requires registry entry qwen3-4b; no API fallback')
+        raise ValueError('Unknown conversational default agent: ' + config.get('conversation', {}).get('agent', 'local:qwen3-4b') + '; no fallback')
     return agents, default
 
 
@@ -212,7 +214,7 @@ def update_generation(memory, agents, overrides):
 
 
 def make_server(memory, generate, settings, port=8000, *, agents=None, root=None,
-                configuration=None, default=None, lock=None):
+                configuration=None, default=None, lock=None, modelling=None):
     """Serialize selection and inference requests on the loopback interface."""
     root = Path(root or memory.directory.parent.parent).resolve()
     configuration = configuration if configuration is not None else memory.metadata['configuration']['pipeline']
@@ -255,7 +257,8 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
 
         def state(self):
             return dict(messages=read_messages(memory.directory), run_id=memory.metadata['run_id'],
-                        graph={'nodes': [], 'edges': []},
+                        graph=graph_view(memory.directory),
+                        modelling_error=memory.metadata.get('modelling_error'),
                         active_agent=memory.metadata.get('active_agent'),
                         generation=generation_state(memory, agents) if agents else None,
                         runs=[dict(run_id=key, started_at=meta['started_at'], status=meta['status'])
@@ -266,7 +269,10 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
         def do_GET(self):
             if self.path == '/':
                 self.reply(200, files('smpa_ros').joinpath('conversation.html').read_bytes(), 'text/html; charset=utf-8')
-            elif self.path in ('/api/conversation', '/api/agents'):
+            elif self.path == '/api/sds':
+                path = memory.directory / 'conversation-sds.md'
+                self.reply(200, path.read_bytes() if path.exists() else b'# No SDS recorded yet\n', 'text/plain; charset=utf-8')
+            elif self.path in ('/api/conversation', '/api/agents', '/api/graph'):
                 self.reply(200, self.state())
             else:
                 self.reply(404, {'error': 'Not found'})
@@ -372,9 +378,9 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
                     snapshot = dict(selected['agent'], model_revision=selected.get('revision'), generation_overrides=deepcopy(profile['overrides']),
                                     generation_defaults=deepcopy(profile['defaults']),
                                     generation_origins=deepcopy(profile['origins']))
-                    exchange(memory, data['message'], selected['generate'], profile['values'], agent=snapshot)
+                    exchange(memory, data['message'], selected['generate'], profile['values'], agent=snapshot, modelling=modelling)
                 else:
-                    exchange(memory, data['message'], generate, settings)
+                    exchange(memory, data['message'], generate, settings, modelling=modelling)
             except Exception:
                 # Detailed backend errors live in the run record, not browser output.
                 self.reply(500, dict(self.state(), error='Response failed. Your message is saved. Check the selected agent’s generation settings, credentials, local weights or service, and the run record. No fallback was used.'))
@@ -417,6 +423,19 @@ def main(args=None):
         from ament_index_python.packages import get_package_share_directory
         registry = Path(get_package_share_directory('smpa_ros')) / 'models'
     agents, default = discover_agents(config, options.config, options.model_root, registry)
+    conversational = config.get('conversation', {})
+    source = conversational.get('modelling_agent', 'local:qwen3-4b')
+    selected_model = next((item for item in agents.values() if item['agent']['source'] == source), None)
+    if selected_model is None:
+        parser.error('Unknown conversational modelling agent: ' + source)
+    ontology = conversational.get('ontology')
+    if ontology:
+        ontology = str((options.config.resolve().parent / ontology).resolve())
+    model_settings = dict(selected_model['defaults'], max_new_tokens=2048)
+    if 'do_sample' in selected_model['supported']:
+        model_settings['do_sample'] = False
+    modelling = dict(generate=selected_model['generate'], agent=selected_model['agent'],
+                     settings=model_settings, ontology=ontology)
     lock = None
     memory = None
     server = None
@@ -437,7 +456,7 @@ def main(args=None):
             lock = (memory.directory / 'conversation.md').open('rb')
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         server = make_server(memory, None, None, options.port, agents=agents, root=options.world_model_root,
-                             configuration=config, default=default, lock=lock)
+                             configuration=config, default=default, lock=lock, modelling=modelling)
         print(f'Conversation: {memory.directory}\nOpen http://127.0.0.1:{server.server_port}', flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
