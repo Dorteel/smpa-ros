@@ -27,7 +27,8 @@ class OllamaBackend:
             raise RuntimeError(result['error'])
         if conversation:
             message = result['message'] if chat else result
-            output = {'response': message['content' if chat else 'response']}
+            output = {'response': message['content' if chat else 'response'],
+                      'effective_settings': dict(temperature=0, seed=0, max_new_tokens=max_new_tokens)}
             if isinstance(message.get('thinking'), str) and message['thinking'].strip():
                 output.update(thinking=message['thinking'], reasoning_source='thinking')
             if isinstance(result.get('model'), str) and result['model']:

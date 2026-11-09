@@ -7,13 +7,20 @@
 :root{font-family:system-ui,sans-serif;color:#213532;background:#f4f6f3}*{box-sizing:border-box}body{margin:0}header{height:76px;padding:18px 28px;border-bottom:1px solid #d7dfd9;display:flex;align-items:center;gap:18px}header strong{letter-spacing:.12em}header span{color:#64756d;font-size:14px}main{display:grid;grid-template-columns:1fr 1fr;height:calc(100dvh - 76px)}section{min-width:0;padding:24px;display:flex;flex-direction:column;min-height:0}section+section{border-left:1px solid #d7dfd9}h1,h2{font-size:18px;font-weight:600;margin:0 0 18px}#history{overflow-y:auto;flex:1;min-height:0;padding-right:8px}.message{padding:16px 18px;margin:0 0 16px;border:1px solid #dbe3dd;border-radius:12px;background:white;white-space:pre-wrap;overflow-wrap:anywhere}.message.user{background:#e6eee7;margin-left:32px}.role{display:block;text-transform:uppercase;font-size:11px;letter-spacing:.1em;color:#61766a;margin-bottom:8px}form{display:flex;gap:10px;margin-top:12px}textarea{resize:vertical;min-height:64px;max-height:180px;flex:1;min-width:0;border:1px solid #bbcabe;border-radius:10px;padding:12px;font:inherit}button{background:#285c48;color:white;border:0;border-radius:10px;padding:12px 22px;font:inherit;cursor:pointer}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #87b899;outline-offset:3px}#status{min-height:24px;font-size:14px;margin:8px 0 0;color:#65766d}#status.error{color:#a03333}#graph{flex:1;min-height:200px;border:1px solid #dbe3dd;border-radius:12px;background:#fafbf9;display:grid;place-content:center;text-align:center;color:#6c7d72}#graph p{font-size:14px;margin:8px 16px}small{color:#718076;font-size:12px}#empty{color:#718076;line-height:1.6;margin-top:32px}@media(max-width:700px){main{height:auto;grid-template-columns:1fr}section:first-child{height:70dvh}section+section{border-left:0;border-top:1px solid #d7dfd9;min-height:280px}header{padding:18px}}
 .conversation-heading{margin-bottom:16px}.conversation-heading h1{margin-bottom:10px}.agent-label{display:block;font-size:13px;margin-bottom:6px}#agent{width:100%;padding:9px;border:1px solid #bbcabe;border-radius:8px;background:white;color:inherit;font:inherit;font-size:13px}#agent-details{display:block;margin-top:6px;overflow-wrap:anywhere}.agent-provenance{display:block;margin-top:10px;font-size:11px;color:#61766a}
 details.thinking{margin:12px 0;border-top:1px solid #dbe3dd;padding-top:10px}details.thinking summary{cursor:pointer;font-size:13px;color:#61766a}details.thinking .trace{margin-top:10px}
+.run-controls{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}.run-controls button{padding:7px 10px;font-size:12px}.run-controls select{max-width:100%;min-width:0;flex:1}#settings-panel{margin-top:10px}#settings-panel summary{cursor:pointer}#settings-fields{max-height:260px;overflow:auto;display:grid;gap:8px;padding:10px 0}.setting{display:grid;grid-template-columns:minmax(120px,1fr) 90px auto;align-items:center;gap:8px;font-size:13px}.setting input{max-width:90px;padding:5px}.setting small{grid-column:1/-1}.setting button{padding:4px 8px;font-size:11px}#active-settings{display:block;margin-top:6px;overflow-wrap:anywhere}#settings-panel>button{padding:7px 10px;font-size:12px}
 </style>
 <header><strong>SMPA</strong><span>Conversational workspace</span></header>
 <main>
 <section aria-labelledby="conversation-title">
 <div class="conversation-heading"><h1 id="conversation-title">Conversation</h1>
+<div class="run-controls"><button type="button" id="new-run" disabled>New conversation</button><button type="button" id="clear-context" disabled>Clear context</button>
+<select id="run" aria-label="Saved conversations" disabled></select><button type="button" id="resume-run" disabled>Resume conversation</button></div>
 <label class="agent-label" for="agent">Active agent</label><select id="agent" disabled aria-describedby="agent-details"><option>Loading agents…</option></select>
-<small id="agent-details" role="status"></small></div>
+<small id="agent-details" role="status"></small>
+<details id="settings-panel"><summary>Generation settings</summary>
+<div id="settings-fields"></div><button type="button" id="reset-settings" disabled>Reset settings</button>
+<small>Defaults come from the model where available, otherwise from this interface. A seed does not guarantee identical outputs across hardware or providers. API fields may be rejected by the selected endpoint.</small>
+</details><small id="active-settings" role="status"></small></div>
 <div id="history" role="log" aria-live="polite"><p id="empty">Start a conversation.<br>Your exchanges are saved in this run’s memory.</p></div>
 <form id="composer"><textarea id="message" aria-label="Your message" placeholder="Write a message…" required></textarea><button id="send">Send</button></form>
 <p id="status" role="status"></p><small>Enter to send · Shift + Enter for a new line</small>
@@ -24,19 +31,71 @@ details.thinking{margin:12px 0;border-top:1px solid #dbe3dd;padding-top:10px}det
 const history=document.querySelector('#history'), input=document.querySelector('#message');
 const send=document.querySelector('#send'), status=document.querySelector('#status');
 const agentSelect=document.querySelector('#agent'), agentDetails=document.querySelector('#agent-details');
-let busy=false, activeAgent=null;
+let busy=false, activeAgent=null, generation=null;
+const runSelect=document.querySelector('#run');
+const controls=[['enable_thinking','Enable thinking','checkbox'],['max_new_tokens','Max new tokens','number',1,32768,1],
+ ['temperature','Temperature','number',0,2,0.05],['seed','Random seed','number',0,4294967295,1],
+ ['top_p','Top-p','number',0.000001,1,'any'],['top_k','Top-k','number',0,100000,1],
+ ['repetition_penalty','Repetition penalty','number',0.000001,10,'any'],['do_sample','Sampling','checkbox']];
+function renderSettings(){
+ const fields=document.querySelector('#settings-fields');fields.replaceChildren();
+ if(!generation)return;
+ for(const [name,label,type,min,max,step] of controls){
+  const row=document.createElement('div');row.className='setting';
+  const title=document.createElement('label');title.htmlFor='setting-'+name;title.textContent=label;
+  const control=document.createElement('input');control.id='setting-'+name;control.type=type;
+  if(type==='checkbox')control.checked=Boolean(generation.values[name]);
+  else{control.value=generation.values[name]??'';control.min=min;control.max=max;control.step=step;control.required=true;}
+  const unsupported=generation.unsupported[name];
+  const inactive=generation.values.do_sample===false&&['temperature','top_p','top_k'].includes(name);
+  control.disabled=busy||Boolean(unsupported)||inactive;
+  const source=document.createElement('small');source.textContent=unsupported||(inactive?'Inactive while Sampling is off. ':'' )+
+   (Object.hasOwn(generation.overrides,name)?'Explicit override':generation.origins[name]||'Backend default');
+  const reset=document.createElement('button');reset.type='button';reset.textContent='Use default';
+  reset.disabled=busy||!Object.hasOwn(generation.overrides,name);
+  reset.addEventListener('click',()=>{const overrides={...generation.overrides};delete overrides[name];saveSettings(overrides);});
+  control.addEventListener('change',()=>{
+   if(!control.checkValidity()){control.reportValidity();return;}
+   saveSettings({...generation.overrides,[name]:type==='checkbox'?control.checked:Number(control.value)});
+  });
+  row.append(title,control,reset,source);fields.append(row);
+ }
+ const active={...generation.values};
+ if(active.do_sample===false)for(const name of ['temperature','top_p','top_k'])delete active[name];
+ document.querySelector('#active-settings').textContent='Active settings: '+JSON.stringify(active);
+}
+async function action(route,data,success){
+ if(busy)return;setBusy(true);status.className='';status.textContent='Saving…';
+ try{
+  const response=await fetch(route,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const result=await response.json();if(!response.ok)throw Error(result.error||'Request failed.');
+  render(result);status.textContent=success;
+ }catch(error){status.className='error';status.textContent=error.message;try{await refresh();}catch{}}
+ finally{setBusy(false);}
+}
+function saveSettings(overrides){return action('/api/settings',{overrides},'Settings saved');}
+
 // Graph data has a stable receiving point; no belief extraction or synthetic nodes.
 function receiveGraph(graph){document.querySelector('#graph').graphData=graph;}
-function setBusy(value){busy=value;send.disabled=value;input.disabled=value;agentSelect.disabled=value;}
+function setBusy(value){
+ busy=value;send.disabled=value;input.disabled=value;agentSelect.disabled=value;
+ document.querySelectorAll('.run-controls button,.run-controls select,#reset-settings').forEach(control=>control.disabled=value);
+ renderSettings();
+}
 function render(data){
-  activeAgent=data.active_agent;
+  activeAgent=data.active_agent;generation=data.generation||null;
+  runSelect.replaceChildren();
+  for(const run of data.runs||[]){const option=document.createElement('option');option.value=run.run_id;
+   option.textContent=run.started_at+' · '+run.status;option.selected=run.run_id===data.run_id;runSelect.append(option);}
+  renderSettings();
+  document.querySelectorAll('.run-controls button,.run-controls select,#reset-settings').forEach(control=>control.disabled=busy);
   agentSelect.replaceChildren();
   for(const agent of data.agents){
     const option=document.createElement('option'); option.value=agent.id; option.textContent=agent.label+(agent.available===false ? ' · unavailable' : ''); option.disabled=agent.available===false;
     option.selected=agent.id===activeAgent?.id; agentSelect.append(option);
   }
   const selected=data.agents.find(agent=>agent.id===activeAgent?.id);
-  agentDetails.textContent=selected ? selected.availability+' Generation: '+JSON.stringify(selected.generation) : '';
+  agentDetails.textContent=selected ? selected.availability : '';
   agentSelect.disabled=busy;
   history.replaceChildren();
   for(const message of data.messages){
@@ -53,7 +112,7 @@ function render(data){
     }
     if(message.role==='assistant'){
       const provenance=document.createElement('small');provenance.className='agent-provenance';
-      provenance.textContent=message.agent ? message.agent.label : 'Earlier response · agent not recorded';
+      provenance.textContent=message.agent ? message.agent.label+' · '+JSON.stringify(Object.fromEntries(controls.map(([key])=>[key,message.agent.generation?.[key]]).filter(([,value])=>value!==undefined))) : 'Earlier response · agent not recorded';
       box.append(provenance);
     }
     history.append(box);
@@ -65,17 +124,14 @@ async function refresh(){
   if(!response.ok)throw Error('Could not load conversation.');
   render(await response.json());
 }
-agentSelect.addEventListener('change',async()=>{
-  const agent_id=agentSelect.value;setBusy(true);status.className='';status.textContent='Selecting agent…';
-  try{
-    const response=await fetch('/api/agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id})});
-    const data=await response.json();if(!response.ok)throw Error(data.error||'Selection failed.');
-    render(data);status.textContent='Agent selected';
-  }catch(error){
-    status.className='error';status.textContent=error.message;
-    try{await refresh();}catch{agentSelect.value=activeAgent?.id||'';}
-  }finally{setBusy(false);}
+agentSelect.addEventListener('change',()=>action('/api/agent',{agent_id:agentSelect.value},'Agent selected'));
+document.querySelector('#reset-settings').addEventListener('click',()=>saveSettings({}));
+document.querySelector('#new-run').addEventListener('click',()=>action('/api/new',{},'New conversation; previous run preserved'));
+document.querySelector('#clear-context').addEventListener('click',()=>{
+ if(confirm('Start an empty run with these settings? The current transcript will be kept.'))
+  action('/api/clear',{},'Context cleared into a new run; previous transcript preserved');
 });
+document.querySelector('#resume-run').addEventListener('click',()=>action('/api/resume',{run_id:runSelect.value},'Conversation and settings restored'));
 document.querySelector('#composer').addEventListener('submit',async event=>{
   event.preventDefault();if(busy||!activeAgent||!input.value.trim())return;
   const message=input.value;setBusy(true);status.className='';status.textContent='Thinking…';

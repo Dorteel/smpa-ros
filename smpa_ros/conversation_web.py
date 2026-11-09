@@ -16,7 +16,8 @@ import signal
 
 import yaml
 
-from smpa_ros.conversation import exchange, open_conversation, read_messages
+from smpa_ros.conversation import (exchange, open_conversation, read_messages,
+                                   GENERATION_FIELDS, validate_generation)
 from smpa_ros.model import load_backend, validate_settings
 
 
@@ -95,7 +96,56 @@ def discover_agents(config, config_path, model_root, registry):
             if yaml.safe_load(Path(config_path).read_text()) != config:
                 raise RuntimeError('Configuration changed; restart with the original configuration')
             return _generate(prompt, **options)
-        agents[agent['id']] = dict(agent=agent, generate=checked_generate, availability=availability, available=available)
+        # Controls are outside the immutable agent identity, so old runs and the
+        # lazy model instance survive settings edits. Read only small local JSON.
+        defaults = {'max_new_tokens': 512}
+        origins = {'max_new_tokens': 'Conversation default'}
+        supported = {'max_new_tokens'}
+        if selected['backend'] == 'transformers':
+            supported = GENERATION_FIELDS - {'enable_thinking'}
+            defaults.update(temperature=0.7, top_p=0.9, top_k=20,
+                            repetition_penalty=1.0, do_sample=True, seed=42)
+            origins.update({name: 'Conversation default' for name in defaults if name not in origins})
+            checkpoint = Path(agent['model_path']) / 'generation_config.json'
+            if checkpoint.is_file():
+                checkpoint_defaults = json.loads(checkpoint.read_text())
+                for name in ('temperature', 'top_p', 'top_k', 'repetition_penalty', 'do_sample'):
+                    if name in checkpoint_defaults:
+                        defaults[name] = checkpoint_defaults[name]
+                        origins[name] = 'Model default'
+            model_config = Path(agent['model_path']) / 'config.json'
+            model_type = json.loads(model_config.read_text()).get('model_type') if model_config.is_file() else None
+            if model_type == 'qwen3' or 'enable_thinking' in selected:
+                supported = supported | {'enable_thinking'}
+                defaults['enable_thinking'] = selected.get('enable_thinking', True)
+                origins['enable_thinking'] = 'Model configuration'
+        elif selected['backend'] == 'api':
+            # These are Chat Completions fields, not a claim about opaque server
+            # internals. An endpoint rejection is surfaced without retry/fallback.
+            supported |= {'temperature', 'top_p', 'seed'}
+            defaults.update(temperature=0.7, top_p=0.9, seed=42)
+            origins.update({name: 'Conversation default' for name in defaults if name not in origins})
+            if 'reasoning_effort' in settings:
+                defaults['reasoning_effort'] = settings['reasoning_effort']
+                origins['reasoning_effort'] = 'Pipeline configuration'
+                supported.add('reasoning_effort')
+        validate_generation(defaults, supported)
+        unsupported = {name: ('Thinking toggle requires the Qwen3 chat template.' if name == 'enable_thinking'
+                              else 'This backend does not expose this control through its conversation interface.')
+                       for name in GENERATION_FIELDS - supported}
+        revision = selected.get('revision')
+        if selected['backend'] == 'transformers' and revision is None:
+            try:
+                report = json.loads((Path(model_root) / 'download_report.json').read_text())
+                revision = next((item.get('revision') for item in report['models']
+                                 if item.get('repo_id') == selected['model_id']
+                                 and item.get('status') == 'completed'
+                                 and Path(item['local_dir']).resolve() == Path(agent['model_path'])), None)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        agents[agent['id']] = dict(agent=agent, generate=checked_generate, availability=availability,
+                                  available=available, defaults=defaults, origins=origins, revision=revision,
+                                  supported=sorted(supported), unsupported=unsupported)
         if source == 'local:qwen3-4b':
             default = agent['id']
     if default is None:
@@ -136,8 +186,62 @@ def restore_agent(memory, agents, default):
     memory.write_metadata()
 
 
-def make_server(memory, generate, settings, port=8000, *, agents=None):
+
+def generation_state(memory, agents):
+    """Keep defaults and explicit overrides for each selected agent in this run."""
+    identifier = memory.metadata['active_agent']['id']
+    item = agents[identifier]
+    profiles = memory.metadata.setdefault('generation_settings', {})
+    if identifier not in profiles:
+        profiles[identifier] = dict(defaults=deepcopy(item['defaults']), overrides={},
+                                    origins=deepcopy(item['origins']))
+    profile = profiles[identifier]
+    effective = validate_generation(dict(profile['defaults'], **profile['overrides']), item['supported'])
+    return dict(profile, values=effective, unsupported=item['unsupported'])
+
+
+def update_generation(memory, agents, overrides):
+    """Persist a full override map only after merged settings have been validated."""
+    identifier = memory.metadata['active_agent']['id']
+    item = agents[identifier]
+    validate_generation(overrides, item['supported'])
+    profile = generation_state(memory, agents)
+    validate_generation(dict(profile['defaults'], **overrides), item['supported'])
+    memory.metadata['generation_settings'][identifier]['overrides'] = deepcopy(overrides)
+    memory.write_metadata()
+
+
+def make_server(memory, generate, settings, port=8000, *, agents=None, root=None,
+                configuration=None, default=None, lock=None):
     """Serialize selection and inference requests on the loopback interface."""
+    root = Path(root or memory.directory.parent.parent).resolve()
+    configuration = configuration if configuration is not None else memory.metadata['configuration']['pipeline']
+    default = default or memory.metadata.get('active_agent', {}).get('id')
+    if lock is None:
+        lock = (memory.directory / 'conversation.md').open('rb')
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        if agents:
+            generation_state(memory, agents)
+            memory.write_metadata()
+    except Exception:
+        lock.close()
+        raise
+    session_directories = {memory.directory}
+
+    def runs():
+        found = {}
+        paths = set((root / 'runs').glob('*/metadata.yaml')) | {path / 'metadata.yaml' for path in session_directories}
+        for path in paths:
+            try:
+                metadata = yaml.safe_load(path.read_text())
+                if metadata.get('configuration', {}).get('kind') == 'conversation':
+                    found[metadata['run_id']] = (path.parent, metadata)
+            except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError):
+                continue
+        found[memory.metadata['run_id']] = (memory.directory, memory.metadata)
+        return found
+
     class Handler(BaseHTTPRequestHandler):
         def reply(self, status, payload, content_type='application/json'):
             body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
@@ -153,6 +257,9 @@ def make_server(memory, generate, settings, port=8000, *, agents=None):
             return dict(messages=read_messages(memory.directory), run_id=memory.metadata['run_id'],
                         graph={'nodes': [], 'edges': []},
                         active_agent=memory.metadata.get('active_agent'),
+                        generation=generation_state(memory, agents) if agents else None,
+                        runs=[dict(run_id=key, started_at=meta['started_at'], status=meta['status'])
+                              for key, (_, meta) in sorted(runs().items(), key=lambda pair: pair[1][1]['started_at'], reverse=True)],
                         agents=[dict(item['agent'], availability=item['availability'], available=item.get('available', True))
                                 for item in (agents or {}).values()])
 
@@ -165,7 +272,8 @@ def make_server(memory, generate, settings, port=8000, *, agents=None):
                 self.reply(404, {'error': 'Not found'})
 
         def do_POST(self):
-            if self.path not in ('/api/message', '/api/agent'):
+            nonlocal memory, lock
+            if self.path not in ('/api/message', '/api/agent', '/api/settings', '/api/new', '/api/clear', '/api/resume'):
                 self.reply(404, {'error': 'Not found'})
                 return
             # Reject cross-origin browser writes and non-JSON form submissions.
@@ -183,35 +291,107 @@ def make_server(memory, generate, settings, port=8000, *, agents=None):
                     raise ValueError('Expected a JSON object')
                 if self.path == '/api/message' and (not isinstance(data.get('message'), str) or not data['message'].strip()):
                     raise ValueError('Message must be nonempty text')
+                if self.path in ('/api/new', '/api/clear', '/api/resume'):
+                    if not agents:
+                        raise ValueError('Conversation controls require configured agents')
+                    candidate = None
+                    candidate_lock = None
+                    original = None
+                    previous_metadata = deepcopy(memory.metadata)
+                    try:
+                        if self.path == '/api/resume':
+                            entry = runs().get(data.get('run_id')) if isinstance(data.get('run_id'), str) else None
+                            if entry is None:
+                                raise ValueError('Unknown conversational run')
+                            path, original = entry
+                            if path == memory.directory:
+                                self.reply(200, self.state())
+                                return
+                            if original['configuration']['pipeline'] != configuration:
+                                raise ValueError('Resume requires the original pipeline configuration')
+                            candidate_lock = (path / 'conversation.md').open('rb')
+                            fcntl.flock(candidate_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            candidate = open_conversation(None, resume=path)
+                            restore_agent(candidate, agents, default)
+                        else:
+                            candidate = open_conversation(root, configuration=configuration)
+                            candidate_lock = (candidate.directory / 'conversation.md').open('rb')
+                            fcntl.flock(candidate_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            if self.path == '/api/clear':
+                                candidate.metadata['active_agent'] = deepcopy(memory.metadata['active_agent'])
+                                candidate.metadata['generation_settings'] = deepcopy(memory.metadata.get('generation_settings', {}))
+                            restore_agent(candidate, agents, default)
+                        generation_state(candidate, agents)
+                        candidate.write_metadata()
+                        memory.finalize('completed')
+                    except Exception:
+                        memory.metadata = previous_metadata
+                        try:
+                            if candidate is not None:
+                                if original is not None:
+                                    candidate.metadata = original
+                                    candidate.write_metadata()
+                                else:
+                                    candidate.finalize('failed')
+                        finally:
+                            if candidate_lock is not None:
+                                candidate_lock.close()
+                        raise
+                    lock.close()
+                    memory, lock = candidate, candidate_lock
+                    session_directories.add(memory.directory)
+                    self.server.memory, self.server.transcript_lock = memory, lock
+                    self.reply(200, self.state())
+                    return
                 if self.path == '/api/agent' or 'agent_id' in data:
                     select_agent(memory, agents or {}, data.get('agent_id'))
+                if self.path == '/api/settings':
+                    if not agents:
+                        raise ValueError('Generation settings require configured agents')
+                    update_generation(memory, agents, data.get('overrides'))
                 if self.path == '/api/message' and agents:
                     selected = agents[memory.metadata['active_agent']['id']]
                     if not selected.get('available', True):
                         raise ValueError(selected['availability'])
-            except (ValueError, UnicodeError) as error:
+                    if 'overrides' in data:
+                        update_generation(memory, agents, data['overrides'])
+                    generation_state(memory, agents)
+            except (ValueError, UnicodeError, OSError, KeyError, yaml.YAMLError) as error:
                 self.reply(400, {'error': str(error)})
                 return
-            if self.path == '/api/agent':
+            if self.path in ('/api/agent', '/api/settings'):
+                if agents:
+                    generation_state(memory, agents)
+                    memory.write_metadata()
                 self.reply(200, self.state())
                 return
             try:
                 if agents:
                     selected = agents[memory.metadata['active_agent']['id']]
-                    exchange(memory, data['message'], selected['generate'], selected['agent']['generation'],
-                             agent=selected['agent'])
+                    profile = generation_state(memory, agents)
+                    snapshot = dict(selected['agent'], model_revision=selected.get('revision'), generation_overrides=deepcopy(profile['overrides']),
+                                    generation_defaults=deepcopy(profile['defaults']),
+                                    generation_origins=deepcopy(profile['origins']))
+                    exchange(memory, data['message'], selected['generate'], profile['values'], agent=snapshot)
                 else:
                     exchange(memory, data['message'], generate, settings)
             except Exception:
                 # Detailed backend errors live in the run record, not browser output.
-                self.reply(500, dict(self.state(), error='Response failed. Your message is saved. Check the selected agent’s credentials, local weights or service, and the run record. No fallback was used.'))
+                self.reply(500, dict(self.state(), error='Response failed. Your message is saved. Check the selected agent’s generation settings, credentials, local weights or service, and the run record. No fallback was used.'))
             else:
                 self.reply(200, self.state())
 
         def log_message(self, format, *args):
             pass
 
-    return HTTPServer(('127.0.0.1', port), Handler)
+    server = HTTPServer(('127.0.0.1', port), Handler)
+    server.memory, server.transcript_lock = memory, lock
+    original_close = server.server_close
+    def close():
+        server.transcript_lock.close()
+        original_close()
+    server.server_close = close
+    return server
 
 
 def main(args=None):
@@ -256,7 +436,8 @@ def main(args=None):
         if lock is None:
             lock = (memory.directory / 'conversation.md').open('rb')
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        server = make_server(memory, None, None, options.port, agents=agents)
+        server = make_server(memory, None, None, options.port, agents=agents, root=options.world_model_root,
+                             configuration=config, default=default, lock=lock)
         print(f'Conversation: {memory.directory}\nOpen http://127.0.0.1:{server.server_port}', flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
@@ -266,11 +447,15 @@ def main(args=None):
         raise
     finally:
         if server is not None:
-            server.server_close()
-        if memory is not None:
-            memory.finalize(status)
-        if lock is not None:
-            lock.close()
+            memory = server.memory
+        try:
+            if memory is not None:
+                memory.finalize(status)
+        finally:
+            if server is not None:
+                server.server_close()
+            if lock is not None:
+                lock.close()
         signal.signal(signal.SIGTERM, previous)
         # The dedicated process exits here, releasing the lazy backend and model.
 

@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -25,8 +26,35 @@ class TransformersBackend:
         )
         self.model.eval()
 
-    def generate(self, prompt: str | list[dict], *, max_new_tokens: int = 128, schema: dict | None = None) -> str:
+    def generate(self, prompt: str | list[dict], *, max_new_tokens: int = 128, schema: dict | None = None, _conversation_settings=None) -> str:
         options = {}
+        thinking = self.enable_thinking
+        sample = False  # Preserve the SMPA Model/Plan path exactly.
+        seed = None
+        if _conversation_settings is not None:
+            from smpa_ros.conversation import GENERATION_FIELDS, validate_generation
+            supported = GENERATION_FIELDS - {'enable_thinking'}
+            if getattr(self.model.config, 'model_type', None) == 'qwen3':
+                supported = supported | {'enable_thinking'}
+            controls = validate_generation(dict(_conversation_settings, max_new_tokens=max_new_tokens), supported)
+            seed = controls.pop('seed', None)
+            thinking = controls.pop('enable_thinking', thinking)
+            sample = controls.pop('do_sample', False)
+            controls.pop('max_new_tokens')
+            inactive = []
+            if not sample:
+                for name in ('temperature', 'top_p', 'top_k'):
+                    if name in controls:
+                        inactive.append(name)
+                        controls.pop(name)
+            options.update(controls)
+            defaults = self.model.generation_config.to_dict()
+            effective = dict(defaults, **controls, max_new_tokens=max_new_tokens, do_sample=sample)
+            if not sample:
+                for name in ('temperature', 'top_p', 'top_k'):
+                    effective.pop(name, None)
+            effective.update(seed=seed, enable_thinking=thinking, inactive=inactive)
+            self._last_generation_settings = effective
         if schema is not None:
             try:
                 from outlines import from_transformers
@@ -47,7 +75,7 @@ class TransformersBackend:
                                    f'{error}') from error
         messages = prompt if isinstance(prompt, list) else [{'role': 'user', 'content': prompt}]
         if self.tokenizer.chat_template:
-            template_options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
+            template_options = {} if thinking is None else {'enable_thinking': thinking}
             prompt = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True, **template_options,
             )
@@ -57,9 +85,14 @@ class TransformersBackend:
                 raise ValueError('Conversational inference requires a model chat template')
             inputs = self.tokenizer(prompt, return_tensors='pt')
         inputs = inputs.to(self.model.device)
-        with self.torch.no_grad():
+        # fork_rng restores the process RNG after this seeded invocation.
+        devices = list(range(self.torch.cuda.device_count())) if seed is not None else []
+        rng = self.torch.random.fork_rng(devices=devices) if seed is not None else nullcontext()
+        with rng, self.torch.no_grad():
+            if seed is not None:
+                self.torch.manual_seed(seed)
             output = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False, **options,
+                **inputs, max_new_tokens=max_new_tokens, do_sample=sample, **options,
             )
         # Decode only the continuation, excluding the input prompt.
         text = self.tokenizer.decode(
@@ -73,7 +106,7 @@ class TransformersBackend:
                 'formatted_prompt': prompt,
                 'raw_output': self.tokenizer.decode(
                     output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=False),
-                'max_new_tokens': max_new_tokens, 'do_sample': False,
+                'max_new_tokens': max_new_tokens, 'do_sample': sample,
             }, ensure_ascii=False))
         if schema is not None:
             try:
@@ -84,17 +117,21 @@ class TransformersBackend:
         return text
 
 
-    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128) -> dict:
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128, **settings) -> dict:
         """Separate Qwen3's documented leading think block from its final answer.
 
         The existing template and enable_thinking setting are preserved. A trace
         is never requested or reconstructed here. Other model families retain
         their ordinary text, even if it happens to contain similar markup.
         """
-        text = self.generate(prompt, max_new_tokens=max_new_tokens)
+        text = self.generate(prompt, max_new_tokens=max_new_tokens, _conversation_settings=settings)
         result = {'response': text}
         if getattr(self.model.config, 'model_type', None) == 'qwen3':
             stripped = text.lstrip()
+            # Qwen can place the opening think delimiter in the generation prompt.
+            if (getattr(self, '_last_generation_settings', {}).get('enable_thinking')
+                    and not stripped.startswith('<think>') and '</think>' in stripped):
+                stripped = '<think>' + stripped
             if stripped.startswith('<think>'):
                 thinking, separator, response = stripped[len('<think>'):].partition('</think>')
                 if not separator or not response.strip():
@@ -102,6 +139,9 @@ class TransformersBackend:
                 result['response'] = response.strip()
                 if thinking.strip():
                     result.update(thinking=thinking.strip(), reasoning_source='qwen3:<think>')
+        effective = getattr(self, '_last_generation_settings', None)
+        if isinstance(effective, dict):
+            result['effective_settings'] = effective
         return result
 
 

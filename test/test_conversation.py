@@ -236,7 +236,8 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(state['messages'][3]['agent']['id'], alternate)
             root = self.memory.directory
             record = json.loads((root / 'state/cycle_000002/act.json').read_text())
-            self.assertEqual(record['agent'], agents[alternate]['agent'])
+            self.assertEqual(record['agent']['id'], alternate)
+            self.assertEqual(record['agent']['generation'], state['generation']['values'])
             self.assertEqual(yaml.safe_load((root / 'metadata.yaml').read_text())['active_agent']['id'], alternate)
             self.assertIn('gpt-4.1-mini', (root / 'conversation.md').read_text())
             before = (root / 'conversation.md').read_bytes()
@@ -260,7 +261,8 @@ class ConversationTests(unittest.TestCase):
         self.memory = open_conversation(None, resume=self.memory.directory)
         restore_agent(self.memory, agents, default)
         self.assertEqual(self.memory.metadata['active_agent']['id'], alternate)
-        self.assertEqual(read_messages(self.memory.directory)[1]['agent'], agents[alternate]['agent'])
+        self.assertEqual(read_messages(self.memory.directory)[1]['agent'],
+                         dict(agents[alternate]['agent'], generation={}))
         # Legacy runs have only models.text and unannotated Markdown messages.
         legacy = open_conversation(Path(self.temporary.name), configuration=config,
                                    models={'text': agents[alternate]['agent']['model_configuration']})
@@ -310,7 +312,9 @@ class ConversationTests(unittest.TestCase):
                 setattr(message, field, 'Model supplied trace')
                 result = backend.generate_conversation('Question')
                 self.assertEqual(result, {'response': 'Final answer', 'thinking': 'Model supplied trace',
-                                          'reasoning_source': field, 'model_id': 'actual-model'})
+                                          'reasoning_source': field, 'model_id': 'actual-model',
+                                          'effective_settings': {'max_new_tokens': 128, 'temperature': 0},
+                                          'system_fingerprint': None})
                 self.assertEqual(backend.generate('Question'), 'Final answer')
                 delattr(message, field)
         # Counts and opaque objects are not traces and must not be converted to text.
@@ -353,7 +357,8 @@ class ConversationTests(unittest.TestCase):
             backend = OllamaBackend('requested-model')
             self.assertEqual(backend.generate_conversation('Question'),
                              {'response': 'Final answer', 'thinking': 'Model trace',
-                              'reasoning_source': 'thinking', 'model_id': 'actual-local-model'})
+                              'reasoning_source': 'thinking', 'model_id': 'actual-local-model',
+                              'effective_settings': {'max_new_tokens': 128, 'temperature': 0, 'seed': 0}})
             self.assertEqual(backend.generate('Question'), 'Final answer')
             del body['thinking']
             self.assertNotIn('thinking', backend.generate_conversation('Question'))
@@ -446,7 +451,18 @@ class ConversationTests(unittest.TestCase):
           const closed=!details.open;
           details.querySelector('summary').click();const expanded=details.open;
           details.querySelector('summary').click();const collapsed=!details.open;
-          reportCheck({closed,expanded,collapsed,answer:answer.textContent,
+          const settingsClosed=!document.querySelector('#settings-panel').open;
+          setBusy(true);
+          const busyDisabled=[...document.querySelectorAll('#settings-fields input')].every(input=>input.disabled)
+             &&document.querySelector('#agent').disabled&&document.querySelector('#new-run').disabled;
+          setBusy(false);
+          const temperatureEnabled=!document.querySelector('#setting-temperature').disabled;
+          generation.values.do_sample=false;renderSettings();
+          const greedyDisabled=document.querySelector('#setting-temperature').disabled&&document.querySelector('#setting-top_k').disabled;
+          generation.unsupported.top_k='Unsupported by this provider';renderSettings();
+          const unsupportedExplained=document.querySelector('#settings-fields').textContent.includes('Unsupported by this provider');
+          reportCheck({settingsClosed,busyDisabled,temperatureEnabled,greedyDisabled,unsupportedExplained,
+                       closed,expanded,collapsed,answer:answer.textContent,
                        thinking:details.querySelector('.trace').textContent});
         }catch(error){reportCheck({error:String(error)});}
         </script>"""
@@ -454,6 +470,10 @@ class ConversationTests(unittest.TestCase):
         exchange(self.memory, 'Question', self.generate, {})
         state = {'active_agent': None, 'agents': [], 'graph': {'nodes': [], 'edges': []},
                  'messages': read_messages(self.memory.directory)}
+        state['generation'] = {'values': {'max_new_tokens': 512, 'temperature': 0.7, 'do_sample': True,
+                                          'seed': 42, 'top_p': 0.9, 'top_k': 20, 'repetition_penalty': 1.0,
+                                          'enable_thinking': False},
+                               'overrides': {}, 'origins': {}, 'unsupported': {}}
         # Finish the assertion before screenshot mode exits; asynchronous fetch
         # can otherwise race Firefox's page-load screenshot completion.
         page = page.replace('</html>', script.replace('TEST_STATE', json.dumps(state)) + '</html>').encode()
@@ -486,7 +506,9 @@ class ConversationTests(unittest.TestCase):
                                         capture_output=True, timeout=45)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
                 self.assertTrue(completed.wait(2), 'No browser rendering report received')
-                self.assertEqual(report, {'closed': True, 'expanded': True, 'collapsed': True,
+                self.assertEqual(report, {'settingsClosed': True, 'busyDisabled': True, 'temperatureEnabled': True,
+                                          'greedyDisabled': True, 'unsupportedExplained': True,
+                                          'closed': True, 'expanded': True, 'collapsed': True,
                                           'answer': 'Visible answer', 'thinking': 'Backend trace'})
         finally:
             server.shutdown()
@@ -571,6 +593,8 @@ class ConversationTests(unittest.TestCase):
         agents, default = discover_agents(config, config_path, repository / 'models', repository / 'models')
         default = next(key for key, item in agents.items() if item['agent']['source'] == 'local:qwen3-0.6b')
         restore_agent(self.memory, agents, default)
+        from smpa_ros.conversation_web import update_generation
+        update_generation(self.memory, agents, {'do_sample': False, 'max_new_tokens': 4096})
         settings = agents[default]['agent']['generation']
         report = {'settings': settings, 'effective_do_sample': False,
                   'generation_defaults': backend.model.generation_config.to_dict(), 'turns': []}
@@ -629,11 +653,198 @@ class ConversationTests(unittest.TestCase):
                     replies.append(gui_answer)
                 self.assertNotEqual(replies[1], "I'm here to help! What can I do for you?")
                 self.assertGreater(len(set(replies)), 1)
+                # Seeded sampling uses the same loaded weights and restores CPU RNG state.
+                sampling = dict(max_new_tokens=64, do_sample=True, temperature=0.7, top_p=0.9,
+                                top_k=20, repetition_penalty=1.0, seed=42, enable_thinking=False)
+                history = [{'role': 'user', 'content': 'Say a short greeting.'}]
+                rng_before = torch.random.get_rng_state()
+                first = backend.generate_conversation(history, **sampling)
+                second = backend.generate_conversation(history, **sampling)
+                self.assertEqual(first['response'], second['response'])
+                self.assertTrue(torch.equal(rng_before, torch.random.get_rng_state()))
+                thought = backend.generate_conversation(
+                    [{'role': 'user', 'content': 'What is 1+1? Answer briefly.'}],
+                    max_new_tokens=1024, do_sample=False, enable_thinking=True, seed=42)
+                self.assertTrue(thought.get('thinking'))
+                self.assertTrue(thought['response'])
+                self.assertNotIn('</think>', thought['response'])
+                report['sampling'] = first
+                report['thinking_check'] = thought
+                log_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
         finally:
             server.shutdown()
             server.server_close()
             thread.join()
             print(f'Qwen reproduction debug report: {log_path}', flush=True)
+
+    def test_generation_controls_and_run_lifecycle(self):
+        import fcntl
+        agents, default, config, config_path = self.configured_agents()
+        agents[default]['available'] = True
+        local = Mock(side_effect=lambda prompt, **kwargs: {'response': 'Answer', 'effective_settings': kwargs})
+        agents[default]['generate'] = local
+        restore_agent(self.memory, agents, default)
+        server = make_server(self.memory, None, None, port=0, agents=agents,
+                             root=Path(self.temporary.name) / 'other-root')
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        base = f'http://127.0.0.1:{server.server_port}'
+        def post(route, data):
+            with urlopen(Request(base + route, data=json.dumps(data).encode(),
+                                 headers={'Content-Type': 'application/json'})) as response:
+                return json.load(response)
+        try:
+            original = self.memory.directory
+            original_id = self.memory.metadata['run_id']
+            state = post('/api/settings', {'overrides': {'temperature': 0.2, 'seed': 7,
+                         'enable_thinking': True, 'max_new_tokens': 64}})
+            self.assertEqual(state['generation']['values']['seed'], 7)
+            state = post('/api/message', {'message': 'Hello'})
+            self.assertEqual(local.call_args.kwargs['temperature'], 0.2)
+            self.assertEqual(local.call_args.kwargs['seed'], 7)
+            self.assertTrue(local.call_args.kwargs['enable_thinking'])
+            provenance = state['messages'][-1]['agent']
+            self.assertEqual(provenance['generation']['temperature'], 0.2)
+            self.assertEqual(provenance['generation_overrides']['seed'], 7)
+            self.assertIn('revision', provenance['model_configuration'])
+            post('/api/settings', {'overrides': {'temperature': 0.9, 'seed': 12}})
+            state = post('/api/message', {'message': 'Another question'})
+            self.assertEqual(state['messages'][1]['agent']['generation']['temperature'], 0.2)
+            self.assertEqual(state['messages'][3]['agent']['generation']['temperature'], 0.9)
+            self.assertEqual(len(local.call_args.args[0]), 3)
+            before = (original / 'conversation.md').read_bytes()
+            # Invalid values are rejected without inference or saved messages.
+            for values in ({'temperature': float('nan')}, {'seed': True}, {'max_new_tokens': 0},
+                           {'top_p': 2}, {'do_sample': 'false'}, {'temperature': 0, 'do_sample': True}):
+                with self.assertRaises(HTTPError) as raised:
+                    post('/api/settings', {'overrides': values})
+                self.assertEqual(raised.exception.code, 400)
+                raised.exception.close()
+            state = post('/api/clear', {})
+            self.assertEqual(state['messages'], [])
+            self.assertNotEqual(state['run_id'], original_id)
+            self.assertEqual(state['generation']['values']['seed'], 12)
+            self.assertEqual((original / 'conversation.md').read_bytes(), before)
+            api = next(k for k, item in agents.items() if item['agent']['source'] == 'api:openai')
+            state = post('/api/agent', {'agent_id': api})
+            self.assertIn('top_k', state['generation']['unsupported'])
+            with self.assertRaises(HTTPError) as raised:
+                post('/api/settings', {'overrides': {'top_k': 10}})
+            self.assertIn('Unsupported', json.load(raised.exception)['error'])
+            state = post('/api/agent', {'agent_id': default})
+            self.assertEqual(state['generation']['values']['seed'], 12)
+            state = post('/api/settings', {'overrides': {}})
+            self.assertEqual(state['generation']['values'], agents[default]['defaults'])
+            state = post('/api/new', {})
+            self.assertEqual(state['messages'], [])
+            self.assertEqual(state['generation']['overrides'], {})
+            state = post('/api/resume', {'run_id': original_id})
+            self.assertEqual(len(state['messages']), 4)
+            self.assertEqual(state['generation']['values']['seed'], 12)
+            self.assertEqual((original / 'conversation.md').read_bytes(), before)
+            with urlopen(base + '/api/conversation') as response:
+                self.assertEqual(json.load(response)['generation'], state['generation'])
+            with (original / 'conversation.md').open('rb') as competing:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(HTTPError) as raised:
+                post('/api/resume', {'run_id': '../outside'})
+            raised.exception.close()
+            self.assertEqual(server.memory.metadata['run_id'], original_id)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+            server.memory.finalize('completed')
+        resumed = open_conversation(None, resume=original)
+        restore_agent(resumed, agents, default)
+        self.assertEqual(resumed.metadata['generation_settings'][default]['overrides']['seed'], 12)
+        resumed.finalize('completed')
+
+    def test_transformers_generation_controls_and_unchanged_smpa(self):
+        from unittest.mock import MagicMock
+        from types import SimpleNamespace
+        from smpa_ros.backends.transformers import TransformersBackend
+        backend = TransformersBackend.__new__(TransformersBackend)
+        backend.enable_thinking = False
+        backend.torch = MagicMock()
+        backend.torch.cuda.device_count.return_value = 0
+        backend.model = MagicMock()
+        backend.model.config.model_type = 'qwen3'
+        backend.model.generation_config.to_dict.return_value = {'eos_token_id': 42, 'temperature': 1.0}
+        backend.model.device = SimpleNamespace(type='cpu')
+        backend.tokenizer = MagicMock()
+        backend.tokenizer.chat_template = 'Qwen template'
+        backend.tokenizer.return_value.to.return_value['input_ids'].shape = (1, 5)
+        backend.tokenizer.decode.return_value = 'Actual trace</think>\nFinal answer'
+        result = backend.generate_conversation([{'role': 'user', 'content': 'Hello'}],
+            max_new_tokens=64, enable_thinking=True, do_sample=True, temperature=0.3,
+            top_p=0.8, top_k=12, repetition_penalty=1.2, seed=123)
+        self.assertEqual(result['thinking'], 'Actual trace')
+        self.assertEqual(result['response'], 'Final answer')
+        backend.tokenizer.apply_chat_template.assert_called_with(
+            [{'role': 'user', 'content': 'Hello'}], tokenize=False, add_generation_prompt=True, enable_thinking=True)
+        options = backend.model.generate.call_args.kwargs
+        for name, value in dict(temperature=0.3, top_p=0.8, top_k=12,
+                                repetition_penalty=1.2, do_sample=True).items():
+            self.assertEqual(options[name], value)
+        backend.torch.manual_seed.assert_called_with(123)
+        self.assertEqual(result['effective_settings']['seed'], 123)
+        self.assertEqual(result['effective_settings']['eos_token_id'], 42)
+        backend.tokenizer.decode.return_value = 'Plain answer'
+        result = backend.generate_conversation('Question', do_sample=False, temperature=0.8,
+                                               top_p=0.9, top_k=20, enable_thinking=False, seed=9)
+        options = backend.model.generate.call_args.kwargs
+        self.assertFalse(options['do_sample'])
+        for key in ('temperature', 'top_p', 'top_k'):
+            self.assertNotIn(key, options)
+            self.assertIn(key, result['effective_settings']['inactive'])
+        backend.generate('SMPA prompt')
+        self.assertEqual(backend.model.generate.call_args.kwargs, {'max_new_tokens': 128, 'do_sample': False})
+        self.assertFalse(backend.tokenizer.apply_chat_template.call_args.kwargs['enable_thinking'])
+        backend.model.config.model_type = 'phi3'
+        with self.assertRaisesRegex(ValueError, 'enable_thinking'):
+            backend.generate_conversation('Question', enable_thinking=True)
+        with self.assertRaisesRegex(ValueError, 'Unsupported'):
+            backend.generate_conversation('Question', unknown=4)
+
+    def test_api_controls_are_forwarded_and_unsupported_controls_rejected(self):
+        from types import SimpleNamespace as N
+        from smpa_ros.backends.api import APIBackend
+        backend = APIBackend.__new__(APIBackend)
+        backend.model_id = 'configured-model'
+        backend._client = Mock(api_key='test-secret')
+        backend._client.chat.completions.create.return_value = N(
+            model='actual-model', system_fingerprint='backend-version', usage=None,
+            choices=[N(finish_reason='stop', message=N(content='Answer', refusal=None))])
+        result = backend.generate_conversation('Question', max_new_tokens=64, temperature=0.3, top_p=0.8, seed=42)
+        request = backend._client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request['seed'], 42)
+        self.assertEqual(request['temperature'], 0.3)
+        self.assertEqual(request['top_p'], 0.8)
+        self.assertEqual(result['system_fingerprint'], 'backend-version')
+        self.assertEqual(result['effective_settings']['seed'], 42)
+        for values in ({'top_k': 20}, {'do_sample': False}, {'enable_thinking': True}, {'repetition_penalty': 1.2}):
+            with self.assertRaisesRegex(ValueError, 'Unsupported'):
+                backend.generate_conversation('Question', **values)
+        backend.generate('SMPA prompt')
+        request = backend._client.chat.completions.create.call_args.kwargs
+        self.assertEqual(request['temperature'], 0)
+        self.assertNotIn('seed', request)
+        self.assertNotIn('top_p', request)
+
+    def test_generation_edits_reuse_lazy_model_and_do_not_extend_robot_controls(self):
+        from smpa_ros.model import load_backend
+        agents, default, config, config_path = self.configured_agents()
+        repository = Path(__file__).resolve().parents[1]
+        config['modeling'] = {'model': 'qwen3-0.6b', 'backend': 'transformers'}
+        with patch('smpa_ros.backends.transformers.TransformersBackend') as local:
+            generate, _ = load_backend(config, config_path, repository / 'models', repository / 'models', conversation=True)
+            generate('First', max_new_tokens=32, temperature=0.2, seed=1)
+            generate('Second', max_new_tokens=64, temperature=0.8, seed=2)
+            local.assert_called_once()
+            self.assertEqual(local.return_value.generate_conversation.call_args.kwargs['temperature'], 0.8)
+            robot, _ = load_backend(config, config_path, repository / 'models', repository / 'models')
+            with self.assertRaisesRegex(ValueError, 'only in conversations'):
+                robot('Robot', max_new_tokens=32, temperature=0.5)
 
     def test_resume_rejects_robot_run(self):
         from memory import MemoryManager

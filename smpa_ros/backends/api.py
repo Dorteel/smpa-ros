@@ -59,13 +59,17 @@ class APIBackend:
         self._client = OpenAI(api_key=key, base_url=base_url, timeout=timeout, max_retries=0,
                               default_headers={'Accept-Encoding': 'gzip, deflate'})
 
-    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None, *, conversation=False, messages=None):
+    def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None, *, conversation=False, messages=None, generation=None):
         from jsonschema.validators import validator_for
         from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
         if type(max_new_tokens) is not int or max_new_tokens <= 0:
             raise ValueError('max_new_tokens must be a positive integer')
         options = {}
+        if generation is not None:
+            from smpa_ros.conversation import validate_generation
+            options.update(validate_generation(generation, {'temperature', 'top_p', 'seed'}))
+        options.setdefault('temperature', 0)
         if reasoning_effort is not None:
             if reasoning_effort not in ('none', 'minimal', 'low', 'medium', 'high', 'xhigh'):
                 raise ValueError('Unsupported reasoning_effort; use none, minimal, low, medium, high, or xhigh.')
@@ -83,7 +87,7 @@ class APIBackend:
         try:
             response = self._client.chat.completions.create(
                 model=self.model_id, messages=messages if messages is not None else [{'role': 'user', 'content': content}],
-                max_completion_tokens=max_new_tokens, temperature=0, **options,
+                max_completion_tokens=max_new_tokens, **options,
             )
         except APITimeoutError:
             raise RuntimeError('API request timed out; check connectivity or increase config.yaml timeout.') from None
@@ -97,7 +101,8 @@ class APIBackend:
                 message = 'API rate limit or quota exceeded; check provider limits/billing before retrying.'
             else:
                 message = (f'API request rejected (HTTP {error.status_code}); check the model and endpoint '
-                           'support for Chat Completions, images, token options, reasoning_effort, and strict json_schema outputs.')
+                           'support for Chat Completions, generation settings (temperature, top_p, seed), images, '
+                           'token options, reasoning_effort, and strict json_schema outputs.')
             raise RuntimeError(message) from None
         except APIError:
             raise RuntimeError('API SDK request failed; check endpoint compatibility. No unrestricted fallback was attempted.') from None
@@ -160,7 +165,8 @@ class APIBackend:
                 raise RuntimeError('API returned invalid JSON or a response violating the requested schema; '
                                    'strict server-side outputs are required. No unrestricted fallback was attempted.') from None
         if conversation:
-            result = {'response': text}
+            result = {'response': text, 'effective_settings': dict(options, max_new_tokens=max_new_tokens),
+                      'system_fingerprint': getattr(response, 'system_fingerprint', None)}
             reported_model = getattr(response, 'model', None)
             if isinstance(reported_model, str) and reported_model:
                 result['model_id'] = reported_model
@@ -177,10 +183,10 @@ class APIBackend:
         return text
 
     def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128,
-                              reasoning_effort: str | None = None) -> dict:
+                              reasoning_effort: str | None = None, **settings) -> dict:
         """Return only reasoning explicitly supplied by the provider, without logging it."""
         return self._complete(prompt, max_new_tokens, reasoning_effort=reasoning_effort, conversation=True,
-                              messages=prompt if isinstance(prompt, list) else None)
+                              messages=prompt if isinstance(prompt, list) else None, generation=settings)
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
                  reasoning_effort: str | None = None) -> str:

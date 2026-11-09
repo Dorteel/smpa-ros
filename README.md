@@ -1102,15 +1102,16 @@ Entries distinguish Local/Transformers (or Local/Ollama) from API providers.
 Selecting an agent is saved immediately without loading its model or discarding
 history; its backend initializes on the first message. API inference requires
 explicit selection for a new run. Missing local weights or credentials produce
-an advisory in the GUI and a failed message if inference cannot run; there is
+an advisory in the GUI; missing weights prevent selection, and backend failures are recorded; there is
 no automatic cloud fallback and no automatic model download.
 
 An agent is an inference configuration: provider, backend, model, generation
 settings, local path or API endpoint, and model-specific options. Its stable ID
-includes a configuration hash. Generation limits reuse the existing `modeling`
-and `stage_settings.model` settings; API reasoning controls are omitted for
-local models. Backend sampling defaults remain unchanged. The selected snapshot
-is stored as `active_agent` in run metadata. Each assistant response records its
+includes a configuration hash. The base agent snapshot remains stable while
+interactive overrides are stored separately in `generation_settings`. The GUI
+uses its own generation defaults, described below; SMPA Model/Plan defaults are
+unchanged. API reasoning controls are omitted for local models. The selected
+base snapshot is stored as `active_agent` in run metadata. Each assistant response records its
 agent snapshot in both `conversation.md` (a length-delimited HTML comment) and
 its `act.json`; the GUI displays provider/model attribution below the reply.
 Credentials are never included in these agent snapshots.
@@ -1127,8 +1128,9 @@ panel is an empty belief graph; there are no generated beliefs or placeholder
 entities. Its frontend receives an empty `{nodes: [], edges: []}` graph object
 for a future Model stage. No graph library or frontend build is needed yet.
 
-Each server process owns one conversation. Refreshing the page reloads its
-history. The server prints the run directory under `memory/runs/`; it contains
+Each server process owns one active conversation at a time. New, Clear context,
+and Resume switch the active run without deleting previous transcripts.
+Refreshing the page reloads its history and settings. The server prints the run directory under `memory/runs/`; it contains
 `goal.md`, `metadata.yaml`, `conversation.md`, and the standard MemoryManager
 subdirectories. `state/cycle_*/sense.json` and `act.json` record each exchange.
 The transcript is append-only Markdown with hidden byte-length comments that
@@ -1427,3 +1429,112 @@ weights plus a 3 GiB overhead allowance require approximately 33.5 GiB RAM,
 versus 22.2 GiB available at verification time. No quantization or alternate
 backend was introduced. Download success is distinct from inference support.
 The final `./test.sh --unit` run passed: 163 passed, 2 skipped, 2 deselected.
+
+
+### Interactive generation settings and conversation controls
+
+Open **Generation settings** in the conversation header. Controls save when
+changed and are disabled while a request is running. The active settings remain
+visible with the panel collapsed. Each control distinguishes a model default,
+a conversation default, a pipeline configuration value, or an explicit override;
+**Use default** removes one override and **Reset settings** removes all overrides
+for the selected agent. Switching agents restores that agent's settings within
+the current run, without transferring unsupported overrides to another backend.
+
+The conversational token budget starts at **512** and seed at **42**. Local
+`generation_config.json` values take precedence for sampling, temperature, top-p,
+top-k and repetition penalty; otherwise the starting values are sampling enabled,
+0.7, 0.9, 20 and 1.0. Qwen3 thinking defaults to the registry's setting. These
+GUI defaults do not change the physical SMPA experiment or its inference defaults.
+Older runs without interactive-settings metadata remain readable and begin with
+these GUI defaults; previous response provenance is never rewritten.
+
+- Transformers supports all listed decoding controls. **Enable thinking** is
+  supported only for Qwen3 and is passed as `enable_thinking` to the tokenizer's
+  native chat template, without inserting a synthetic instruction into messages.
+- With Sampling off, temperature, top-p and top-k are disabled and omitted from
+  effective decoding settings. Their configured values are retained for use if
+  sampling is enabled again. Seeded local calls restore PyTorch RNG state after
+  generation; changing settings reuses the same lazily loaded model instance.
+- The API interface forwards the Chat Completions fields `temperature`, `top_p`
+  and `seed`, plus the token limit and existing configured reasoning effort.
+  The endpoint must support these fields for the selected model; rejection is
+  surfaced without retrying with different settings. API sampling toggles,
+  top-k, repetition penalty and generic thinking toggles are disabled because
+  this interface cannot represent them faithfully. Provider-internal defaults
+  are opaque: recorded API settings describe the request, not unreported internals.
+  See the [official Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+- The existing Ollama adapter exposes only the token budget interactively. Its
+  existing temperature 0 and seed 0 are recorded in each response's settings;
+  other controls are disabled with an explanation.
+
+Server-side validation rejects unknown/unsupported keys, booleans used as
+numbers, nonfinite values, and values outside these bounds: token budget
+1–32768, temperature 0–2 (strictly positive when sampling), seed 0–4294967295,
+top-p greater than 0 through 1, top-k 0–100000, and repetition penalty greater
+than 0 through 10. Seeds improve repeatability but do not guarantee identical
+outputs across hardware, software versions, or API providers.
+
+**New conversation** starts an empty run with the default agent and default
+settings. **Clear context** starts an empty run with the current agent and
+settings, after explaining that the previous transcript will be kept.
+**Resume conversation** restores a selected run, its agent, and its per-agent
+settings. The selector lists conversational runs under `--world-model-root`,
+plus runs explicitly opened during this server session. Resuming requires the
+original pipeline configuration and an exclusive transcript lock. Robot runs,
+unknown run IDs, incompatible configurations and already-locked runs are rejected.
+Neither New nor Clear truncates, deletes, or replaces an existing transcript.
+
+`metadata.yaml` stores defaults, their origins and explicit overrides under
+`generation_settings`, indexed by the base agent ID. Each assistant's existing
+length-delimited provenance comment and Act JSON record contain its effective
+`generation` settings, defaults, origins, overrides, provider/model, and available
+`model_revision` (registry pin or matching completed download report). Local
+settings include the loaded generation configuration, including EOS controls;
+inactive sampling parameters are identified separately. API-reported model IDs
+and system fingerprints are preserved when returned. Exposed reasoning stays
+associated with the same response and settings. Legacy transcripts still load.
+
+Install/update in the existing environment, then launch on localhost:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/python -m pip install --no-deps --no-build-isolation .
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+# Open http://127.0.0.1:8000
+```
+
+No new dependencies are required. A fresh robotics/environment installation
+still uses `./install.sh` with its existing prerequisites. Local checkpoints
+must be provisioned separately with the documented downloader; the GUI never
+downloads weights automatically.
+
+```bash
+# Standard build and unit checks:
+./test.sh --unit
+# Also run Firefox UI checks and actual offline Qwen3-0.6B integration:
+SMPA_BROWSER_TEST=1 SMPA_QWEN_TEST=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ./test.sh --unit
+```
+
+The optional checks require Firefox and the existing Qwen3-0.6B checkpoint.
+They verify collapsed thinking/settings panels, disabled controls during requests,
+unsupported/greedy controls, the four-turn repetition regression through HTTP
+versus direct inference, repeatable seeded sampling on the same machine, and
+separate model-generated thinking/final text. No live cloud inference is used;
+API parameter forwarding is tested with the SDK mocked.
+
+Verification for this change: the standard unit run passed 167 tests with the
+two optional checks skipped (2 deselected). The final conversation integration
+run passed all 26 tests with Firefox and real offline Qwen enabled. A full run
+with both optional checks enabled also passed all 169 selected tests.
+
+When using the installed package outside the checkout from a ROS-sourced shell,
+an older ROS installation on `PYTHONPATH` can shadow the virtual environment.
+For the standalone GUI, clear that override only for this process:
+
+```bash
+env -u PYTHONPATH .venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+```
+
+The installed HTML and module entry point were verified outside the checkout
+with this override removed; the ROS environment and experiment launch remain unchanged.

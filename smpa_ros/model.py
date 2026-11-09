@@ -23,9 +23,11 @@ def load_backend(config, config_path, model_root, registry, *, conversation=Fals
             raise ValueError('modeling.backend must match the selected registry backend or be api')
     modeling_backend = None
 
-    def model(prompt, *, max_new_tokens, schema=None, reasoning_effort=None):
+    def model(prompt, *, max_new_tokens, schema=None, reasoning_effort=None, **conversation_options):
         nonlocal modeling_backend
-        generation_options = {}
+        if conversation_options and (not conversation or schema is not None):
+            raise ValueError('Interactive generation settings are supported only in conversations')
+        generation_options = dict(conversation_options)
         if reasoning_effort is not None:
             if selected['backend'] != 'api':
                 raise ValueError('reasoning_effort is supported only for API inference')
