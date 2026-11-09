@@ -38,6 +38,33 @@ class MemoryManager:
         self.metadata = metadata
         self.write_metadata()
 
+    @classmethod
+    def resume_conversation(cls, directory):
+        """Restore a conversational run without creating or replacing its artifacts.
+
+        Robot runs are deliberately excluded: resuming physical experiments would
+        require a separate decision about their execution semantics.
+        """
+        import json
+        path, _ = cls.assigned_run(str(Path(directory).resolve()))
+        metadata = yaml.safe_load((path / 'metadata.yaml').read_text())
+        if metadata.get('configuration', {}).get('kind') != 'conversation':
+            raise ValueError('Only conversational runs can be resumed here')
+        instance = cls.__new__(cls)
+        instance.directory, instance.metadata = path, metadata
+        cycles = sorted((path / 'state').glob('cycle_*'))
+        instance.cycle = max((int(item.name.split('_')[1]) for item in cycles), default=0)
+        instance.in_cycle = False
+        instance.counts = {}
+        records = [(json.loads(record.read_text()), str(record.relative_to(path)))
+                   for cycle in cycles for record in cycle.glob('*.json')]
+        latest = max(records, key=lambda item: item[0].get('sequence', 0), default=({}, None))
+        instance.sequence = latest[0].get('sequence', 0)
+        instance.previous_record = latest[1]
+        instance.metadata.update(status='running', completed_at=None)
+        instance.write_metadata()
+        return instance
+
     @staticmethod
     def assigned_run(directory, run_id=''):
         if not directory:

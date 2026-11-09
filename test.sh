@@ -8,10 +8,12 @@ case "$mode" in
     --all) selector='integration or not integration' ;;
     *) echo 'Usage: ./test.sh [--unit|--integration|--all]' >&2; exit 2 ;;
 esac
-colcon_command=(colcon)
-if [[ "$mode" != --unit ]]; then
-    colcon_command=("$PWD/.venv/bin/python" "$(command -v colcon)")
+# Use the prepared environment for API imports in unit tests as well.
+test_python=$(command -v python3)
+if [[ -x "$PWD/.venv/bin/python" || "$mode" != --unit ]]; then
+    test_python="$PWD/.venv/bin/python"
 fi
+colcon_command=("$test_python" "$(command -v colcon)")
 
 ros_setup="/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 if [[ ! -f "$ros_setup" ]]; then
@@ -43,7 +45,7 @@ fi
 # Run outside the source tree to verify that prompts/configs were installed.
 export SMPA_TEST_PIPELINE_CONFIG="$PWD/config.yaml"
 cd "$work_dir"
-python3 - <<'PY'
+"$test_python" - <<'PY'
 import os
 from importlib.resources import files
 from importlib.metadata import distribution
@@ -55,6 +57,9 @@ from memory import MemoryManager
 import yaml
 
 entries = {entry.name: entry for entry in distribution('smpa-ros').entry_points}
+assert entries['conversation'].value == 'smpa_ros.conversation_web:main'
+assert callable(entries['conversation'].load())
+assert b'Belief graph' in files('smpa_ros').joinpath('conversation.html').read_bytes()
 assert entries['smpa'].value == 'smpa_ros.smpa:main'
 assert callable(entries['smpa'].load())
 import inspect

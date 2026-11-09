@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SMPA · Conversation</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#213532;background:#f4f6f3}*{box-sizing:border-box}body{margin:0}header{height:76px;padding:18px 28px;border-bottom:1px solid #d7dfd9;display:flex;align-items:center;gap:18px}header strong{letter-spacing:.12em}header span{color:#64756d;font-size:14px}main{display:grid;grid-template-columns:1fr 1fr;height:calc(100dvh - 76px)}section{min-width:0;padding:24px;display:flex;flex-direction:column;min-height:0}section+section{border-left:1px solid #d7dfd9}h1,h2{font-size:18px;font-weight:600;margin:0 0 18px}#history{overflow-y:auto;flex:1;min-height:0;padding-right:8px}.message{padding:16px 18px;margin:0 0 16px;border:1px solid #dbe3dd;border-radius:12px;background:white;white-space:pre-wrap;overflow-wrap:anywhere}.message.user{background:#e6eee7;margin-left:32px}.role{display:block;text-transform:uppercase;font-size:11px;letter-spacing:.1em;color:#61766a;margin-bottom:8px}form{display:flex;gap:10px;margin-top:12px}textarea{resize:vertical;min-height:64px;max-height:180px;flex:1;min-width:0;border:1px solid #bbcabe;border-radius:10px;padding:12px;font:inherit}button{background:#285c48;color:white;border:0;border-radius:10px;padding:12px 22px;font:inherit;cursor:pointer}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:3px solid #87b899;outline-offset:3px}#status{min-height:24px;font-size:14px;margin:8px 0 0;color:#65766d}#status.error{color:#a03333}#graph{flex:1;min-height:200px;border:1px solid #dbe3dd;border-radius:12px;background:#fafbf9;display:grid;place-content:center;text-align:center;color:#6c7d72}#graph p{font-size:14px;margin:8px 16px}small{color:#718076;font-size:12px}#empty{color:#718076;line-height:1.6;margin-top:32px}@media(max-width:700px){main{height:auto;grid-template-columns:1fr}section:first-child{height:70dvh}section+section{border-left:0;border-top:1px solid #d7dfd9;min-height:280px}header{padding:18px}}
+</style>
+<header><strong>SMPA</strong><span>Conversational workspace</span></header>
+<main>
+<section aria-labelledby="conversation-title">
+<h1 id="conversation-title">Conversation</h1>
+<div id="history" role="log" aria-live="polite"><p id="empty">Start a conversation.<br>Your exchanges are saved in this run’s memory.</p></div>
+<form id="composer"><textarea id="message" aria-label="Your message" placeholder="Write a message…" required></textarea><button id="send">Send</button></form>
+<p id="status" role="status"></p><small>Enter to send · Shift + Enter for a new line</small>
+</section>
+<section aria-labelledby="graph-title"><h2 id="graph-title">Belief graph</h2><div id="graph" aria-label="Empty belief graph"><div>No beliefs recorded<p>Belief modelling is not enabled.</p></div></div></section>
+</main>
+<script>
+const history=document.querySelector('#history'), input=document.querySelector('#message'), send=document.querySelector('#send'), status=document.querySelector('#status');
+let busy=false;
+// Graph data has a stable receiving point; no belief extraction or synthetic nodes.
+function receiveGraph(graph){document.querySelector('#graph').graphData=graph;}
+function render(data){history.replaceChildren();for(const message of data.messages){const box=document.createElement('div');box.className='message '+message.role;const role=document.createElement('strong');role.className='role';role.textContent=message.role;box.append(role,document.createTextNode(message.content));history.append(box);}history.scrollTop=history.scrollHeight;receiveGraph(data.graph);}
+async function refresh(){const response=await fetch('/api/conversation');if(!response.ok)throw Error('Could not load conversation.');render(await response.json());}
+document.querySelector('#composer').addEventListener('submit',async event=>{event.preventDefault();if(busy||!input.value.trim())return;const message=input.value;busy=true;send.disabled=true;input.disabled=true;status.className='';status.textContent='Thinking…';try{const response=await fetch('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message})});const data=await response.json();if(data.messages){render(data);input.value='';}if(!response.ok)throw Error(data.error||'Request failed.');status.textContent='Saved';}catch(error){status.className='error';status.textContent=error.message;try{await refresh();}catch{status.textContent+=' Reconnect and reload to check saved messages before sending again.';}}finally{busy=false;send.disabled=false;input.disabled=false;input.focus();}});
+input.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();document.querySelector('#composer').requestSubmit();}});
+refresh().catch(error=>{status.className='error';status.textContent=error.message;});
+</script>
+</html>

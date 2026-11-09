@@ -1061,3 +1061,76 @@ sessions, linked transcripts, incomplete/canceled observations, and storage erro
 reporting. The prerecorded CPU integration test also decodes the saved WAV and
 compares it with input samples while checking the real recognized text. No audio
 hardware is required for these tests.
+
+## Local conversational GUI
+
+The conversational entry point runs an epistemic **Sense → Act** loop: receive
+and save a user message, then generate and save a response. It reuses the text
+backend selected by `modeling` in `config.yaml` and its generation settings.
+It does not initialize ROS, call Model/Plan, or execute robot actions. No camera,
+speech models, Webots, or action servers are required to run the GUI.
+
+From the checkout, reuse the existing environment (no new dependencies):
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+# Install/update the Python package and its packaged HTML in the existing environment:
+.venv/bin/python -m pip install --no-deps .
+# Launch directly; sourcing ROS is unnecessary for the conversational application:
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+```
+
+For a fresh full robotics installation, `./install.sh` remains the existing setup
+command with its documented prerequisites. The Python-only installation command
+above assumes that environment and the selected inference dependencies already
+exist; it does not provision local weights. API inference requires the configured
+credential in `.env` or the environment and sends conversation history to that
+provider. No live API request is made until a message is sent.
+
+Open **http://127.0.0.1:8000** in a browser, or on Ubuntu:
+
+```bash
+xdg-open http://127.0.0.1:8000
+```
+
+The left panel supports Enter-to-send and Shift+Enter for newlines. The right
+panel is an empty belief graph; there are no generated beliefs or placeholder
+entities. Its frontend receives an empty `{nodes: [], edges: []}` graph object
+for a future Model stage. No graph library or frontend build is needed yet.
+
+Each server process owns one conversation. Refreshing the page reloads its
+history. The server prints the run directory under `memory/runs/`; it contains
+`goal.md`, `metadata.yaml`, `conversation.md`, and the standard MemoryManager
+subdirectories. `state/cycle_*/sense.json` and `act.json` record each exchange.
+The transcript is append-only Markdown with hidden byte-length comments that
+allow exact reloading even when messages contain Markdown role headings.
+Incomplete or malformed transcripts are rejected and preserved unchanged.
+
+Stop with Ctrl+C. To continue a saved conversation, use its printed directory:
+
+```bash
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml" \
+  --resume "$PWD/memory/runs/REPLACE_WITH_RUN_DIRECTORY"
+```
+
+Resuming requires the original configuration and rejects robot runs. An exclusive
+file lock prevents two application processes from writing the same transcript.
+The server listens only on `127.0.0.1`; use `--port 8001` if necessary. Exchanges
+are serialized. All saved messages are included in the inference prompt; long
+conversations remain subject to the selected model's context limit, with no
+silent truncation. Failed inference keeps the user's message and prior history,
+records failure, and allows the next exchange. Shutdown finalizes run metadata;
+process exit releases inference resources.
+
+Run the mocked conversation tests without ROS, API access, or models:
+
+```bash
+.venv/bin/python -m unittest discover -s test -p test_conversation.py -v
+```
+
+Run the existing build/unit suite, which also discovers these tests and verifies
+the installed conversation entry point and HTML:
+
+```bash
+./test.sh --unit
+```

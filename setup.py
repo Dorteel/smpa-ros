@@ -8,7 +8,7 @@ setup(
     version='0.0.1',
     py_modules=['runner', 'memory'],
     packages=find_packages(include=['smpa_ros', 'smpa_ros.*', 'speech', 'speech.*']),
-    package_data={'smpa_ros': ['prompts/*/*.txt']},
+    package_data={'smpa_ros': ['prompts/*/*.txt', 'conversation.html']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'config.yaml']),
@@ -25,6 +25,7 @@ setup(
     tests_require=['pytest'],
     entry_points={'console_scripts': [
         'sense = smpa_ros.sense:main',
+        'conversation = smpa_ros.conversation_web:main',
         'smpa = smpa_ros.smpa:main',
         'listen = speech.actions:listen_main',
         'talk = speech.actions:talk_main',
