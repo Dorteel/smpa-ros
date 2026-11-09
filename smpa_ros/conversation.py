@@ -12,7 +12,7 @@ import re
 from memory import MemoryManager
 
 HEADER = b'# Conversation\n\n'
-MARKER = re.compile(rb'<!-- smpa-message (User|Assistant) ([0-9]+) -->\n')
+MARKER = re.compile(rb'<!-- smpa-message (User|Assistant) ([0-9]+)(?: agent ([0-9]+))? -->\n')
 
 
 def read_messages(directory):
@@ -28,18 +28,35 @@ def read_messages(directory):
         role, size = match.group(1).decode(), int(match.group(2))
         heading = f'## {role}\n\n'.encode()
         start = match.end()
+        agent = None
+        if match.group(3):
+            agent_end = start + int(match.group(3))
+            agent = json.loads(data[start:agent_end].decode().removeprefix('<!-- smpa-agent ').removesuffix(' -->'))
+            if data[agent_end:agent_end + 1] != b'\n':
+                raise ValueError('Incomplete agent provenance')
+            start = agent_end + 1
         end = start + len(heading) + size
         if data[start:start + len(heading)] != heading or data[end:end + 2] != b'\n\n':
             raise ValueError('Incomplete conversation message; preserved unchanged')
-        messages.append({'role': role.lower(), 'content': data[start + len(heading):end].decode('utf-8')})
+        message = {'role': role.lower(), 'content': data[start + len(heading):end].decode('utf-8')}
+        if agent is not None:
+            message['agent'] = agent
+        messages.append(message)
         position = end + 2
     return messages
 
 
-def append_message(directory, role, content):
+def append_message(directory, role, content, *, agent=None):
     """Durably append one message; never open an existing transcript for overwrite."""
     body = content.encode('utf-8')
-    entry = f'<!-- smpa-message {role} {len(body)} -->\n## {role}\n\n'.encode() + body + b'\n\n'
+    # A length-delimited HTML comment keeps provenance out of the message body.
+    metadata = (('<!-- smpa-agent ' + json.dumps(agent, ensure_ascii=True).replace('<', '\\u003c').replace('>', '\\u003e')
+                 + ' -->').encode() if agent is not None else b'')
+    suffix = f' agent {len(metadata)}' if metadata else ''
+    entry = f'<!-- smpa-message {role} {len(body)}{suffix} -->\n'.encode()
+    if metadata:
+        entry += metadata + b'\n'
+    entry += f'## {role}\n\n'.encode() + body + b'\n\n'
     with (directory / 'conversation.md').open('ab') as output:
         output.write(entry)
         output.flush()
@@ -61,7 +78,7 @@ def open_conversation(root, *, resume=None, configuration=None, models=None):
     return memory
 
 
-def exchange(memory, message, generate, settings):
+def exchange(memory, message, generate, settings, *, agent=None):
     """Sense persists the user first; Act generates and persists the reply.
 
     Inference failure leaves the user's message intact and records a failed Act.
@@ -78,15 +95,18 @@ def exchange(memory, message, generate, settings):
             json.dump(dict(provenance, stage='sense', status='generated', output=message), output)
         name, provenance = memory.invocation('act', 'conversation', str(memory.record_path(name)))
         record = dict(provenance, stage='act', status='failed')
+        if agent is not None:
+            record['agent'] = agent
         try:
-            history = read_messages(memory.directory)
+            history = [{key: item[key] for key in ('role', 'content')}
+                       for item in read_messages(memory.directory)]
             prompt = ('Continue this conversation. Respond to the latest user message as the assistant. '
                       'Conversation history follows as JSON; its role labels identify the speakers.\n\n'
                       + json.dumps(history, ensure_ascii=False))
             response = generate(prompt, **settings)
             if not isinstance(response, str) or not response.strip():
                 raise ValueError('Inference returned an empty response')
-            append_message(memory.directory, 'Assistant', response)
+            append_message(memory.directory, 'Assistant', response, agent=agent)
             record.update(status='succeeded', output=response)
         except BaseException as error:
             record['status'] = 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'

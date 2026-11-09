@@ -1065,8 +1065,11 @@ hardware is required for these tests.
 ## Local conversational GUI
 
 The conversational entry point runs an epistemic **Sense → Act** loop: receive
-and save a user message, then generate and save a response. It reuses the text
-backend selected by `modeling` in `config.yaml` and its generation settings.
+and save a user message, then generate and save a response. New conversations
+default to **Qwen/Qwen3-0.6B**, using the existing local Transformers backend and
+registry entry `qwen3-0.6b`. This GUI default is independent of the robot pipeline
+in `config.yaml`, which is unchanged. No API credentials or internet connection
+are required for local inference once the weights and dependencies are installed.
 It does not initialize ROS, call Model/Plan, or execute robot actions. No camera,
 speech models, Webots, or action servers are required to run the GUI.
 
@@ -1092,6 +1095,32 @@ Open **http://127.0.0.1:8000** in a browser, or on Ubuntu:
 ```bash
 xdg-open http://127.0.0.1:8000
 ```
+
+The conversation header has an **Active agent** selector, populated from the
+existing text-model registry and API provider sections in `config.yaml`.
+Entries distinguish Local/Transformers (or Local/Ollama) from API providers.
+Selecting an agent is saved immediately without loading its model or discarding
+history; its backend initializes on the first message. API inference requires
+explicit selection for a new run. Missing local weights or credentials produce
+an advisory in the GUI and a failed message if inference cannot run; there is
+no automatic cloud fallback and no automatic model download.
+
+An agent is an inference configuration: provider, backend, model, generation
+settings, local path or API endpoint, and model-specific options. Its stable ID
+includes a configuration hash. Generation limits reuse the existing `modeling`
+and `stage_settings.model` settings; API reasoning controls are omitted for
+local models. Backend sampling defaults remain unchanged. The selected snapshot
+is stored as `active_agent` in run metadata. Each assistant response records its
+agent snapshot in both `conversation.md` (a length-delimited HTML comment) and
+its `act.json`; the GUI displays provider/model attribution below the reply.
+Credentials are never included in these agent snapshots.
+
+Resuming restores the saved selection, including an explicitly selected API
+agent. Older runs without `active_agent` restore their recorded `models.text`
+selection when available; old responses are marked as lacking per-response
+attribution rather than retroactively assigning one. Changes to an existing
+agent's configuration require the original settings to resume reproducibly.
+Restart after editing configuration; changes during inference are rejected.
 
 The left panel supports Enter-to-send and Shift+Enter for newlines. The right
 panel is an empty belief graph; there are no generated beliefs or placeholder
@@ -1134,3 +1163,28 @@ the installed conversation entry point and HTML:
 ```bash
 ./test.sh --unit
 ```
+
+### Conversational local-model requirements
+
+The supported Qwen3-0.6B checkpoint is already present in
+`models/llm/qwen3_0.6b` in this checkout (approximately 1.5 GiB on disk).
+The existing Transformers text backend runs on CPU without requiring CUDA.
+An offline smoke check with a short greeting and a 16-token output limit used
+about **4.94 GiB peak process RSS**. Allow **6–8 GiB available RAM** as a starting
+point; dependency loading, longer histories, KV cache, and other loaded models
+can increase memory use. This is a measured short-run result, not a hard bound.
+No GPU memory is required by this CPU backend.
+
+Reuse the existing `.venv` and weights. If the checkpoint is missing, download
+it explicitly using the repository's existing downloader (this provisioning
+step requires internet, unlike subsequent local inference):
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/python scripts/download_models.py --model Qwen/Qwen3-0.6B
+```
+
+The downloader retains its 5 GiB free-disk reserve. It is never invoked by the
+GUI. The full environment installation remains `./install.sh`; updating only
+the GUI in an existing environment uses the `pip install --no-deps .` command
+above. No new runtime dependencies were introduced for agent selection.
