@@ -23,7 +23,7 @@ from smpa_ros.model import load_backend, validate_settings
 def discover_agents(config, config_path, model_root, registry):
     """Derive inference configurations from existing providers and text models.
 
-    The GUI defaults to the repository's lightweight Qwen entry independently of
+    The GUI defaults to the repository's Qwen3-4B entry independently of
     the robot pipeline. API-only reasoning controls do not apply to local agents.
     No model is loaded, downloaded, or contacted during discovery.
     """
@@ -63,11 +63,22 @@ def discover_agents(config, config_path, model_root, registry):
         # Identity covers configuration, not only the displayed model name.
         agent['id'] = source + ':' + hashlib.sha256(json.dumps(agent, sort_keys=True).encode()).hexdigest()[:16]
         label = 'API' if selected['backend'] == 'api' else 'Local'
-        agent['label'] = f"{label} · {agent['provider']} · {agent['model_id']}"
+        agent['label'] = f"{label} · {source.split(':', 1)[1]} · {agent['provider']} · {agent['model_id']}"
+        available = True
         availability = 'Loaded on first message; availability not yet verified.'
         if selected['backend'] == 'transformers':
             path = Path(agent['model_path'])
-            if not (path / 'config.json').is_file() or not any(path.glob('*.safetensors')):
+            weights = list(path.glob('*.safetensors'))
+            index = path / 'model.safetensors.index.json'
+            if index.is_file():
+                try:
+                    weights = [path / name for name in set(json.loads(index.read_text())['weight_map'].values())]
+                except (ValueError, KeyError, TypeError):
+                    weights = []
+            available = ((path / 'config.json').is_file()
+                         and any((path / name).is_file() for name in ('tokenizer.json', 'tokenizer.model'))
+                         and bool(weights) and all(file.is_file() and file.stat().st_size > 0 for file in weights))
+            if not available:
                 availability = 'Local weights missing. Install the selected model before sending; no cloud fallback.'
         elif selected['backend'] == 'api':
             from dotenv import dotenv_values
@@ -84,11 +95,11 @@ def discover_agents(config, config_path, model_root, registry):
             if yaml.safe_load(Path(config_path).read_text()) != config:
                 raise RuntimeError('Configuration changed; restart with the original configuration')
             return _generate(prompt, **options)
-        agents[agent['id']] = dict(agent=agent, generate=checked_generate, availability=availability)
-        if source == 'local:qwen3-0.6b':
+        agents[agent['id']] = dict(agent=agent, generate=checked_generate, availability=availability, available=available)
+        if source == 'local:qwen3-4b':
             default = agent['id']
     if default is None:
-        raise ValueError('The conversational default requires registry entry qwen3-0.6b; no API fallback')
+        raise ValueError('The conversational default requires registry entry qwen3-4b; no API fallback')
     return agents, default
 
 
@@ -96,6 +107,8 @@ def select_agent(memory, agents, identifier):
     """Persist an explicit selection without touching history or loading weights."""
     if not isinstance(identifier, str) or identifier not in agents:
         raise ValueError('Unknown agent configuration; select an agent from the list')
+    if not agents[identifier].get('available', True):
+        raise ValueError(agents[identifier]['availability'])
     memory.metadata['active_agent'] = deepcopy(agents[identifier]['agent'])
     memory.write_metadata()
 
@@ -105,7 +118,8 @@ def restore_agent(memory, agents, default):
     saved = memory.metadata.get('active_agent')
     if saved:
         identifier = saved['id']
-        if identifier not in agents or agents[identifier]['agent'] != saved:
+        if identifier not in agents or any(agents[identifier]['agent'].get(key) != value
+                                          for key, value in saved.items() if key != 'label'):
             raise ValueError('Saved agent configuration is unavailable; restore its original configuration')
     else:
         prior = memory.metadata.get('models', {}).get('text')
@@ -117,7 +131,9 @@ def restore_agent(memory, agents, default):
             if not matches:
                 raise ValueError('Previous conversation model is unavailable; restore its configuration')
             identifier = matches[0]
-    select_agent(memory, agents, identifier)
+    # Open unavailable runs so the GUI can explain the error and offer another agent.
+    memory.metadata['active_agent'] = deepcopy(agents[identifier]['agent'])
+    memory.write_metadata()
 
 
 def make_server(memory, generate, settings, port=8000, *, agents=None):
@@ -137,7 +153,7 @@ def make_server(memory, generate, settings, port=8000, *, agents=None):
             return dict(messages=read_messages(memory.directory), run_id=memory.metadata['run_id'],
                         graph={'nodes': [], 'edges': []},
                         active_agent=memory.metadata.get('active_agent'),
-                        agents=[dict(item['agent'], availability=item['availability'])
+                        agents=[dict(item['agent'], availability=item['availability'], available=item.get('available', True))
                                 for item in (agents or {}).values()])
 
         def do_GET(self):
@@ -169,6 +185,10 @@ def make_server(memory, generate, settings, port=8000, *, agents=None):
                     raise ValueError('Message must be nonempty text')
                 if self.path == '/api/agent' or 'agent_id' in data:
                     select_agent(memory, agents or {}, data.get('agent_id'))
+                if self.path == '/api/message' and agents:
+                    selected = agents[memory.metadata['active_agent']['id']]
+                    if not selected.get('available', True):
+                        raise ValueError(selected['availability'])
             except (ValueError, UnicodeError) as error:
                 self.reply(400, {'error': str(error)})
                 return
@@ -198,11 +218,12 @@ def main(args=None):
     """Load existing configuration, lock one run, and finalize it on shutdown."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=Path.cwd() / 'config.yaml')
-    parser.add_argument('--model-root', type=Path, default=Path.cwd() / 'models')
+    parser.add_argument('--model-root', type=Path, help='Model storage root (default: models beside config)')
     parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'memory')
     parser.add_argument('--resume', type=Path, help='Existing conversational run directory')
     parser.add_argument('--port', type=int, default=8000)
     options = parser.parse_args(args)
+    options.model_root = options.model_root or options.config.resolve().parent / 'models'
     config = yaml.safe_load(options.config.read_text())
     # Resumed runs retain the original pipeline, so model provenance stays accurate.
     if options.resume:

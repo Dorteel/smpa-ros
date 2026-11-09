@@ -104,7 +104,7 @@ def test_interruption_and_restart(downloader, tmp_path, monkeypatch):
 
 def test_git_protection():
     root = Path(__file__).resolve().parents[1]
-    artifacts = ['models/llm/qwen3_0.6b/model.safetensors',
+    artifacts = ['models/text/qwen3-4b/tokenizer.json', 'models/llm/qwen3_0.6b/model.safetensors',
                  'models/vlm/smolvlm2_2.2b/tokenizer.json',
                  'models/coding/qwen2.5_coder_7b/.cache/huggingface/file.incomplete',
                  'models/download_report.json', 'models/download_report.json.tmp']
@@ -184,3 +184,86 @@ def test_timeout_preserves_known_revision(downloader, tmp_path, monkeypatch):
     assert result['status'] == 'failed'
     assert result['revision'] == 'known-commit'
     process.terminate.assert_called_once()
+
+
+def test_registered_paths_and_legacy_models(downloader):
+    for name in ('qwen3-1.7b', 'qwen3-4b', 'phi-4-mini-instruct', 'gemma-4-e4b', 'qwen3-8b'):
+        model = downloader.REGISTERED[name]
+        assert model[:2] == ('text', name)
+        assert len(downloader.REVISIONS[model[2]]) == 40
+        assert model in downloader.MODELS
+    assert downloader.REGISTERED['qwen3-0.6b'][:2] == ('llm', 'qwen3_0.6b')
+    assert downloader.ROOT == Path(__file__).resolve().parents[1] / 'models'
+
+
+@pytest.mark.parametrize('selection', ['qwen3-4b', 'Qwen/Qwen3-4B'])
+def test_cli_selection_and_storage_override(downloader, tmp_path, monkeypatch, selection):
+    calls = []
+    def run(**kwargs):
+        calls.append(kwargs)
+        return {'Qwen/Qwen3-4B': {'status': 'completed'}}
+    monkeypatch.setattr(downloader, 'run', run)
+    monkeypatch.setattr(sys, 'argv', ['download_models.py', '--model', selection,
+                                    '--model-root', str(tmp_path)])
+    downloader.main()
+    assert calls[0]['models'] == [('text', 'qwen3-4b', 'Qwen/Qwen3-4B')]
+    assert calls[0]['root'] == tmp_path
+
+
+def test_cli_all_text_and_list(downloader, tmp_path, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(downloader, 'run', lambda **kwargs: calls.append(kwargs) or {
+        model[2]: {'status': 'completed'} for model in kwargs['models']})
+    monkeypatch.setattr(sys, 'argv', ['download_models.py', '--all-text'])
+    downloader.main()
+    assert calls[0]['models'] == list(downloader.REGISTERED.values())
+    monkeypatch.setattr(sys, 'argv', ['download_models.py', '--list', '--model-root', str(tmp_path)])
+    downloader.main()
+    assert len(calls) == 1
+    output = capsys.readouterr().out
+    assert 'qwen3-4b | Qwen/Qwen3-4B | unavailable' in output
+    assert str(tmp_path / 'text/qwen3-4b') in output
+
+
+def test_changed_revision_does_not_reuse_completed_report(downloader, tmp_path, monkeypatch):
+    model = downloader.REGISTERED['qwen3-4b']
+    calls = []
+    def attempt(model, root, timeout):
+        calls.append(model)
+        return completed(downloader, root, model)
+    monkeypatch.setattr(downloader, 'attempt', attempt)
+    downloader.run(tmp_path, retries=0, models=[model])
+    downloader.run(tmp_path, retries=0, models=[model])
+    assert len(calls) == 2  # Test report revision differs from the registry pin.
+
+
+def test_identical_weights_reused_from_other_cached_revision(downloader, tmp_path, monkeypatch):
+    import hashlib
+    contents = {'config.json': b'{}', 'tokenizer.json': b'{}',
+                'model.safetensors': b'identical weights', 'preprocessor_config.json': b'{}'}
+    cached = tmp_path / 'cached-weights'
+    cached.write_bytes(contents['model.safetensors'])
+    calls = []
+    info = SimpleNamespace(gated=False, private=False, sha='new-revision', siblings=[
+        SimpleNamespace(rfilename=name, size=len(data),
+                        lfs=SimpleNamespace(sha256=hashlib.sha256(data).hexdigest())
+                        if name.endswith('.safetensors') else None)
+        for name, data in contents.items()])
+    def snapshot(repo, **kwargs):
+        calls.append(kwargs['allow_patterns'])
+        for name in kwargs['allow_patterns']:
+            (kwargs['local_dir'] / name).write_bytes(contents[name])
+    monkeypatch.setitem(sys.modules, 'huggingface_hub', SimpleNamespace(
+        HfApi=lambda **kwargs: SimpleNamespace(model_info=lambda *args, **kwargs: info),
+        snapshot_download=snapshot,
+        try_to_load_from_cache=lambda repo, name, **kwargs:
+            str(cached) if name == 'model.safetensors' and not kwargs else None))
+    monkeypatch.setitem(sys.modules, 'huggingface_hub.errors', SimpleNamespace(
+        GatedRepoError=RuntimeError, RepositoryNotFoundError=RuntimeError, HfHubHTTPError=RuntimeError))
+    results = Queue()
+    model = downloader.MODELS[5]
+    downloader.download(model, tmp_path, results)
+    assert results.get()['revision'] == 'new-revision'
+    assert results.get()['status'] == 'completed'
+    assert 'model.safetensors' not in calls[0]
+    assert (tmp_path / model[0] / model[1] / 'model.safetensors').samefile(cached)

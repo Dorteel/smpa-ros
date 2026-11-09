@@ -32,7 +32,7 @@ function render(data){
   activeAgent=data.active_agent;
   agentSelect.replaceChildren();
   for(const agent of data.agents){
-    const option=document.createElement('option'); option.value=agent.id; option.textContent=agent.label;
+    const option=document.createElement('option'); option.value=agent.id; option.textContent=agent.label+(agent.available===false ? ' · unavailable' : ''); option.disabled=agent.available===false;
     option.selected=agent.id===activeAgent?.id; agentSelect.append(option);
   }
   const selected=data.agents.find(agent=>agent.id===activeAgent?.id);

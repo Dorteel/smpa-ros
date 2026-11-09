@@ -639,8 +639,8 @@ creates a new execution session.
 
 ## Persistent local model library
 
-The standalone `scripts/download_models.py` manages exactly eleven public models
-under `models/llm/`, `models/vlm/`, and `models/coding/`. Existing root model YAML
+The standalone `scripts/download_models.py` uses the shared text registry plus the existing vision/coding library
+under `models/text/`, `models/llm/`, `models/vlm/`, and `models/coding/`. Existing root model YAML
 files and ROS model-loading behavior are unchanged. Library directories and
 `models/download_report.json` are Git-ignored, including metadata and partial
 downloads. No existing weights were tracked when this library was added.
@@ -1066,8 +1066,8 @@ hardware is required for these tests.
 
 The conversational entry point runs an epistemic **Sense → Act** loop: receive
 and save a user message, then generate and save a response. New conversations
-default to **Qwen/Qwen3-0.6B**, using the existing local Transformers backend and
-registry entry `qwen3-0.6b`. This GUI default is independent of the robot pipeline
+default to **Qwen/Qwen3-4B**, using the existing local Transformers backend and
+registry entry `qwen3-4b`. This GUI default is independent of the robot pipeline
 in `config.yaml`, which is unchanged. No API credentials or internet connection
 are required for local inference once the weights and dependencies are installed.
 It does not initialize ROS, call Model/Plan, or execute robot actions. No camera,
@@ -1166,7 +1166,7 @@ the installed conversation entry point and HTML:
 
 ### Conversational local-model requirements
 
-The supported Qwen3-0.6B checkpoint is already present in
+The smaller, optional Qwen3-0.6B checkpoint remains supported in
 `models/llm/qwen3_0.6b` in this checkout (approximately 1.5 GiB on disk).
 The existing Transformers text backend runs on CPU without requiring CUDA.
 An offline smoke check with a short greeting and a 16-token output limit used
@@ -1314,3 +1314,116 @@ logger.setLevel(logging.DEBUG)
 main(['--config', 'config.yaml'])
 PY
 ```
+
+
+### Reproducible conversational model downloads
+
+`models/model_library.yaml` is the source of text model IDs, pinned revisions,
+paths and Qwen thinking settings. The GUI defaults independently to `qwen3-4b`.
+It stays local when weights are absent, displays the missing-assets error, and
+allows choosing another installed agent. Resumed runs retain their saved choice.
+The SMPA experiment configuration and ordinary install download selection are unchanged.
+
+Run from the repository root with the existing environment:
+
+```bash
+.venv/bin/python scripts/download_models.py --list
+.venv/bin/python scripts/download_models.py --model qwen3-4b
+# Full repository IDs remain accepted:
+.venv/bin/python scripts/download_models.py --model Qwen/Qwen3-4B
+# Explicitly provision all six registered text models, including existing 0.6B:
+.venv/bin/python scripts/download_models.py --all-text
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+./test.sh --unit
+```
+
+The five new destinations are `models/text/qwen3-1.7b`, `models/text/qwen3-4b`,
+`models/text/phi-4-mini-instruct`, `models/text/gemma-4-e4b`, and
+`models/text/qwen3-8b`. Existing 0.6B stays at `models/llm/qwen3_0.6b`.
+Existing older `llm/qwen3_*` files are preserved and reused through links when
+checksums match. The list command reports asset presence; the download command
+verifies checksums before declaring completion. Re-run downloads to resume;
+`models/download_report.json` records revision, manifest, status and disk usage.
+
+An alternate storage root must be passed to both downloader and GUI:
+
+```bash
+.venv/bin/python scripts/download_models.py --model qwen3-4b --model-root /mnt/models
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml" --model-root /mnt/models
+```
+
+Downloads are anonymous by default. If a repository requires access, accept its
+license on Hugging Face, run `.venv/bin/hf auth login`, then add `--auth` to the
+download command. No credentials or network are needed for local inference.
+Gemma's verified official ID is `google/gemma-4-E4B-it`; it is not substituted
+with another model. Its `gemma4` architecture is unsupported by this environment's
+Transformers 4.57.6, so downloading it does not imply it can run in this backend.
+No dependency upgrade or remote model code execution is performed automatically.
+
+The current text backend uses CPU float32: allow approximately four bytes per
+parameter plus Python/PyTorch, activations and KV-cache overhead. Qwen3-4B needs
+roughly 15 GiB for weights alone; plan for at least 20 GiB available RAM for short
+conversations. Qwen3-8B needs roughly 31 GiB for weights alone. These are planning
+estimates, not measured peak requirements or limits on conversation length.
+
+If Xet transfers stall, use the Hub's standard HTTP transport (the partial
+local download is retained):
+
+```bash
+HF_HUB_DISABLE_XET=1 .venv/bin/python scripts/download_models.py --all-text
+```
+
+For a minimal offline inference check, run one model per process. Change `MODEL`
+to another registered name only when enough RAM is available:
+
+```bash
+MODEL=qwen3-1.7b HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+import torch
+import yaml
+from smpa_ros.backends.transformers import TransformersBackend
+entry = yaml.safe_load(Path('models/model_library.yaml').read_text())['models'][os.environ['MODEL']]
+torch.set_num_threads(2)
+backend = TransformersBackend(str(Path('models') / entry['path']),
+                              enable_thinking=entry.get('enable_thinking'))
+print(backend.generate_conversation([{'role': 'user', 'content': 'Reply with a short greeting.'}],
+                                    max_new_tokens=16))
+PY
+```
+
+Verified official revisions (stored in the shared registry):
+
+| Registered name | Official repository | Revision |
+|---|---|---|
+| `qwen3-1.7b` | `Qwen/Qwen3-1.7B` | `70d244cc86ccca08cf5af4e1e306ecf908b1ad5e` |
+| `qwen3-4b` | `Qwen/Qwen3-4B` | `1cfa9a7208912126459214e8b04321603b3df60c` |
+| `phi-4-mini-instruct` | `microsoft/Phi-4-mini-instruct` | `cfbefacb99257ffa30c83adab238a50856ac3083` |
+| `gemma-4-e4b` | `google/gemma-4-E4B-it` | `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c` |
+| `qwen3-8b` | `Qwen/Qwen3-8B` | `b968826d9c46dd6066d109eabc6255188de91218` |
+
+Offline checks on this 31 GiB RAM, CPU-only machine used two PyTorch threads and
+at most 16 output tokens. Qwen3-1.7B generated a greeting in 5.1 seconds at
+10.4 GiB peak RSS; Qwen3-4B in 36.5 seconds at 16.3 GiB; Phi-4-mini-instruct
+in 10.1 seconds at 17.7 GiB. Times include initialization and depend on machine
+load. The Qwen3-4B default and agent switching were also verified through the
+localhost HTTP server. Gemma's offline config load failed with an unsupported
+`gemma4` architecture error; its downloaded weights are not an inference success.
+
+All five requested downloads completed and passed size/checksum verification.
+Gemma weights were reused from the existing Hub cache through a link. Actual
+local sizes (including tokenizer/config assets) were:
+
+| Repository-relative destination | Size (GiB) |
+|---|---:|
+| `models/text/qwen3-1.7b` | 3.80 |
+| `models/text/qwen3-4b` | 7.51 |
+| `models/text/phi-4-mini-instruct` | 7.17 |
+| `models/text/gemma-4-e4b` | 14.92 |
+| `models/text/qwen3-8b` | 15.27 |
+
+Qwen3-8B passed offline config loading but generation was skipped: the float32
+weights plus a 3 GiB overhead allowance require approximately 33.5 GiB RAM,
+versus 22.2 GiB available at verification time. No quantization or alternate
+backend was introduced. Download success is distinct from inference support.
+The final `./test.sh --unit` run passed: 163 passed, 2 skipped, 2 deselected.

@@ -12,6 +12,8 @@ import shutil
 import signal
 import time
 
+import yaml
+
 MODELS = [
     ('llm', 'qwen3_0.6b', 'Qwen/Qwen3-0.6B'),
     ('llm', 'qwen3_1.7b', 'Qwen/Qwen3-1.7B'),
@@ -26,6 +28,18 @@ MODELS = [
     ('coding', 'qwen2.5_coder_7b', 'Qwen/Qwen2.5-Coder-7B-Instruct'),
 ]
 ROOT = Path(__file__).resolve().parents[1] / 'models'
+# Text destinations and pinned revisions come from the shared inference registry.
+TEXT_MODELS = {name: item for name, item in yaml.safe_load(
+    (ROOT / 'model_library.yaml').read_text())['models'].items()
+    if item.get('backend') == 'transformers'}
+REGISTERED = {name: (*Path(item['path']).parts, item['model_id'])
+              for name, item in TEXT_MODELS.items()}
+REVISIONS = {item['model_id']: item.get('revision') for item in TEXT_MODELS.values()}
+# Retain old destinations as reusable sources, without moving existing weights.
+LEGACY_MODELS = MODELS[:]
+by_repo = {model[2]: model for model in REGISTERED.values()}
+MODELS = [by_repo.get(model[2], model) for model in MODELS]
+MODELS += [model for model in REGISTERED.values() if model[2] not in {m[2] for m in MODELS}]
 GIB = 1024 ** 3
 RESERVE = 5 * GIB
 CRITICAL = 2 * GIB
@@ -70,7 +84,7 @@ def save_report(path, records):
 
 
 def download(model, root, results):
-    """One bounded worker; Hub checks are deliberately anonymous."""
+    """One bounded worker; authentication is explicitly enabled with --auth."""
     category, folder, repo = model
     directory = root / category / folder
     result = {'status': 'failed', 'error': None, 'revision': None, 'files': {}}
@@ -81,17 +95,19 @@ def download(model, root, results):
         from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, HfHubHTTPError
 
         try:
-            info = HfApi(token=False).model_info(repo, files_metadata=True, timeout=20)
+            token = True if os.environ.get('SMPA_HF_AUTH') == '1' else False
+            info = HfApi(token=token).model_info(
+                repo, revision=REVISIONS.get(repo), files_metadata=True, timeout=20)
         except (GatedRepoError, RepositoryNotFoundError) as error:
             result.update(status='skipped', error=f'{type(error).__name__}: {error}')
             return
         except HfHubHTTPError as error:
             if error.response is not None and error.response.status_code in (401, 403, 404):
-                result.update(status='skipped', error=f'Anonymous access denied: {error}')
+                result.update(status='skipped', error=f'Access denied (check repository access and --auth): {error}')
                 return
             raise
-        if info.gated or info.private:
-            result.update(status='skipped', error='Repository is gated or private')
+        if (info.gated or info.private) and not token:
+            result.update(status='skipped', error='Repository is gated or private; obtain access and use hf auth login, then --auth')
             return
         result['revision'] = info.sha
         results.put({'revision': info.sha})
@@ -115,6 +131,20 @@ def download(model, root, results):
                 raise ValueError(f'Unknown file size: {file.rfilename}')
             target = directory / file.rfilename
             cached = try_to_load_from_cache(repo, file.rfilename, revision=info.sha)
+            if not isinstance(cached, str) and file.lfs:
+                # Another cached revision may contain byte-identical weights.
+                candidate = try_to_load_from_cache(repo, file.rfilename)
+                if (isinstance(candidate, str) and Path(candidate).stat().st_size == file.size
+                        and digest(Path(candidate)) == file.lfs.sha256):
+                    cached = candidate
+            if not isinstance(cached, str):
+                for old_category, old_folder, old_repo in LEGACY_MODELS:
+                    old = root / old_category / old_folder / file.rfilename
+                    if (old_repo == repo and old != target and old.is_file()
+                            and old.stat().st_size == file.size
+                            and file.lfs and digest(old) == file.lfs.sha256):
+                        cached = str(old)
+                        break
             if not target.exists() and isinstance(cached, str):
                 source = Path(cached).resolve()
                 if source.stat().st_size == file.size:
@@ -136,14 +166,14 @@ def download(model, root, results):
         # Hub's local_dir code otherwise attempts to copy cache files onto our links.
         if names - reused:
             snapshot_download(repo, revision=info.sha, local_dir=directory,
-                              allow_patterns=sorted(names - reused), token=False,
+                              allow_patterns=sorted(names - reused), token=token,
                               max_workers=2, etag_timeout=20)
         if not verified(directory, result['files']):
             # Replace only corrupt files, leaving valid weights and the cache intact.
             bad = [name for name, details in result['files'].items()
                    if not verified(directory, {name: details})]
             snapshot_download(repo, revision=info.sha, local_dir=directory,
-                              allow_patterns=bad, token=False, max_workers=2,
+                              allow_patterns=bad, token=token, max_workers=2,
                               etag_timeout=20, force_download=True)
             if not verified(directory, result['files']):
                 raise ValueError('Downloaded files failed size/checksum verification')
@@ -227,7 +257,9 @@ def run(root=ROOT, retries=2, timeout=1800, models=None):
         interrupted = False
         result = {'revision': None, 'files': {}}
         try:
-            if previous.get('status') == 'completed' and verified(directory, previous.get('files')):
+            if (previous.get('status') == 'completed'
+                    and (not REVISIONS.get(repo) or previous.get('revision') == REVISIONS[repo])
+                    and verified(directory, previous.get('files'))):
                 result = previous
                 print('Previously completed files verified; reusing.', flush=True)
             else:
@@ -269,9 +301,30 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--retries', type=int, default=2, help='Retries per failed model')
     parser.add_argument('--timeout', type=float, default=1800, help='Seconds per attempt')
-    parser.add_argument('--model', action='append', choices=[model[2] for model in MODELS],
+    parser.add_argument('--model', action='append', choices=sorted(set(REGISTERED) | {m[2] for m in MODELS} | {m[2] for m in REGISTERED.values()}),
                         help='Download only this model ID; repeat to select several (default: all)')
+    parser.add_argument('--all-text', action='store_true', help='Download all registered Transformers text models')
+    parser.add_argument('--list', action='store_true', help='List models and local asset availability')
+    parser.add_argument('--model-root', type=Path, default=ROOT, help='Override model storage root')
+    parser.add_argument('--auth', action='store_true', help='Use HF_TOKEN or stored hf login credentials')
     options = parser.parse_args()
+    if options.auth:
+        os.environ['SMPA_HF_AUTH'] = '1'
+    if options.list:
+        for name, model in REGISTERED.items():
+            directory = options.model_root / model[0] / model[1]
+            weights = list(directory.glob('*.safetensors'))
+            index = directory / 'model.safetensors.index.json'
+            if index.is_file():
+                try:
+                    weights = [directory / name for name in set(json.loads(index.read_text())['weight_map'].values())]
+                except (ValueError, KeyError, TypeError):
+                    weights = []
+            present = ((directory / 'config.json').is_file()
+                       and bool(weights) and all(path.is_file() and path.stat().st_size > 0 for path in weights)
+                       and any((directory / file).is_file() for file in ('tokenizer.json', 'tokenizer.model')))
+            print(f"{name} | {model[2]} | {'assets present (not checksum verified)' if present else 'unavailable'} | {directory.resolve()}")
+        return
     if options.retries < 0 or options.timeout <= 0:
         parser.error('retries must be nonnegative and timeout must be positive')
     # Also save the current attempt when a terminal sends SIGTERM.
@@ -279,9 +332,16 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupt)
-    selected = [model for model in MODELS if not options.model or model[2] in options.model]
-    records = run(retries=options.retries, timeout=options.timeout, models=selected)
-    if options.model and any(records.get(model[2], {}).get('status') != 'completed'
+    by_id = {model[2]: model for model in MODELS}
+    by_id.update({model[2]: model for model in REGISTERED.values()})
+    selected = list(REGISTERED.values()) if options.all_text else ([] if options.model else MODELS)
+    for name in options.model or []:
+        model = REGISTERED[name] if name in REGISTERED else by_id[name]
+        if model not in selected:
+            selected.append(model)
+    records = run(root=options.model_root.resolve(), retries=options.retries,
+                  timeout=options.timeout, models=selected)
+    if (options.model or options.all_text) and any(records.get(model[2], {}).get('status') != 'completed'
                              for model in selected):
         raise SystemExit(1)
 

@@ -158,23 +158,46 @@ class ConversationTests(unittest.TestCase):
                 patch('smpa_ros.backends.api.APIBackend') as api, \
                 patch('smpa_ros.backends.transformers.TransformersBackend') as local:
             agents, default, config, path = self.configured_agents()
-            self.assertEqual(agents[default]['agent']['model_id'], 'Qwen/Qwen3-0.6B')
+            self.assertEqual(agents[default]['agent']['model_id'], 'Qwen/Qwen3-4B')
             self.assertEqual(agents[default]['agent']['provider'], 'transformers')
             self.assertEqual(config['modeling']['backend'], 'api')
             self.assertEqual({item['agent']['source'] for item in agents.values()},
-                             {'local:qwen3-0.6b', 'api:openai', 'api:nebula'})
+                             {'local:qwen3-0.6b', 'local:qwen3-1.7b', 'local:qwen3-4b',
+                              'local:phi-4-mini-instruct', 'local:gemma-4-e4b', 'local:qwen3-8b',
+                              'api:openai', 'api:nebula'})
             self.assertNotIn('reasoning_effort', agents[default]['agent']['generation'])
             self.assertIn('weights missing', agents[default]['availability'])
             for item in agents.values():
                 if item['agent']['backend'] == 'api':
                     self.assertIn('Missing API credentials', item['availability'])
+            with self.assertRaisesRegex(ValueError, 'weights missing'):
+                select_agent(self.memory, agents, default)
             restore_agent(self.memory, agents, default)
             self.assertEqual(self.memory.metadata['active_agent']['id'], default)
             api.assert_not_called()
             local.assert_not_called()
 
+    def test_incomplete_sharded_weights_cannot_be_selected(self):
+        agents, default, config, config_path = self.configured_agents()
+        path = Path(agents[default]['agent']['model_path'])
+        path.mkdir(parents=True)
+        for name in ('config.json', 'tokenizer.json'):
+            (path / name).write_text('{}')
+        (path / 'part1.safetensors').write_bytes(b'weights')
+        (path / 'model.safetensors.index.json').write_text(json.dumps({
+            'weight_map': {'a': 'part1.safetensors', 'b': 'part2.safetensors'}}))
+        repository = Path(__file__).resolve().parents[1]
+        agents, default = discover_agents(config, config_path, path.parents[1], repository / 'models')
+        with self.assertRaisesRegex(ValueError, 'weights missing'):
+            select_agent(self.memory, agents, default)
+        (path / 'part2.safetensors').write_bytes(b'weights')
+        agents, default = discover_agents(config, config_path, path.parents[1], repository / 'models')
+        select_agent(self.memory, agents, default)
+        self.assertEqual(self.memory.metadata['active_agent']['id'], default)
+
     def test_http_agent_switch_routes_backend_and_persists_provenance(self):
         agents, default, config, path = self.configured_agents()
+        agents[default]['available'] = True  # Inference is mocked in this transport test.
         alternate = next(key for key, item in agents.items() if item['agent']['source'] == 'api:openai')
         restore_agent(self.memory, agents, default)
         server = make_server(self.memory, None, None, port=0, agents=agents)
@@ -231,6 +254,8 @@ class ConversationTests(unittest.TestCase):
         alternate = next(key for key, item in agents.items() if item['agent']['source'] == 'api:nebula')
         select_agent(self.memory, agents, alternate)
         exchange(self.memory, 'Hello', self.generate, {}, agent=agents[alternate]['agent'])
+        # Older releases displayed only provider/model; labels are not identity.
+        self.memory.metadata['active_agent']['label'] = 'API · nebula · SURF.gpt-oss-120b'
         self.memory.finalize('interrupted')
         self.memory = open_conversation(None, resume=self.memory.directory)
         restore_agent(self.memory, agents, default)
@@ -544,6 +569,7 @@ class ConversationTests(unittest.TestCase):
         config_path = repository / 'config.yaml'
         config = yaml.safe_load(config_path.read_text())
         agents, default = discover_agents(config, config_path, repository / 'models', repository / 'models')
+        default = next(key for key, item in agents.items() if item['agent']['source'] == 'local:qwen3-0.6b')
         restore_agent(self.memory, agents, default)
         settings = agents[default]['agent']['generation']
         report = {'settings': settings, 'effective_do_sample': False,
