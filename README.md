@@ -1,3 +1,69 @@
+# Local RLHF Training Gym
+
+A local, browser-based Hugging Face conversation and human-feedback laboratory.
+It runs independently of the existing ROS application documented below. Markdown
+in an Obsidian-compatible vault is the authoritative experiment store.
+
+## Install the gym (Python 3.12, Linux)
+
+Use a dedicated environment; do not replace the existing ROS environment:
+
+```bash
+cd /home/dorteel/ros2_ws/src/smpa-ros
+python3 -m venv .venv-rlhf
+# CPU-only installation avoids downloading CUDA libraries:
+.venv-rlhf/bin/python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+.venv-rlhf/bin/python -m pip install -r requirements-rlhf.txt
+```
+
+For CUDA, install the matching CUDA-enabled Torch 2.9.1 build instead of the CPU
+wheel. Optional QLoRA: `.venv-rlhf/bin/python -m pip install bitsandbytes==0.48.2`.
+Dependency versions are pinned in `requirements-rlhf.txt`; no installation or model
+download occurs when launching the app. Existing Torch installations are not changed.
+
+## Launch and use
+
+```bash
+./run_rlhf.sh
+# Open http://127.0.0.1:8501
+```
+
+Optional configuration:
+
+```bash
+RLHF_VAULT="$PWD/RLHF-Vault" RLHF_MODELS="$PWD/models/llm" RLHF_PORT=8501 ./run_rlhf.sh
+```
+
+Both directories can also be set in the sidebar. Choose a complete local Transformers
+model directory and Load model. The default selector prefers Qwen3-0.6B when present.
+The model must include weights, tokenizer and a compatible chat template; missing
+files produce an error without downloading replacements. CPU float32 is the safe
+default. Create a conversation, send prompts, and select a saved response to rate,
+explain or correct. Enable A/B mode to compare two seeded responses, then choose A
+or B to commit that answer into the conversation. Start a new conversation to
+restart; the old one remains resumable.
+
+Training shows separate SFT correction and DPO preference counts. The threshold
+(default 10) notifies only. Select examples, review parameters, explicitly approve,
+and start a run. Stop requests are observed between steps. Select the resulting
+adapter and Load model to converse with it. Models shows hardware; Experiments
+exposes Markdown records/datasets/checkpoints; Metrics compares loss, learning
+rate and collected human ratings. Loss does not establish qualitative improvement.
+
+```bash
+./test.sh --rlhf          # includes real tiny CPU SFT + DPO and continuation
+./test.sh                # original isolated ROS build/unit suite
+```
+
+Gym tests use temporary vaults and locally constructed random model weights; no
+model downloads or audio/GPU hardware are needed. They verify persistence/recovery,
+feedback extraction, notifications, approval rejection, real adapter updates,
+checkpoint reload/continuation, worker cancellation and Streamlit widget workflows.
+CUDA/QLoRA and full physical-browser layout testing are separate verification limits.
+See [ARCHITECTURE.md](ARCHITECTURE.md), [TRAINING.md](TRAINING.md) and [TODO.md](TODO.md).
+
+---
+
 # Minimal robot cognition
 
 ## Quick start: Ubuntu 24.04 / ROS 2 Jazzy

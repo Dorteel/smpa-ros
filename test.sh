@@ -2,11 +2,23 @@
 set -eo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 mode="${1:---unit}"
+if [[ "$mode" == --rlhf ]]; then
+    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+    export TOKENIZERS_PARALLELISM=false WANDB_DISABLED=true
+    rlhf_test_dir="$(mktemp -d)"
+    export HF_HOME="$rlhf_test_dir/hf"
+    trap 'rm -rf -- "$rlhf_test_dir"' EXIT
+    gym_python="${RLHF_PYTHON:-$PWD/.venv-rlhf/bin/python}"
+    "$gym_python" -c 'import torch, transformers, peft, trl, accelerate, datasets, streamlit, yaml; print("Gym dependencies loaded; CUDA:", torch.cuda.is_available())'
+    exec_status=0
+    "$gym_python" -m pytest -c /dev/null tests_rlhf -v --basetemp "$rlhf_test_dir/pytest" || exec_status=$?
+    exit "$exec_status"
+fi
 case "$mode" in
     --unit) selector='not integration' ;;
     --integration) selector='integration' ;;
     --all) selector='integration or not integration' ;;
-    *) echo 'Usage: ./test.sh [--unit|--integration|--all]' >&2; exit 2 ;;
+    *) echo 'Usage: ./test.sh [--unit|--integration|--all|--rlhf]' >&2; exit 2 ;;
 esac
 colcon_command=(colcon)
 if [[ "$mode" != --unit ]]; then

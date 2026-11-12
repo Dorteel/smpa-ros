@@ -252,3 +252,17 @@ same conceptual sequence in the implementation.
 **Avoid:** vague summaries, purely syntactic commentary, misleading claims,
 needless abstraction, and unrelated refactors. Explicitness is desirable;
 repetition without added understanding is not.
+
+## Local RLHF Training Gym development
+
+The user-authorized gym implementation lives in `rlhf_gym/` and `tests_rlhf/`,
+with separate pinned dependencies in `requirements-rlhf.txt` and launcher
+`run_rlhf.sh`. Preserve the existing ROS interfaces and default test modes.
+Run `./test.sh --rlhf` for the laboratory. Keep every function narrative-first.
+
+Markdown is authoritative. Never overwrite historical feedback or checkpoints.
+Training must require explicit approval in the application. Scalar ratings and
+written explanations are metadata; only corrections form SFT targets and explicit
+A/B choices form DPO pairs. Continue adapters explicitly and save fresh checkpoints.
+Tests must distinguish real optimization from mocked widget/model operations.
+Do not claim CUDA support was tested on a CPU-only machine.

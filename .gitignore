@@ -236,3 +236,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 .obsidian/
+# Local human-feedback laboratory
+.venv-rlhf/
+RLHF-Vault/

@@ -1,0 +1,10 @@
+# Tested together on Python 3.12; install into a dedicated virtual environment.
+torch==2.9.1
+transformers==4.57.6
+peft==0.18.0
+trl==0.24.0
+accelerate==1.11.0
+datasets==4.3.0
+streamlit==1.51.0
+PyYAML==6.0.3
+pytest==8.4.2
