@@ -1,0 +1,7 @@
+sensor_msgs/Image image
+string prompt
+---
+sensor_msgs/Image soft_mask
+sensor_msgs/Image binary_mask
+bool success
+string message

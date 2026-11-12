@@ -1061,3 +1061,112 @@ sessions, linked transcripts, incomplete/canceled observations, and storage erro
 reporting. The prerecorded CPU integration test also decodes the saved WAV and
 compares it with input samples while checking the real recognized text. No audio
 hardware is required for these tests.
+
+## Standalone text-guided segmentation
+
+`SegmentImage` is independent of Sense, Model, Plan, Act, and Observe. The
+`segment_image` node owns one CLIPSeg processor and model for its lifetime;
+requests run sequentially in inference mode. It never starts another VLM or
+publisher. The implementation is in `smpa_ros/segmentation.py`, with a small
+one-frame example in `scripts/segment_image_client.py`.
+
+The `/segment_image` service accepts a `sensor_msgs/Image` and a text prompt
+such as `green shirt`. It returns a `32FC1` soft mask and a `mono8` binary mask,
+both with the original image dimensions and header. The entire input is
+resized for CLIPSeg without center cropping. Sigmoid scores are bilinearly
+resized back to the input dimensions **before** applying `score >= threshold`.
+Soft scores stay in their original range: there is no per-image normalization,
+contrast stretching, or claim that these are calibrated probabilities. Binary
+pixels are exactly 0 or 255. Failed requests return `success=false`, an
+explanation, and empty masks without stopping the node.
+
+### Local weights and build
+
+The default model directory is `models/vision/clipseg_rd64_refined`, relative
+to the working repository. `model_path` can instead name another explicit
+local directory. Startup always uses `local_files_only=True`; it never fetches
+missing weights. The existing general downloader's fixed LLM/VLM library is
+unchanged. If this model is missing, explicitly download its inference files:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/hf download CIDAS/clipseg-rd64-refined \
+  --local-dir models/vision/clipseg_rd64_refined \
+  --include '*.json' '*.txt' 'pytorch_model.bin'
+```
+
+This selects one weight format rather than downloading duplicate checkpoints.
+A local safetensors version of the same checkpoint is also supported. This
+is a separate segmentation checkpoint, not a cognitive model selection. The backend follows the existing
+[Transformers CLIPSeg implementation](https://huggingface.co/docs/transformers/model_doc/clipseg).
+
+Build the new service interface and the Python entry point:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/jazzy/setup.bash
+src/smpa-ros/.venv/bin/python "$(command -v colcon)" build \
+  --paths src/smpa-ros src/smpa-ros/smpa_ros_interfaces \
+  --packages-select smpa_ros_interfaces smpa_ros
+source install/setup.bash
+cd src/smpa-ros
+```
+
+### Start the service and inspect one frame
+
+In the sourced terminal, start the service using the existing Python environment:
+
+```bash
+ros2 run --prefix "$PWD/.venv/bin/python" smpa_ros segment_image --ros-args \
+  -p model_path:="$PWD/models/vision/clipseg_rd64_refined" \
+  -p device:=auto -p threshold:=0.5
+```
+
+`device` accepts `cpu`, `cuda`, or `auto`; `auto` selects CUDA when available.
+Explicit CUDA fails startup if CUDA is unavailable. CPU and CUDA both use
+float32. All three parameters are startup settings; restart the node to change
+them. The node reports its resolved path and device once when ready.
+
+In a second sourced terminal, reuse the existing image publisher; do not start
+another publisher if the camera topic is already active:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+.venv/bin/python scripts/segment_image_client.py --prompt 'green shirt' \
+  --output-dir /tmp/clipseg-green-shirt --timeout 120
+```
+
+The topic defaults to `camera_topic` in `config.yaml`. Use `--topic` to override
+it. The client captures exactly one frame, saves `binary_mask.png` and
+`overlay.png`, and releases its subscriber and service client. Selected pixels
+are tinted red in the overlay; unselected pixels remain unchanged. Reusing an
+output directory replaces those two inspection files.
+
+### Memory and verification
+
+The usual CLIPSeg checkpoint has roughly 0.6 GB of float32 weights. Budget
+approximately **1–2 GiB of free GPU memory** for model weights, activations,
+CUDA context, and workspaces at the standard model input size. This is a
+planning estimate, not a measured peak for this checkout. Original output
+resolution and runtime versions also affect usage. The segmentation process
+adds memory to whatever the shared VLM already holds; it does not borrow or
+replace that model. Check `nvidia-smi` before running both. Larger VLM contexts
+can consume the remaining headroom. Use `-p device:=cpu` to keep segmentation
+off the GPU; CPU requires host RAM and will usually be slower. CUDA inference
+errors, including exhausted memory, are reported to the caller without a
+silent change of device.
+
+```bash
+./test.sh --all
+git diff --check
+ros2 interface show smpa_ros_interfaces/srv/SegmentImage
+```
+
+Tests use real Torch operations and ROS service serialization with a substituted
+CLIPSeg loader, so they require no weight download. They cover padded RGB/BGR
+images, score resizing, thresholds, encodings, headers, invalid requests,
+recovery, one-time loading, and the inspection overlay. A real trained-model
+service call additionally requires the local weights and an active existing
+image publisher; a mocked-model call is not evidence of segmentation quality.

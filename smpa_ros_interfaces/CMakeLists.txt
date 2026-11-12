@@ -6,6 +6,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(action_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DescribeScene.srv"
+  "srv/SegmentImage.srv"
   "action/Listen.action"
   "action/Talk.action"
   DEPENDENCIES sensor_msgs action_msgs
