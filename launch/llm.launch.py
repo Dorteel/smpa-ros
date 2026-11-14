@@ -19,7 +19,9 @@ def start(context):
     Explicit VisualJEV selection starts only its independent evaluator, with its
     pixel-budget argument parsed as an integer ROS parameter. All other
     selections retain the existing robot loop or assigned participant servers,
-    including run-scoped remappings and unchanged action execution.
+    including modality-scoped run remappings and unchanged action execution.
+    Place Listen under sense/hear and Talk under act; forward explicit modality
+    switches and the selected Read session only to the native Runner.
     """
     value = lambda name: LaunchConfiguration(name).perform(context)
     if value('service') == 'visual_jev':
@@ -33,24 +35,26 @@ def start(context):
         directory, identity = MemoryManager.assigned_run(value('world_model_dir'), value('run_id'))
         namespace = '/run_' + identity.replace('-', '_')
         common = {'run_id': identity, 'world_model_dir': str(directory)}
-        remaps = [(endpoint, namespace + endpoint)
-                  for endpoint in ('/sense', '/speech/listen', '/speech/talk')]
+        remaps = [('/sense', namespace + '/sense/vision/describe_scene'),
+                  ('/speech/listen', namespace + '/sense/hear/listen'),
+                  ('/speech/talk', namespace + '/act/talk')]
         nodes = []
         if value('service') in ('vision', 'all'):
-            nodes.append(Node(package='smpa_ros', executable='sense', prefix=[value('python')],
+            nodes.append(Node(package='smpa_ros', executable='sense', namespace=namespace + '/sense/vision', prefix=[value('python')],
                               parameters=[dict(common, config=value('config'))], remappings=remaps,
                               output='screen', on_exit=EmitEvent(event=Shutdown(reason='Sense server exited'))))
         if value('service') in ('speech', 'all'):
             for executable, device in [('listen', 'input_device'), ('talk', 'output_device')]:
                 parameters = dict(common, model_root=value('model_root'), audio_lock=value('audio_lock'),
                                   audio_device=ParameterValue(value(device), value_type=str))
-                nodes.append(Node(package='smpa_ros', executable=executable, prefix=[value('python')],
+                nodes.append(Node(package='smpa_ros', executable=executable,
+                                  namespace=namespace + ('/sense/hear' if executable == 'listen' else '/act'), prefix=[value('python')],
                                   parameters=[parameters], remappings=remaps, output='screen',
                                   on_exit=EmitEvent(event=Shutdown(reason='Speech server exited'))))
         return nodes
     arguments = []
     for name in ('config', 'world_model_root', 'run_name', 'service', 'python', 'model_root',
-                 'audio_lock', 'input_device', 'output_device', 'demo', 'timeout'):
+                 'audio_lock', 'input_device', 'output_device', 'demo', 'timeout', 'hear', 'vision', 'read_session'):
         if value(name):
             arguments.extend(['--' + name.replace('_', '-'), value(name)])
     if value('max_cycles'):
@@ -74,6 +78,9 @@ def generate_launch_description():
         DeclareLaunchArgument('device', default_value='cuda', choices=['cpu', 'cuda']),
         DeclareLaunchArgument('source_dir', default_value=str(Path.cwd() / 'third_party/Visual-Jev/code')),
         DeclareLaunchArgument('max_pixels', default_value='200704'),
+        DeclareLaunchArgument('hear', default_value=''),
+        DeclareLaunchArgument('vision', default_value=''),
+        DeclareLaunchArgument('read_session', default_value=''),
         DeclareLaunchArgument('run_name', default_value='smpa'),
         DeclareLaunchArgument('max_cycles', default_value='', description='Override execution.max_cycles'),
         DeclareLaunchArgument('timeout', default_value='', description='Override camera/Sense wait timeout in seconds (default: 120)'),

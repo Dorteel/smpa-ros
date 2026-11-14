@@ -315,6 +315,11 @@ def test_vlm_sampling_seed_and_unsupported_controls(monkeypatch):
 
 
 def test_sense_explicit_local_path_and_missing_weights(tmp_path,monkeypatch):
+    """Resolve an explicit model path in its new Vision implementation owner.
+
+    Substitute only model construction, then remove local weights and require
+    the same startup validation failure rather than a download or fallback.
+    """
     import yaml
     from test_cognition import local_model_directory
     directory=local_model_directory(tmp_path/'models/vlm/unregistered',vision=True)
@@ -322,7 +327,7 @@ def test_sense_explicit_local_path_and_missing_weights(tmp_path,monkeypatch):
     path.write_text(yaml.safe_dump({'vision':{'backend':'transformers','path':str(directory),
                                             'model_id':'custom/vision'}}))
     constructor=MagicMock()
-    monkeypatch.setattr('smpa_ros.sense.TransformersVLM',constructor)
+    monkeypatch.setattr('sense.vision.TransformersVLM',constructor)
     rclpy.init(args=['--ros-args','-p',f'config:={path}'])
     server=None
     try:
@@ -398,6 +403,11 @@ def test_shared_vlm_image_text_and_fresh_schema_requests(monkeypatch):
 
 
 def test_frozen_image_and_focused_observation_share_backend(tmp_path, assigned_test_run, monkeypatch):
+    """Keep initial frozen pixels and reuse one backend for focused questions.
+
+    Patch the relocated Vision constructor, then verify focused requests do not
+    replace original evidence or instantiate a second cognitive model.
+    """
     import yaml
     from PIL import Image as PILImage
     source=tmp_path/'config.yaml'
@@ -406,7 +416,7 @@ def test_frozen_image_and_focused_observation_share_backend(tmp_path, assigned_t
     backend=MagicMock()
     backend.describe.return_value='A red scene.'
     constructor=MagicMock(side_effect=AssertionError('Weights must not be loaded again'))
-    monkeypatch.setattr('smpa_ros.sense.TransformersVLM',constructor)
+    monkeypatch.setattr('sense.vision.TransformersVLM',constructor)
     rclpy.init(args=['--ros-args','-p',f'config:={source}'])
     server=None
     try:

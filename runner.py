@@ -32,8 +32,15 @@ class Runner:
                  sense=None, model=None, plan=None, act=None, models=None,
                  configuration=None, setup=None, teardown=None,
                  model_identifier=None, plan_identifier=None):
+        """Bind the explicit cognitive stages and their run-owned sensory participants.
+
+        Native runs resolve configuration and share one inference backend; injected
+        stage callbacks retain the existing testing/custom execution contract.
+        Keep separate references for Vision, Hear and the file-backed Read node
+        so their resources can be destroyed with the owning robot run.
+        """
         self.participant = None
-        self.camera_node = self.executor = self.speech = self.sense_node = None
+        self.camera_node = self.executor = self.speech = self.sense_node = self.read_node = None
         self.backend = None
         self.experiment_complete = False
         self.last_transcript = ''
@@ -93,6 +100,13 @@ class Runner:
                 self._signal = None
 
     def configure(self, args=None):
+        """Resolve the existing pipeline plus explicit sequential modality switches.
+
+        Preserve stage controls and model defaults. Optional Hear/Vision overrides
+        and an explicitly selected Read conversation are frozen into this run's
+        configuration; no message receipt changes stage ordering or resumes a
+        physical experiment. Reject incomplete modality configuration at startup.
+        """
         from ament_index_python.packages import get_package_share_directory
         from rclpy.utilities import remove_ros_args
 
@@ -103,6 +117,9 @@ class Runner:
         parser.add_argument('--run-name', default='smpa')
         parser.add_argument('--max-cycles', type=int, default=None)
         parser.add_argument('--service', choices=['vision', 'speech', 'all'], default='vision')
+        parser.add_argument('--hear', choices=['true', 'false'])
+        parser.add_argument('--vision', choices=['true', 'false'])
+        parser.add_argument('--read-session', type=Path)
         parser.add_argument('--python', default=sys.executable)
         parser.add_argument('--model-root', default=str(Path.cwd() / 'models'))
         parser.add_argument('--audio-lock', default='')
@@ -112,6 +129,18 @@ class Runner:
         parser.add_argument('--timeout', type=float, default=120)
         options = parser.parse_args(remove_ros_args(args=args)[1:])
         config = yaml.safe_load(options.config.read_text(encoding='utf-8'))
+        if options.hear is not None or options.vision is not None or options.read_session is not None:
+            sensing = config.setdefault('sensing', {})
+            for name in ('hear', 'vision'):
+                if getattr(options, name) is not None:
+                    sensing[name] = getattr(options, name) == 'true'
+            if options.read_session is not None:
+                sensing['read'] = dict(enabled=True, session=str(options.read_session.resolve()))
+        from sense import modalities
+        self.modalities = modalities(config, options.service)
+        if self.modalities['read']:
+            text = config['sensing']['read']
+            text['session'] = str((options.config.resolve().parent / text['session']).resolve())
         limit = options.max_cycles if options.max_cycles is not None else config.get('execution', {}).get('max_cycles', 1)
         if options.timeout <= 0:
             parser.error('--timeout must be positive')
@@ -141,12 +170,20 @@ class Runner:
         self.config['enabled_actions'] = list(enabled_actions(self.config))
         if 'scene_refinement' in self.config:
             self.config['scene_refinement'] = refinement_settings(self.config)
-        if refinement_settings(self.config)['enabled'] and options.service == 'speech':
+        if refinement_settings(self.config)['enabled'] and not self.modalities['vision']:
             raise ValueError('Scene refinement requires the vision service')
         self.limit = limit
         self.action_timeout = action_timeout
 
     def setup(self, directory, identity):
+        """Start the selected sensory participants under their run-specific names.
+
+        Keep camera and independent evaluator endpoints external, and share one
+        cognitive backend. Hear uses the existing child action servers, Vision
+        remains in this process, and Read uses one in-process ROS identity with
+        no text transport: its source is the selected persisted conversation.
+        Talk stays an output endpoint. No sensory operation starts a robot action.
+        """
         import rclpy
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.signals import SignalHandlerOptions
@@ -158,12 +195,15 @@ class Runner:
         for name in ('audio_lock', 'input_device', 'output_device'):
             if getattr(self.options, name):
                 command.append(f'{name}:={getattr(self.options, name)}')
-        if self.options.service in ('speech', 'all'):
+        if self.modalities['hear']:
             self.participant = subprocess.Popen(command, start_new_session=True)
         print(f'World-model run: {directory}\nROS endpoints: {namespace}/...', flush=True)
-        rclpy.init(args=['--ros-args', '-r', f'/sense:={namespace}/sense',
-                         '-r', f'/speech/listen:={namespace}/speech/listen',
-                         '-r', f'/speech/talk:={namespace}/speech/talk',
+        rclpy.init(args=['--ros-args', '-r', f'/sense:={namespace}/sense/vision/describe_scene',
+                         '-r', f'/speech/listen:={namespace}/sense/hear/listen',
+                         '-r', f'/speech/talk:={namespace}/act/talk',
+                         '-r', f'smpa_loop:__ns:={namespace}/sense/vision',
+                         '-r', f'sense:__ns:={namespace}/sense/vision',
+                         '-r', f'listener_talker:__ns:={namespace}/sense/hear',
                          '-p', f'config:={self.options.config.resolve()}',
                          '-p', f'world_model_dir:={directory}', '-p', f'run_id:={identity}'],
                    signal_handler_options=SignalHandlerOptions.NO)
@@ -179,7 +219,7 @@ class Runner:
             self.backend = APIBackend(self.options.config, modality='vision', provider=self.selected['provider'])
             self.backend.model_id = self.selected['model_id']
         self._model = self._plan = self.backend
-        if self.options.service in ('vision', 'all'):
+        if self.modalities['vision']:
             from smpa_ros.sense import SenseService
             self.sense_node = SenseService(backend=self.backend)
             self.executor.add_node(self.sense_node)
@@ -187,14 +227,28 @@ class Runner:
             runtime = dict(device=str(self.backend.model.device), dtype=str(self.backend.model.dtype))
             self.memory.metadata['configuration']['runtime'] = runtime
             self.memory.write_metadata()
-        if self.options.service in ('speech', 'all'):
+        if self.modalities['read']:
+            self.read_node = rclpy.create_node('read', namespace=namespace + '/sense/read')
+            self.executor.add_node(self.read_node)
+        if self.modalities['hear']:
             from speech.demo import ListenerTalker
             self.speech = ListenerTalker()
 
     def observe(self, directory, cycle, prompt=None):
+        """Collect one sequential Sense result using the run's enabled modalities.
+
+        Preserve child health checks and cached refinement evidence. When refinement
+        reuses its initial visual/audio observation, replace only the Read batch
+        with newly persisted messages; cached text must never be replayed.
+        """
         if self.participant is not None and self.participant.poll() is not None:
             raise RuntimeError('Participating ROS processes exited')
         if self.refinement_config['enabled'] and self.initial_observation is not None:
+            if self.modalities['read']:
+                from sense.read import observe as read
+                cached = json.loads(self.initial_observation)
+                cached['read'] = read(directory, self.config['sensing']['read']['session'])
+                return json.dumps(cached, ensure_ascii=False)
             return self.initial_observation
         from smpa_ros.sense import observe
         observation, self.last_transcript = observe(
@@ -281,6 +335,13 @@ class Runner:
                 self.memory.write_refinement(self.refinement)
 
     def teardown(self):
+        """Close this run's clients, in-process nodes and launched speech group.
+
+        Stop speech clients before shutting down their executors and all owned
+        Vision/Read nodes. Release the shared backend and interrupt only this
+        run's child process group, escalating only if graceful shutdown fails.
+        External camera and independent evaluator processes remain untouched.
+        """
         import rclpy
         try:
             if self.speech is not None:
@@ -290,6 +351,8 @@ class Runner:
             if self.sense_node is not None:
                 self.sense_node.destroy_node()
                 self.sense_node = None
+            if self.read_node is not None:
+                self.read_node.destroy_node()
             if self.camera_node is not None:
                 self.camera_node.destroy_node()
             if rclpy.ok():
@@ -308,6 +371,12 @@ class Runner:
                         continue
 
     def initialize_backends(self):
+        """Resolve one shared cognitive model and any enabled audio model entries.
+
+        Preserve the configured model selection for Sense, Model and Plan. Hear
+        registers its existing recognition and synthesis models independently;
+        Read adds no inference backend and never invokes conversational inference.
+        """
         from ament_index_python.packages import get_package_share_directory
 
         registry = Path(get_package_share_directory('smpa_ros')) / 'models'
@@ -320,7 +389,7 @@ class Runner:
         self.selected = selected
         self.models = {stage: deepcopy(selected) for stage in ('vision', 'model', 'plan')}
         self.model_identifier = self.plan_identifier = selected['model_id']
-        if self.options.service in ('speech', 'all'):
+        if self.modalities['hear']:
             # Speech recognition/synthesis are separate from cognitive inference.
             entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
             self.models.update({name: entry for name, entry in entries.items()
@@ -438,7 +507,12 @@ class Runner:
                        prompt_name=prompt, record_name=name, provenance=provenance, configuration=self.pipeline)
 
     def finish(self, status='completed'):
-        """Stop participants and finalize the active run, including cleanup failures."""
+        """Stop owned participants and finalize the active run exactly once.
+
+        Preserve refinement outcomes, invoke the existing teardown and record a
+        failed lifecycle if cleanup raises. Always finalize metadata and clear
+        references to this run's sensory nodes, leaving historical records intact.
+        """
         if self.memory is None or self.memory.metadata['status'] != 'running':
             return
         try:
@@ -453,5 +527,5 @@ class Runner:
         finally:
             self.memory.finalize(status)
             self.participant = None
-            self.camera_node = self.executor = self.speech = self.sense_node = None
+            self.camera_node = self.executor = self.speech = self.sense_node = self.read_node = None
         self.backend = None

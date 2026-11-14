@@ -1997,3 +1997,68 @@ The local model's accepted mapping was coarse: some claims were stored as
 attributed text on entities rather than separate Proposition individuals. Thus
 structural validation and source preservation are verified; faithful semantic
 normalisation by a small local model remains a limitation requiring inspection.
+
+### Sense modalities: Hear, Read and Vision
+
+The `sense/` package separates auditory acquisition (`hear`), read-only
+conversation input (`read`), and visual acquisition/inference (`vision`). The
+existing `smpa_ros.sense` imports and console entry point remain supported.
+`Hear` reuses the existing speech backends and audio store; `Talk` remains output.
+Segmentation and VisualJEV remain independently callable.
+
+Legacy `--service vision|speech|all` defaults still apply. Optional configuration
+can override the enabled modalities without changing stage order:
+
+```yaml
+sensing:
+  hear: true
+  vision: true
+  read:
+    enabled: true
+    session: /absolute/path/to/an/existing/conversation/run
+```
+
+Equivalent Runner controls are `--hear true|false`, `--vision true|false`, and
+`--read-session /absolute/path/to/run`. Launch arguments use `hear:=true`,
+`vision:=true`, and `read_session:=/absolute/path/to/run`. Read is disabled by
+default and never starts conversational inference or RDF updates. Run the
+existing conversation GUI separately, then explicitly select its session.
+
+Read consumes newly persisted **User** messages, preserving roles, ordering,
+source timestamps, attribution and source records. Text remains an unverified
+user statement. It never waits for a new message or a GUI lock. Incomplete
+concurrent writes are deferred. Each robot run commits its own consumption
+cursor **inside its successfully persisted Sense record**. Reading or failing
+before that commit consumes nothing; failure later in Model/Plan/Act does not
+replay already persisted sensing. Reconstructing Read against the same robot
+run recovers its cursor from those records; this does not add robot experiment
+resumption. No conversation files are modified or duplicated into a new store.
+Consumed-history changes or corrupt committed robot records fail closed.
+
+Vision saves the original decoded RGB PNG before inference and retains it on
+inference failure. PNG `smpa.camera` metadata records source stamp/frame,
+encoding/stride and UTC receipt time. Source stamps may be simulation time.
+Successful description filenames remain unchanged. Failed Sense records link
+retained evidence without manufacturing a successful description. RGB PNGs
+preserve decoded pixels, not bit-identical ROS serialization or padding bytes.
+
+Run-assigned ROS identities now occupy:
+
+- `/run_<uuid>/sense/vision/{smpa_loop,sense}`;
+  DescribeScene service `/run_<uuid>/sense/vision/describe_scene`.
+- `/run_<uuid>/sense/hear/{listener,listener_talker}`;
+  Listen action `/run_<uuid>/sense/hear/listen`.
+- `/run_<uuid>/sense/read/read`: file-backed Read identity; no fabricated text topic.
+- `/run_<uuid>/act/talker`; Talk action `/run_<uuid>/act/talk`.
+
+These replace the old run-assigned `/run_<uuid>/sense` and
+`/run_<uuid>/speech/{listen,talk}` endpoints. External clients must use the new
+names or explicit remapping; remapping does not create an alias. Standalone
+`/sense`, `/speech/listen`, `/speech/talk` defaults and existing message/action
+schemas remain unchanged. The external TIAGo camera and independent evaluator
+endpoints remain unchanged. No new inference model or process is created by Read.
+
+The normal robot command still performs real actions selected by its configured
+whitelist; do not use movement-enabled defaults for sensing-only verification.
+Run contract regressions with `./test.sh --unit` and existing local-model
+integration checks with `./test.sh --integration`.

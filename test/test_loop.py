@@ -20,7 +20,8 @@ def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
 
     Only inference is mocked. On success require one UTC-stamped Markdown/PNG
     pair in the assigned run, with unchanged pixels and text. On inference
-    failure require neither observation file, leaving run ownership unchanged.
+    failure retain the original PNG and its camera metadata without writing a
+    fabricated description, leaving run ownership unchanged.
     """
     run_dir = assigned_test_run.directory
     rclpy.init(args=[])
@@ -45,7 +46,12 @@ def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
         if fails:
             with pytest.raises(RuntimeError, match='model failed'):
                 capture_once(loop, config, run_dir, executor, timeout=5)
-            assert not list((run_dir / 'observations' / 'vision').iterdir())
+            images = list((run_dir / 'observations' / 'vision').glob('*.png'))
+            assert len(images) == 1
+            assert not list((run_dir / 'observations' / 'vision').glob('*.md'))
+            with PILImage.open(images[0]) as evidence:
+                assert evidence.getpixel((0, 0)) == (255, 0, 0)
+                assert 'smpa.camera' in evidence.info
         else:
             from smpa_ros.sense import record_observation
             captured = {}
