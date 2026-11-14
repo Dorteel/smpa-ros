@@ -1,0 +1,6 @@
+# GUI-only Python packages, installed into gui/.venv and nowhere else.
+# rclpy, the ROS message packages, NumPy and Pillow come from the ROS 2
+# installation through the virtual environment's system site-packages.
+fastapi==0.163.0
+uvicorn==0.54.0
+websockets==17.4
