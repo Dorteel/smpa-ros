@@ -25,6 +25,7 @@ setup(
     tests_require=['pytest'],
     entry_points={'console_scripts': [
         'sense = smpa_ros.sense:main',
+        'segment_image = smpa_ros.segmentation:main',
         'smpa = smpa_ros.smpa:main',
         'listen = speech.actions:listen_main',
         'talk = speech.actions:talk_main',

@@ -1,3 +1,69 @@
+# Local RLHF Training Gym
+
+A local, browser-based Hugging Face conversation and human-feedback laboratory.
+It runs independently of the existing ROS application documented below. Markdown
+in an Obsidian-compatible vault is the authoritative experiment store.
+
+## Install the gym (Python 3.12, Linux)
+
+Use a dedicated environment; do not replace the existing ROS environment:
+
+```bash
+cd /home/dorteel/ros2_ws/src/smpa-ros
+python3 -m venv .venv-rlhf
+# CPU-only installation avoids downloading CUDA libraries:
+.venv-rlhf/bin/python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cpu
+.venv-rlhf/bin/python -m pip install -r requirements-rlhf.txt
+```
+
+For CUDA, install the matching CUDA-enabled Torch 2.9.1 build instead of the CPU
+wheel. Optional QLoRA: `.venv-rlhf/bin/python -m pip install bitsandbytes==0.48.2`.
+Dependency versions are pinned in `requirements-rlhf.txt`; no installation or model
+download occurs when launching the app. Existing Torch installations are not changed.
+
+## Launch and use
+
+```bash
+./run_rlhf.sh
+# Open http://127.0.0.1:8501
+```
+
+Optional configuration:
+
+```bash
+RLHF_VAULT="$PWD/RLHF-Vault" RLHF_MODELS="$PWD/models/llm" RLHF_PORT=8501 ./run_rlhf.sh
+```
+
+Both directories can also be set in the sidebar. Choose a complete local Transformers
+model directory and Load model. The default selector prefers Qwen3-0.6B when present.
+The model must include weights, tokenizer and a compatible chat template; missing
+files produce an error without downloading replacements. CPU float32 is the safe
+default. Create a conversation, send prompts, and select a saved response to rate,
+explain or correct. Enable A/B mode to compare two seeded responses, then choose A
+or B to commit that answer into the conversation. Start a new conversation to
+restart; the old one remains resumable.
+
+Training shows separate SFT correction and DPO preference counts. The threshold
+(default 10) notifies only. Select examples, review parameters, explicitly approve,
+and start a run. Stop requests are observed between steps. Select the resulting
+adapter and Load model to converse with it. Models shows hardware; Experiments
+exposes Markdown records/datasets/checkpoints; Metrics compares loss, learning
+rate and collected human ratings. Loss does not establish qualitative improvement.
+
+```bash
+./test.sh --rlhf          # includes real tiny CPU SFT + DPO and continuation
+./test.sh                # original isolated ROS build/unit suite
+```
+
+Gym tests use temporary vaults and locally constructed random model weights; no
+model downloads or audio/GPU hardware are needed. They verify persistence/recovery,
+feedback extraction, notifications, approval rejection, real adapter updates,
+checkpoint reload/continuation, worker cancellation and Streamlit widget workflows.
+CUDA/QLoRA and full physical-browser layout testing are separate verification limits.
+See [ARCHITECTURE.md](ARCHITECTURE.md), [TRAINING.md](TRAINING.md) and [TODO.md](TODO.md).
+
+---
+
 # Minimal robot cognition
 
 ## Quick start: Ubuntu 24.04 / ROS 2 Jazzy
@@ -1061,3 +1127,112 @@ sessions, linked transcripts, incomplete/canceled observations, and storage erro
 reporting. The prerecorded CPU integration test also decodes the saved WAV and
 compares it with input samples while checking the real recognized text. No audio
 hardware is required for these tests.
+
+## Standalone text-guided segmentation
+
+`SegmentImage` is independent of Sense, Model, Plan, Act, and Observe. The
+`segment_image` node owns one CLIPSeg processor and model for its lifetime;
+requests run sequentially in inference mode. It never starts another VLM or
+publisher. The implementation is in `smpa_ros/segmentation.py`, with a small
+one-frame example in `scripts/segment_image_client.py`.
+
+The `/segment_image` service accepts a `sensor_msgs/Image` and a text prompt
+such as `green shirt`. It returns a `32FC1` soft mask and a `mono8` binary mask,
+both with the original image dimensions and header. The entire input is
+resized for CLIPSeg without center cropping. Sigmoid scores are bilinearly
+resized back to the input dimensions **before** applying `score >= threshold`.
+Soft scores stay in their original range: there is no per-image normalization,
+contrast stretching, or claim that these are calibrated probabilities. Binary
+pixels are exactly 0 or 255. Failed requests return `success=false`, an
+explanation, and empty masks without stopping the node.
+
+### Local weights and build
+
+The default model directory is `models/vision/clipseg_rd64_refined`, relative
+to the working repository. `model_path` can instead name another explicit
+local directory. Startup always uses `local_files_only=True`; it never fetches
+missing weights. The existing general downloader's fixed LLM/VLM library is
+unchanged. If this model is missing, explicitly download its inference files:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/hf download CIDAS/clipseg-rd64-refined \
+  --local-dir models/vision/clipseg_rd64_refined \
+  --include '*.json' '*.txt' 'pytorch_model.bin'
+```
+
+This selects one weight format rather than downloading duplicate checkpoints.
+A local safetensors version of the same checkpoint is also supported. This
+is a separate segmentation checkpoint, not a cognitive model selection. The backend follows the existing
+[Transformers CLIPSeg implementation](https://huggingface.co/docs/transformers/model_doc/clipseg).
+
+Build the new service interface and the Python entry point:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/jazzy/setup.bash
+src/smpa-ros/.venv/bin/python "$(command -v colcon)" build \
+  --paths src/smpa-ros src/smpa-ros/smpa_ros_interfaces \
+  --packages-select smpa_ros_interfaces smpa_ros
+source install/setup.bash
+cd src/smpa-ros
+```
+
+### Start the service and inspect one frame
+
+In the sourced terminal, start the service using the existing Python environment:
+
+```bash
+ros2 run --prefix "$PWD/.venv/bin/python" smpa_ros segment_image --ros-args \
+  -p model_path:="$PWD/models/vision/clipseg_rd64_refined" \
+  -p device:=auto -p threshold:=0.5
+```
+
+`device` accepts `cpu`, `cuda`, or `auto`; `auto` selects CUDA when available.
+Explicit CUDA fails startup if CUDA is unavailable. CPU and CUDA both use
+float32. All three parameters are startup settings; restart the node to change
+them. The node reports its resolved path and device once when ready.
+
+In a second sourced terminal, reuse the existing image publisher; do not start
+another publisher if the camera topic is already active:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+.venv/bin/python scripts/segment_image_client.py --prompt 'green shirt' \
+  --output-dir /tmp/clipseg-green-shirt --timeout 120
+```
+
+The topic defaults to `camera_topic` in `config.yaml`. Use `--topic` to override
+it. The client captures exactly one frame, saves `binary_mask.png` and
+`overlay.png`, and releases its subscriber and service client. Selected pixels
+are tinted red in the overlay; unselected pixels remain unchanged. Reusing an
+output directory replaces those two inspection files.
+
+### Memory and verification
+
+The usual CLIPSeg checkpoint has roughly 0.6 GB of float32 weights. Budget
+approximately **1–2 GiB of free GPU memory** for model weights, activations,
+CUDA context, and workspaces at the standard model input size. This is a
+planning estimate, not a measured peak for this checkout. Original output
+resolution and runtime versions also affect usage. The segmentation process
+adds memory to whatever the shared VLM already holds; it does not borrow or
+replace that model. Check `nvidia-smi` before running both. Larger VLM contexts
+can consume the remaining headroom. Use `-p device:=cpu` to keep segmentation
+off the GPU; CPU requires host RAM and will usually be slower. CUDA inference
+errors, including exhausted memory, are reported to the caller without a
+silent change of device.
+
+```bash
+./test.sh --all
+git diff --check
+ros2 interface show smpa_ros_interfaces/srv/SegmentImage
+```
+
+Tests use real Torch operations and ROS service serialization with a substituted
+CLIPSeg loader, so they require no weight download. They cover padded RGB/BGR
+images, score resizing, thresholds, encodings, headers, invalid requests,
+recovery, one-time loading, and the inspection overlay. A real trained-model
+service call additionally requires the local weights and an active existing
+image publisher; a mocked-model call is not evidence of segmentation quality.
