@@ -136,8 +136,15 @@ def resolve_vision_model(config, registry, model_root, *, model_config=None):
     return dict(selected, backend='transformers', model_id=info['model_id'], path=info['path'])
 
 
-def load_backend(config, config_path, model_root, registry):
-    """Return the shared lazy text generator and its model metadata."""
+def load_backend(config, config_path, model_root, registry, *, conversation=False):
+    """Resolve a model and return the existing lazy inference callable.
+
+    Robot callers keep local-file checks, generation validation and string
+    results. Conversational discovery keeps registry paths unchanged so saved
+    agent identities remain resumable and unavailable models can be shown in the
+    GUI. Its first generation loads that model and opts into structured results
+    and conversational controls. Neither path loads another workflow's model.
+    """
     if config['modeling'].get('backend') == 'api':
         selected_name = 'api'
         provider = config['modeling'].get('provider', 'openai')
@@ -153,7 +160,7 @@ def load_backend(config, config_path, model_root, registry):
         selected = dict(registry_entries[selected_name])
         if config['modeling'].get('backend', selected['backend']) != selected['backend']:
             raise ValueError('modeling.backend must match the selected registry backend or be api')
-    if selected['backend'] == 'transformers':
+    if selected['backend'] == 'transformers' and not conversation:
         path = Path(selected['path']).expanduser()
         path = path if path.is_absolute() else Path(model_root) / path
         info = local_model_info(path, model_id=selected.get('model_id'), model_root=model_root)
@@ -163,17 +170,27 @@ def load_backend(config, config_path, model_root, registry):
     modeling_backend = None
 
     def model(prompt, *, max_new_tokens, schema=None, reasoning_effort=None, **options):
+        """Generate with the selected workflow's existing output contract.
+
+        Validate robot controls before loading weights. Conversational controls
+        are validated by their backend's opt-in interface instead. Lazily reuse
+        one backend, forwarding schemas without weakening their validation, and
+        return a string for robot inference or a structured conversational result.
+        """
         nonlocal modeling_backend
         generation_options = dict(options)
-        response = options.get('response_format') or ('json_schema' if schema is not None else 'text')
-        capabilities = generation_capabilities(selected['backend'],
-            provider=config.get(selected.get('provider'), {}), model_id=selected['model_id'])
-        if selected['backend'] == 'api' and not config.get(selected.get('provider'), {}).get('generation_capabilities'):
-            capabilities = None
-        validate_generation(dict(max_output_tokens=max_new_tokens, output_schema=schema,
-            response_format=response, reasoning_effort=reasoning_effort,
-            temperature=options.get('temperature'), seed=options.get('seed')),
-            backend=selected['backend'], capabilities=capabilities)
+        if not conversation:
+            if set(options) - {'temperature', 'seed', 'response_format'}:
+                raise ValueError('Interactive generation settings are supported only in conversations')
+            response = options.get('response_format') or ('json_schema' if schema is not None else 'text')
+            capabilities = generation_capabilities(selected['backend'],
+                provider=config.get(selected.get('provider'), {}), model_id=selected['model_id'])
+            if selected['backend'] == 'api' and not config.get(selected.get('provider'), {}).get('generation_capabilities'):
+                capabilities = None
+            validate_generation(dict(max_output_tokens=max_new_tokens, output_schema=schema,
+                response_format=response, reasoning_effort=reasoning_effort,
+                temperature=options.get('temperature'), seed=options.get('seed')),
+                backend=selected['backend'], capabilities=capabilities)
         if reasoning_effort is not None:
             if selected['backend'] != 'api':
                 raise ValueError('reasoning_effort is supported only for API inference')
@@ -195,8 +212,10 @@ def load_backend(config, config_path, model_root, registry):
         if schema is not None:
             if selected['backend'] not in ('transformers', 'api', 'ollama'):
                 raise RuntimeError('Selected backend does not provide the required schema-constrained planning')
-            return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, schema=schema, **generation_options)
-        return modeling_backend.generate(prompt, max_new_tokens=max_new_tokens, **generation_options)
+            generate = modeling_backend.generate_conversation if conversation else modeling_backend.generate
+            return generate(prompt, max_new_tokens=max_new_tokens, schema=schema, **generation_options)
+        generate = modeling_backend.generate_conversation if conversation else modeling_backend.generate
+        return generate(prompt, max_new_tokens=max_new_tokens, **generation_options)
 
     return model, dict(selected, name=selected_name)
 

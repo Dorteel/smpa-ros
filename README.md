@@ -705,8 +705,8 @@ creates a new execution session.
 
 ## Persistent local model library
 
-The standalone `scripts/download_models.py` manages exactly eleven public models
-under `models/llm/`, `models/vlm/`, and `models/coding/`. Existing root model YAML
+The standalone `scripts/download_models.py` uses the shared text registry plus the existing vision/coding library
+under `models/text/`, `models/llm/`, `models/vlm/`, and `models/coding/`. Existing root model YAML
 files and ROS model-loading behavior are unchanged. Library directories and
 `models/download_report.json` are Git-ignored, including metadata and partial
 downloads. No existing weights were tracked when this library was added.
@@ -1236,3 +1236,627 @@ images, score resizing, thresholds, encodings, headers, invalid requests,
 recovery, one-time loading, and the inspection overlay. A real trained-model
 service call additionally requires the local weights and an active existing
 image publisher; a mocked-model call is not evidence of segmentation quality.
+
+## Local conversational GUI
+
+The conversational entry point runs an epistemic **Sense → Model → Act** loop:
+receive and save a user message, update its attributed belief representation,
+then generate and save a response. New conversations
+default to **Qwen/Qwen3-4B**, using the existing local Transformers backend and
+registry entry `qwen3-4b`. This GUI default is independent of the robot pipeline
+in `config.yaml`, which is unchanged. No API credentials or internet connection
+are required for local inference once the weights and dependencies are installed.
+The robot keeps its explicit **Sense → Model → Plan → Act** workflow and selects
+one shared vision/text backend through `model`. Conversation selects its agents
+through `conversation.agent` and `conversation.modelling_agent`; its interactive
+controls remain independent of robot stage settings. Canonical
+`stage_settings.model.max_output_tokens` and legacy `max_new_tokens` are accepted
+in conversational provenance. Null optional settings remain unspecified.
+
+Each workflow creates its own UUID run under the same `memory/runs` root. Robot
+world models remain Markdown snapshots; conversational RDF remains attributed,
+untrusted conversational evidence and is never fed into robot planning.
+
+It does not initialize ROS, invoke physical Model/Plan stages, or execute robot actions. No camera,
+speech models, Webots, or action servers are required to run the GUI.
+
+From the checkout, use the prepared environment (install RDFLib as described under Phase 1 below):
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+# Install/update the Python package and its packaged HTML in the existing environment:
+.venv/bin/python -m pip install --no-deps .
+# Launch directly; sourcing ROS is unnecessary for the conversational application:
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+```
+
+For a fresh full robotics installation, `./install.sh` remains the existing setup
+command with its documented prerequisites. The Python-only installation command
+above assumes that environment and the selected inference dependencies already
+exist; it does not provision local weights. API inference requires the configured
+credential in `.env` or the environment and sends conversation history to that
+provider. No live API request is made until a message is sent.
+
+Open **http://127.0.0.1:8000** in a browser, or on Ubuntu:
+
+```bash
+xdg-open http://127.0.0.1:8000
+```
+
+The conversation header has an **Active agent** selector, populated from the
+existing text-model registry and API provider sections in `config.yaml`.
+Entries distinguish Local/Transformers (or Local/Ollama) from API providers.
+Selecting an agent is saved immediately without loading its model or discarding
+history; its backend initializes on the first message. API inference requires
+explicit selection for a new run. Missing local weights or credentials produce
+an advisory in the GUI; missing weights prevent selection, and backend failures are recorded; there is
+no automatic cloud fallback and no automatic model download.
+
+An agent is an inference configuration: provider, backend, model, generation
+settings, local path or API endpoint, and model-specific options. Its stable ID
+includes a configuration hash. The base agent snapshot remains stable while
+interactive overrides are stored separately in `generation_settings`. The GUI
+uses its own generation defaults, described below; SMPA Model/Plan defaults are
+unchanged. API reasoning controls are omitted for local models. The selected
+base snapshot is stored as `active_agent` in run metadata. Each assistant response records its
+agent snapshot in both `conversation.md` (a length-delimited HTML comment) and
+its `act.json`; the GUI displays provider/model attribution below the reply.
+Credentials are never included in these agent snapshots.
+
+Resuming restores the saved selection, including an explicitly selected API
+agent. Older runs without `active_agent` restore their recorded `models.text`
+selection when available; old responses are marked as lacking per-response
+attribution rather than retroactively assigning one. Changes to an existing
+agent's configuration require the original settings to resume reproducibly.
+Restart after editing configuration; changes during inference are rejected.
+
+The left panel supports Enter-to-send and Shift+Enter for newlines. The right
+panel displays the persisted belief graph, with node properties and provenance
+inspection and a link to cumulative SDS. It uses SVG without a frontend dependency.
+
+Each server process owns one active conversation at a time. New, Clear context,
+and Resume switch the active run without deleting previous transcripts.
+Refreshing the page reloads its history and settings. The server prints the run directory under `memory/runs/`; it contains
+`goal.md`, `metadata.yaml`, `conversation.md`, `conversation-sds.md`,
+`belief-state.ttl`, and the standard MemoryManager subdirectories.
+`state/cycle_*/sense.json`, `model*.json`, and `act.json` record each exchange.
+The transcript is append-only Markdown with hidden byte-length comments that
+allow exact reloading even when messages contain Markdown role headings.
+Incomplete or malformed transcripts are rejected and preserved unchanged.
+
+Stop with Ctrl+C. To continue a saved conversation, use its printed directory:
+
+```bash
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml" \
+  --resume "$PWD/memory/runs/REPLACE_WITH_RUN_DIRECTORY"
+```
+
+Resuming requires the original configuration and rejects robot runs. An exclusive
+file lock prevents two application processes from writing the same transcript.
+The server listens only on `127.0.0.1`; use `--port 8001` if necessary. Exchanges
+are serialized. All saved messages are included in the inference prompt; long
+conversations remain subject to the selected model's context limit, with no
+silent truncation. Failed inference keeps the user's message and prior history,
+records failure, and allows the next exchange. Shutdown finalizes run metadata;
+process exit releases inference resources.
+
+Run the mocked conversation tests without ROS, API access, or models:
+
+```bash
+.venv/bin/python -m unittest discover -s test -p test_conversation.py -v
+```
+
+Run the existing build/unit suite, which also discovers these tests and verifies
+the installed conversation entry point and HTML:
+
+```bash
+./test.sh --unit
+```
+
+### Conversational local-model requirements
+
+The smaller, optional Qwen3-0.6B checkpoint remains supported in
+`models/llm/qwen3_0.6b` in this checkout (approximately 1.5 GiB on disk).
+The existing Transformers text backend runs on CPU without requiring CUDA.
+An offline smoke check with a short greeting and a 16-token output limit used
+about **4.94 GiB peak process RSS**. Allow **6–8 GiB available RAM** as a starting
+point; dependency loading, longer histories, KV cache, and other loaded models
+can increase memory use. This is a measured short-run result, not a hard bound.
+No GPU memory is required by this CPU backend.
+
+Reuse the existing `.venv` and weights. If the checkpoint is missing, download
+it explicitly using the repository's existing downloader (this provisioning
+step requires internet, unlike subsequent local inference):
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/python scripts/download_models.py --model Qwen/Qwen3-0.6B
+```
+
+The downloader retains its 5 GiB free-disk reserve. It is never invoked by the
+GUI. The full environment installation remains `./install.sh`; updating only
+the GUI in an existing environment uses the `pip install --no-deps .` command
+above. No new runtime dependencies were introduced for agent selection.
+
+### Conversational reasoning traces
+
+Conversational inference returns a final `response` and, only when explicitly
+provided by the backend, a separate `thinking` field. Supported sources are:
+
+- OpenAI-compatible API responses with plain-text `reasoning_content` or
+  `reasoning` fields. Token counts, encrypted objects, and absent fields do not
+  produce traces; no separate request is made to explain an answer.
+- Ollama's explicit `thinking` response field.
+- Local Qwen3's documented leading `<think>…</think>` block. These delimiters
+  are interpreted only for the Qwen3 model family; other models' literal markup
+  is not reclassified as reasoning. Incomplete thinking blocks or missing final
+  answers fail instead of displaying reasoning as the answer.
+
+This captures emitted reasoning; it does not enable reasoning, change prompts,
+or alter generation defaults. In particular, the registry's local Qwen default
+still has `enable_thinking: false`. Providers that do not expose a reasoning
+trace continue to return and persist only the response. Model and Plan keep
+using the existing string-returning inference path; only the conversation opts
+into structured results through the shared backend loader.
+
+New assistant transcript entries use `<response>` tags and include a preceding
+`<thinking>` section when a trace exists. Byte lengths in the existing message
+marker delimit both sections, so literal tags or headings within model output
+cannot break the association. Old transcripts are read unchanged; old literal
+reasoning-looking tags are not interpreted as new traces.
+
+Each trace shares its response's agent provenance. If an API or Ollama response
+reports a different actual model identifier, that identifier is recorded along
+with the requested model. The corresponding Act record stores `response`, optional
+`thinking`, and its backend field/delimiter source. Run selection remains unchanged.
+
+The GUI displays the final response normally and a native, keyboard-accessible
+**Thinking** disclosure, collapsed by default, for available traces. Both parts
+are rendered as text. Message JSON exposes typed `parts` (`user`, `thinking`,
+`response`) for future filtering. Subsequent inference receives the chronological
+user/final-response history, not prior thinking traces.
+
+Run mocked conversation tests, including backward compatibility:
+
+```bash
+.venv/bin/python -m unittest discover -s test -p test_conversation.py -v
+```
+
+Run the full regression suite and the optional real-browser expand/collapse
+check using an existing Firefox installation (no browser dependency is added):
+
+```bash
+SMPA_BROWSER_TEST=1 ./test.sh --unit
+```
+
+Without the environment flag or Firefox, the browser test is skipped; the other
+unit tests still run with `./test.sh --unit`. No live API or Ollama service is
+needed for these tests.
+
+### Reproducing Qwen conversation repetition
+
+The conversational history is passed to each backend as actual `user` and
+`assistant` messages. Previously, the complete history was serialized as JSON
+inside one user prompt. Although no history was lost, Qwen's chat template saw
+only a single user role. With the existing Qwen3-0.6B checkpoint this reproduced
+"I'm here to help! What can I do for you?" on both identity questions below.
+
+The fix preserves role boundaries through Qwen's native chat template, including
+`add_generation_prompt=True` and the existing `enable_thinking=False`. API
+conversations likewise use role-separated Chat Completions messages; Ollama
+conversations use `/api/chat`. Robot stages still use their original string
+prompts. Transcript framing and reasoning extraction are unchanged.
+
+The investigation used the existing 4096-token conversational limit and greedy
+`do_sample=False` generation. Checkpoint sampling defaults (temperature 0.6,
+top-p 0.95, top-k 20) are inactive under greedy decoding. Repetition penalty is
+1.0, EOS IDs are `[151645, 151643]`, and padding ID is `151643`. The reproduced
+outputs ended normally at `<|im_end|>`. Each turn invokes generation anew;
+reusing loaded weights does not cache assistant responses. No sampling changes,
+repetition penalties, EOS changes, or model replacement were needed for the fix.
+
+The optional real-model regression runs these inputs consecutively:
+
+1. Hello
+2. Who are you?
+3. No, I mean WHO are you?
+4. This conversation seems stuck.
+
+For each turn it compares the real GUI HTTP route with direct model inference
+using identical history, weights, and generation settings. It asserts equality
+of the formatted prompt, raw generated continuation, and final answer. A separate
+control reconstructs the former JSON wrapper to show the difference. Only
+already-downloaded weights are used; no model is fetched. Run from the checkout:
+
+```bash
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+SMPA_QWEN_TEST=1 SMPA_QWEN_LOG=/tmp/smpa-qwen-repetition.json \
+.venv/bin/python -m unittest discover -s test -p test_conversation.py \
+  -k test_qwen_four_turn_http_matches_direct -v
+
+./test.sh --unit
+```
+
+The JSON report includes the complete synthetic histories, formatted prompts,
+raw outputs with EOS tokens, final responses, and generation configuration for
+GUI, direct, and legacy-wrapper comparisons. The ordinary unit suite uses mocked
+inference and skips this optional real-model test unless `SMPA_QWEN_TEST=1`.
+
+In the verified run, all four GUI results matched direct inference. The model
+still repeated its identity answer on the emphatic third turn in both paths;
+fixing transport/template semantics does not guarantee that this small model's
+answers will always be varied or useful.
+
+To log formatted prompts and raw continuations during an interactive GUI session,
+enable only the Transformers backend's DEBUG logger. These logs include complete
+message contents and are separate from conversation transcripts:
+
+```bash
+.venv/bin/python - <<'PY'
+import logging
+from smpa_ros.conversation_web import main
+logger = logging.getLogger('smpa_ros.backends.transformers')
+handler = logging.FileHandler('/tmp/smpa-qwen-debug.jsonl', encoding='utf-8')
+handler.setFormatter(logging.Formatter('%(message)s'))
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
+main(['--config', 'config.yaml'])
+PY
+```
+
+
+### Reproducible conversational model downloads
+
+`models/model_library.yaml` is the source of text model IDs, pinned revisions,
+paths and Qwen thinking settings. The GUI defaults independently to `qwen3-4b`.
+It stays local when weights are absent, displays the missing-assets error, and
+allows choosing another installed agent. Resumed runs retain their saved choice.
+The SMPA experiment configuration and ordinary install download selection are unchanged.
+
+Run from the repository root with the existing environment:
+
+```bash
+.venv/bin/python scripts/download_models.py --list
+.venv/bin/python scripts/download_models.py --model qwen3-4b
+# Full repository IDs remain accepted:
+.venv/bin/python scripts/download_models.py --model Qwen/Qwen3-4B
+# Explicitly provision all six registered text models, including existing 0.6B:
+.venv/bin/python scripts/download_models.py --all-text
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+./test.sh --unit
+```
+
+The five new destinations are `models/text/qwen3-1.7b`, `models/text/qwen3-4b`,
+`models/text/phi-4-mini-instruct`, `models/text/gemma-4-e4b`, and
+`models/text/qwen3-8b`. Existing 0.6B stays at `models/llm/qwen3_0.6b`.
+Existing older `llm/qwen3_*` files are preserved and reused through links when
+checksums match. The list command reports asset presence; the download command
+verifies checksums before declaring completion. Re-run downloads to resume;
+`models/download_report.json` records revision, manifest, status and disk usage.
+
+An alternate storage root must be passed to both downloader and GUI:
+
+```bash
+.venv/bin/python scripts/download_models.py --model qwen3-4b --model-root /mnt/models
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml" --model-root /mnt/models
+```
+
+Downloads are anonymous by default. If a repository requires access, accept its
+license on Hugging Face, run `.venv/bin/hf auth login`, then add `--auth` to the
+download command. No credentials or network are needed for local inference.
+Gemma's verified official ID is `google/gemma-4-E4B-it`; it is not substituted
+with another model. Its `gemma4` architecture is unsupported by this environment's
+Transformers 4.57.6, so downloading it does not imply it can run in this backend.
+No dependency upgrade or remote model code execution is performed automatically.
+
+The current text backend uses CPU float32: allow approximately four bytes per
+parameter plus Python/PyTorch, activations and KV-cache overhead. Qwen3-4B needs
+roughly 15 GiB for weights alone; plan for at least 20 GiB available RAM for short
+conversations. Qwen3-8B needs roughly 31 GiB for weights alone. These are planning
+estimates, not measured peak requirements or limits on conversation length.
+
+If Xet transfers stall, use the Hub's standard HTTP transport (the partial
+local download is retained):
+
+```bash
+HF_HUB_DISABLE_XET=1 .venv/bin/python scripts/download_models.py --all-text
+```
+
+For a minimal offline inference check, run one model per process. Change `MODEL`
+to another registered name only when enough RAM is available:
+
+```bash
+MODEL=qwen3-1.7b HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+import torch
+import yaml
+from smpa_ros.backends.transformers import TransformersBackend
+entry = yaml.safe_load(Path('models/model_library.yaml').read_text())['models'][os.environ['MODEL']]
+torch.set_num_threads(2)
+backend = TransformersBackend(str(Path('models') / entry['path']),
+                              enable_thinking=entry.get('enable_thinking'))
+print(backend.generate_conversation([{'role': 'user', 'content': 'Reply with a short greeting.'}],
+                                    max_new_tokens=16))
+PY
+```
+
+Verified official revisions (stored in the shared registry):
+
+| Registered name | Official repository | Revision |
+|---|---|---|
+| `qwen3-1.7b` | `Qwen/Qwen3-1.7B` | `70d244cc86ccca08cf5af4e1e306ecf908b1ad5e` |
+| `qwen3-4b` | `Qwen/Qwen3-4B` | `1cfa9a7208912126459214e8b04321603b3df60c` |
+| `phi-4-mini-instruct` | `microsoft/Phi-4-mini-instruct` | `cfbefacb99257ffa30c83adab238a50856ac3083` |
+| `gemma-4-e4b` | `google/gemma-4-E4B-it` | `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c` |
+| `qwen3-8b` | `Qwen/Qwen3-8B` | `b968826d9c46dd6066d109eabc6255188de91218` |
+
+Offline checks on this 31 GiB RAM, CPU-only machine used two PyTorch threads and
+at most 16 output tokens. Qwen3-1.7B generated a greeting in 5.1 seconds at
+10.4 GiB peak RSS; Qwen3-4B in 36.5 seconds at 16.3 GiB; Phi-4-mini-instruct
+in 10.1 seconds at 17.7 GiB. Times include initialization and depend on machine
+load. The Qwen3-4B default and agent switching were also verified through the
+localhost HTTP server. Gemma's offline config load failed with an unsupported
+`gemma4` architecture error; its downloaded weights are not an inference success.
+
+All five requested downloads completed and passed size/checksum verification.
+Gemma weights were reused from the existing Hub cache through a link. Actual
+local sizes (including tokenizer/config assets) were:
+
+| Repository-relative destination | Size (GiB) |
+|---|---:|
+| `models/text/qwen3-1.7b` | 3.80 |
+| `models/text/qwen3-4b` | 7.51 |
+| `models/text/phi-4-mini-instruct` | 7.17 |
+| `models/text/gemma-4-e4b` | 14.92 |
+| `models/text/qwen3-8b` | 15.27 |
+
+Qwen3-8B passed offline config loading but generation was skipped: the float32
+weights plus a 3 GiB overhead allowance require approximately 33.5 GiB RAM,
+versus 22.2 GiB available at verification time. No quantization or alternate
+backend was introduced. Download success is distinct from inference support.
+The final `./test.sh --unit` run passed: 163 passed, 2 skipped, 2 deselected.
+
+
+### Interactive generation settings and conversation controls
+
+Open **Generation settings** in the conversation header. Controls save when
+changed and are disabled while a request is running. The active settings remain
+visible with the panel collapsed. Each control distinguishes a model default,
+a conversation default, a pipeline configuration value, or an explicit override;
+**Use default** removes one override and **Reset settings** removes all overrides
+for the selected agent. Switching agents restores that agent's settings within
+the current run, without transferring unsupported overrides to another backend.
+
+The conversational token budget starts at **512** and seed at **42**. Local
+`generation_config.json` values take precedence for sampling, temperature, top-p,
+top-k and repetition penalty; otherwise the starting values are sampling enabled,
+0.7, 0.9, 20 and 1.0. Qwen3 thinking defaults to the registry's setting. These
+GUI defaults do not change the physical SMPA experiment or its inference defaults.
+Older runs without interactive-settings metadata remain readable and begin with
+these GUI defaults; previous response provenance is never rewritten.
+
+- Transformers supports all listed decoding controls. **Enable thinking** is
+  supported only for Qwen3 and is passed as `enable_thinking` to the tokenizer's
+  native chat template, without inserting a synthetic instruction into messages.
+- With Sampling off, temperature, top-p and top-k are disabled and omitted from
+  effective decoding settings. Their configured values are retained for use if
+  sampling is enabled again. Seeded local calls restore PyTorch RNG state after
+  generation; changing settings reuses the same lazily loaded model instance.
+- The API interface forwards the Chat Completions fields `temperature`, `top_p`
+  and `seed`, plus the token limit and existing configured reasoning effort.
+  The endpoint must support these fields for the selected model; rejection is
+  surfaced without retrying with different settings. API sampling toggles,
+  top-k, repetition penalty and generic thinking toggles are disabled because
+  this interface cannot represent them faithfully. Provider-internal defaults
+  are opaque: recorded API settings describe the request, not unreported internals.
+  See the [official Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+- The existing Ollama adapter exposes only the token budget interactively. Its
+  existing temperature 0 and seed 0 are recorded in each response's settings;
+  other controls are disabled with an explanation.
+
+Server-side validation rejects unknown/unsupported keys, booleans used as
+numbers, nonfinite values, and values outside these bounds: token budget
+1–32768, temperature 0–2 (strictly positive when sampling), seed 0–4294967295,
+top-p greater than 0 through 1, top-k 0–100000, and repetition penalty greater
+than 0 through 10. Seeds improve repeatability but do not guarantee identical
+outputs across hardware, software versions, or API providers.
+
+**New conversation** starts an empty run with the default agent and default
+settings. **Clear context** starts an empty run with the current agent and
+settings, after explaining that the previous transcript will be kept.
+**Resume conversation** restores a selected run, its agent, and its per-agent
+settings. The selector lists conversational runs under `--world-model-root`,
+plus runs explicitly opened during this server session. Resuming requires the
+original pipeline configuration and an exclusive transcript lock. Robot runs,
+unknown run IDs, incompatible configurations and already-locked runs are rejected.
+Neither New nor Clear truncates, deletes, or replaces an existing transcript.
+
+`metadata.yaml` stores defaults, their origins and explicit overrides under
+`generation_settings`, indexed by the base agent ID. Each assistant's existing
+length-delimited provenance comment and Act JSON record contain its effective
+`generation` settings, defaults, origins, overrides, provider/model, and available
+`model_revision` (registry pin or matching completed download report). Local
+settings include the loaded generation configuration, including EOS controls;
+inactive sampling parameters are identified separately. API-reported model IDs
+and system fingerprints are preserved when returned. Exposed reasoning stays
+associated with the same response and settings. Legacy transcripts still load.
+
+Install/update in the existing environment, then launch on localhost:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/python -m pip install --no-deps --no-build-isolation .
+.venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+# Open http://127.0.0.1:8000
+```
+
+No new dependencies are required. A fresh robotics/environment installation
+still uses `./install.sh` with its existing prerequisites. Local checkpoints
+must be provisioned separately with the documented downloader; the GUI never
+downloads weights automatically.
+
+```bash
+# Standard build and unit checks:
+./test.sh --unit
+# Also run Firefox UI checks and actual offline Qwen3-0.6B integration:
+SMPA_BROWSER_TEST=1 SMPA_QWEN_TEST=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ./test.sh --unit
+```
+
+The optional checks require Firefox and the existing Qwen3-0.6B checkpoint.
+They verify collapsed thinking/settings panels, disabled controls during requests,
+unsupported/greedy controls, the four-turn repetition regression through HTTP
+versus direct inference, repeatable seeded sampling on the same machine, and
+separate model-generated thinking/final text. No live cloud inference is used;
+API parameter forwarding is tested with the SDK mocked.
+
+Verification for this change: the standard unit run passed 167 tests with the
+two optional checks skipped (2 deselected). The final conversation integration
+run passed all 26 tests with Firefox and real offline Qwen enabled. A full run
+with both optional checks enabled also passed all 169 selected tests.
+
+When using the installed package outside the checkout from a ROS-sourced shell,
+an older ROS installation on `PYTHONPATH` can shadow the virtual environment.
+For the standalone GUI, clear that override only for this process:
+
+```bash
+env -u PYTHONPATH .venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+```
+
+The installed HTML and module entry point were verified outside the checkout
+with this override removed; the ROS environment and experiment launch remain unchanged.
+
+### Conversational belief modelling (Phase 1)
+
+The browser conversation now runs **Sense → Model → Act** independently of the
+robot experiment. Sense saves the original message first. Model translates it
+into attributed Simple Declarative Sentences (SDS), asks the existing inference
+backend for RDF additions using the ontology and current graph, validates them,
+and atomically replaces the graph. Act receives the complete chat history and
+current attributed graph. A second modelling pass records the new assistant
+message too, so SDS covers both speakers without including internal thinking.
+
+Each run contains `conversation.md`, append-only `conversation-sds.md`, and
+`belief-state.ttl`. SDS links to stable original-message anchors (role-heading links for legacy entries). Model JSON records
+under `state/cycle_*/model*.json` retain returned inference output, actual reported
+model, effective generation settings, configured agent and ontology SHA-256.
+Every touched individual receives application-owned `dcterms:source` and
+`dcterms:provenance` links; the model cannot supply or override these fields.
+Resuming reads these existing artifacts; older runs can acquire them on first
+modelling use. Earlier SDS entries are never rewritten.
+
+`conversation.agent` and `conversation.modelling_agent` select existing registry
+sources (`local:qwen3-4b`, `local:qwen3-0.6b`, `api:openai`, etc.). The GUI agent
+selector and generation controls affect the conversational response agent;
+modelling uses its separately configured agent, a 2048-token output budget and
+greedy local decoding. Both defaults are local Qwen3-4B, sharing its lazy backend
+when selected together. No download or cloud fallback occurs. Qwen3-4B has about
+16 GiB of float32 weights; allow additional RAM for loading and inference
+(previous offline smoke peak approximately 16.3 GiB). CPU modelling can take
+several minutes per turn because it makes multiple inference calls. On machines
+where thread oversubscription slows generation, prefix the launch command with
+`OMP_NUM_THREADS=4 MKL_NUM_THREADS=4` (the offline acceptance check uses four threads).
+
+Set `conversation.ontology` to a local RDF/XML OWL file (relative to `config.yaml`
+or absolute) to replace the packaged `smpa_ros/belief-structure.owl`. All vocabulary
+is read from that file; imports are not fetched. Its hash is pinned per run and
+changes are rejected. The application never writes the ontology. The existing Outlines/strict-API JSON Schema support constrains generated
+properties, classes and object shapes directly from this vocabulary. Compact
+`#localName` instance identifiers expand into the run namespace. Ollama proposals
+use the same post-generation validation without decoder constraints. RDFLib checks
+syntax; explicit checks enforce declared types/properties, typed individuals,
+object/literal shapes, run-local names and resolved individual references.
+There is no OWL reasoner, ontology editing, graph database or automatic ontology
+extension.
+
+The right panel draws individuals as circles and referenced ontology classes as
+squares. Select a node (mouse or keyboard) to inspect its properties and source
+records. **Open conversation SDS** opens the cumulative text. `/api/graph` returns
+the conversation state including graph nodes/edges; `/api/sds` returns Markdown
+as plain text. State and graph refresh after each response and on resume.
+
+For “There is a red cup on the table”, an illustrative SDS is:
+
+```text
+There is a red cup on the table.
+```
+
+An illustrative accepted graph fragment (run namespace abbreviated) is:
+
+```turtle
+@prefix b: <urn:smpa:belief#> .
+@prefix run: <urn:smpa:EXAMPLE:> .
+@prefix dc: <http://purl.org/dc/terms/> .
+run:cup a b:Entity ; dc:source "conversation.md#user" .
+run:claim a b:Proposition ; b:about run:cup ; b:attributedTo run:user ;
+    b:text "There is a red cup on the table." ;
+    dc:source "conversation.md#user" .
+run:user a b:Entity .
+```
+
+A later ownership proposition can refer to the same `run:cup`. The initial
+ontology deliberately has no dedicated color, spatial-location or ownership
+predicate. These details remain in proposition text/SDS, with `about` links to
+entities. Beliefs can contain propositions through `withinScope`; the doctor’s
+belief in recovery does not assert recovery as an objective fact. Entity reuse,
+SDS fidelity and scope selection are model-generated proposals, not formally
+proved semantic conclusions. Vocabulary/reference validation cannot guarantee
+that the model interpreted natural language correctly.
+
+Invalid RDF proposals receive at most one repair attempt through the same agent;
+both outputs and validation errors remain in the Model record. Failed modelling
+attempts leave the original conversation and last accepted
+graph intact, preserve any SDS already produced, and show a warning while chat
+continues. Failed graph proposals remain in Model records for inspection; they
+are not automatically replayed. The warning retains unresolved failure history.
+Long conversations send the full graph/context and may exceed a model’s context
+capacity; Phase 1 does not introduce retrieval or summarisation.
+
+Install the added RDF dependency and package, then launch offline from the repo:
+
+```bash
+cd ~/ros2_ws/src/smpa-ros
+.venv/bin/python -m pip install 'rdflib==7.1.4'
+.venv/bin/python -m pip install --no-deps --no-build-isolation .
+HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
+```
+
+Open `http://127.0.0.1:8000`. Use **Resume conversation** after restart, or pass
+`--resume /absolute/path/to/memory/runs/RUN_DIRECTORY`. If Qwen3-4B is not installed,
+explicitly download it first (this command requires network access):
+
+```bash
+.venv/bin/python scripts/download_models.py --model qwen3-4b
+```
+
+Run the mocked tests and optional real-browser graph/provenance check:
+
+```bash
+./test.sh --unit
+SMPA_BROWSER_TEST=1 .venv/bin/python -m pytest test/test_belief.py test/test_conversation.py -q
+```
+
+With the server running, reproduce the two acceptance turns from another terminal:
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:8000/api/message -H 'Content-Type: application/json' -d '{"message":"There is a red cup on the table."}'
+curl --fail --silent --show-error http://127.0.0.1:8000/api/message -H 'Content-Type: application/json' -d '{"message":"The cup belongs to John."}'
+curl --fail --silent --show-error http://127.0.0.1:8000/api/sds
+curl --fail --silent --show-error http://127.0.0.1:8000/api/graph
+```
+
+Phase 1 verification: `SMPA_BROWSER_TEST=1 ./test.sh --unit` passed with 177 tests,
+1 optional model test skipped, and 2 integration tests deselected. The real
+Firefox check covers graph rendering, node provenance, SDS access and existing
+conversation controls. An offline Qwen3-4B run processed the two acceptance
+utterances with a restart between them: the same cup URI was reused, all 23
+initial triples survived, and the final graph had 42 triples and 5 individuals.
+Reopening through the HTTP server restored all 4 messages and left the transcript,
+SDS, TTL and ontology bytes unchanged. One intermediate assistant graph attempt
+was deliberately interrupted while diagnosing provenance generation; both user
+updates and the final assistant update succeeded.
+
+The local model's accepted mapping was coarse: some claims were stored as
+attributed text on entities rather than separate Proposition individuals. Thus
+structural validation and source preservation are verified; faithful semantic
+normalisation by a small local model remains a limitation requiring inspection.

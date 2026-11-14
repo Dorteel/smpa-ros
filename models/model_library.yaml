@@ -16,3 +16,31 @@ models:
     voice: en_US-lessac-medium
     path: speech/piper/en_US-lessac-medium.onnx
     device: cpu
+  qwen3-1.7b:
+    backend: transformers
+    model_id: Qwen/Qwen3-1.7B
+    revision: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+    path: text/qwen3-1.7b
+    enable_thinking: false
+  qwen3-4b:
+    backend: transformers
+    model_id: Qwen/Qwen3-4B
+    revision: 1cfa9a7208912126459214e8b04321603b3df60c
+    path: text/qwen3-4b
+    enable_thinking: false
+  phi-4-mini-instruct:
+    backend: transformers
+    model_id: microsoft/Phi-4-mini-instruct
+    revision: cfbefacb99257ffa30c83adab238a50856ac3083
+    path: text/phi-4-mini-instruct
+  gemma-4-e4b:
+    backend: transformers
+    model_id: google/gemma-4-E4B-it
+    revision: 4ecc2ba63bcac23ba4a767fc87025b1450f84c9c
+    path: text/gemma-4-e4b
+  qwen3-8b:
+    backend: transformers
+    model_id: Qwen/Qwen3-8B
+    revision: b968826d9c46dd6066d109eabc6255188de91218
+    path: text/qwen3-8b
+    enable_thinking: false

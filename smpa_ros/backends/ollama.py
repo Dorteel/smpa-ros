@@ -37,3 +37,41 @@ class OllamaBackend:
         if result.get('done_reason') == 'length':
             raise RuntimeError('Ollama response was truncated; output rejected')
         return validate_output(result['response'], response_format, schema)
+
+    def _complete(self, prompt: str | list[dict], *, max_new_tokens: int, conversation=False):
+        """Send conversational turns without flattening roles or losing metadata.
+
+        Use Ollama's chat endpoint for message lists and its generate endpoint for
+        plain prompts. Reject server errors or truncation, then return the final
+        response with explicitly supplied thinking and model identity when present.
+        This path does not alter the robot generation interface or its controls.
+        """
+        validate_generation(dict(max_output_tokens=max_new_tokens), backend='ollama')
+        chat = conversation and isinstance(prompt, list)
+        payload = {
+            'model': self.model, ('messages' if chat else 'prompt'): prompt, 'stream': False,
+            'options': {'temperature': 0, 'seed': 0, 'num_predict': max_new_tokens},
+        }
+        url = self.url.removesuffix('/api/generate') + '/api/chat' if chat else self.url
+        request = Request(url, data=json.dumps(payload).encode(),
+                          headers={'Content-Type': 'application/json'})
+        with urlopen(request, timeout=self.timeout) as response:
+            result = json.load(response)
+        if 'error' in result:
+            raise RuntimeError(result['error'])
+        if result.get('done_reason') == 'length':
+            raise RuntimeError('Ollama response was truncated; output rejected')
+        if conversation:
+            message = result['message'] if chat else result
+            output = {'response': message['content' if chat else 'response'],
+                      'effective_settings': dict(temperature=0, seed=0, max_new_tokens=max_new_tokens)}
+            if isinstance(message.get('thinking'), str) and message['thinking'].strip():
+                output.update(thinking=message['thinking'], reasoning_source='thinking')
+            if isinstance(result.get('model'), str) and result['model']:
+                output['model_id'] = result['model']
+            return output
+        return result['response']
+
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128) -> dict:
+        """Preserve an explicitly returned Ollama thinking field, if available."""
+        return self._complete(prompt, max_new_tokens=max_new_tokens, conversation=True)

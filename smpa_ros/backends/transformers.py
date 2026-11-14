@@ -1,4 +1,5 @@
 import json
+import logging
 from contextlib import nullcontext
 
 from smpa_ros.backends.base import generation_capabilities, validate_generation, validate_output
@@ -100,18 +101,19 @@ class TransformersBackend:
         )
         self.model.eval()
 
-    def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
-                 temperature=None, seed=None, reasoning_effort=None, response_format=None) -> str:
-        """Generate text using the selected model and the requested output contract.
+    def generate(self, prompt: str | list[dict], *, max_new_tokens: int = 128, schema: dict | None = None,
+                 temperature=None, seed=None, reasoning_effort=None, response_format=None,
+                 _conversation_settings=None) -> str:
+        """Generate validated text for robot or opt-in conversational callers.
 
-        Validate the decoding settings and create a fresh schema token mask when
-        JSON is required. Keep the user's prompt intact and precede it with an
-        explicit schema instruction for structured responses. Render the chat
-        template when available; otherwise prepend that instruction to the plain
-        prompt. Tokenize, generate within the unchanged output budget, and decode
-        only the continuation. A supplied seed is scoped to this request. Return
-        validated output or raise a diagnostic error without accepting malformed
-        or truncated JSON. Plain-text requests receive no schema instruction.
+        Preserve canonical robot controls and strict schema masking. Conversation
+        callers supply their independently validated sampling and thinking settings;
+        these overrides apply only to this request. Preserve every chat role and
+        prepend the schema instruction when structured output is required. Plain
+        prompts can use a tokenizer without a chat template; message lists cannot.
+        Generate with request-scoped RNG state, decode only new tokens, and reject
+        invalid JSON without retrying or weakening the schema. Optional debug logs
+        retain the actual rendered prompt and raw continuation for diagnosis.
         """
         response_format = response_format or ('json_schema' if schema is not None else 'text')
         if schema is not None and response_format != 'json_schema':
@@ -122,16 +124,44 @@ class TransformersBackend:
         if response_format == 'json_object':
             schema = {'type': 'object'}
         options = generation_options(self.model, self.tokenizer, temperature, schema)
-        messages = [{'role': 'user', 'content': prompt}]
+        thinking = self.enable_thinking
+        sample = False  # Preserve the SMPA Model/Plan path exactly.
+        if _conversation_settings is not None:
+            from smpa_ros.conversation import GENERATION_FIELDS, validate_generation as validate_conversation
+            supported = GENERATION_FIELDS - {'enable_thinking'}
+            if getattr(self.model.config, 'model_type', None) == 'qwen3':
+                supported = supported | {'enable_thinking'}
+            controls = validate_conversation(dict(_conversation_settings, max_new_tokens=max_new_tokens), supported)
+            seed = controls.pop('seed', None)
+            thinking = controls.pop('enable_thinking', thinking)
+            sample = controls.pop('do_sample', False)
+            controls.pop('max_new_tokens')
+            inactive = []
+            if not sample:
+                for name in ('temperature', 'top_p', 'top_k'):
+                    if name in controls:
+                        inactive.append(name)
+                        controls.pop(name)
+            options.update(controls, do_sample=sample)
+            defaults = self.model.generation_config.to_dict()
+            effective = dict(defaults, **controls, max_new_tokens=max_new_tokens, do_sample=sample)
+            if not sample:
+                for name in ('temperature', 'top_p', 'top_k'):
+                    effective.pop(name, None)
+            effective.update(seed=seed, enable_thinking=thinking, inactive=inactive)
+            self._last_generation_settings = effective
+        messages = [dict(item) for item in prompt] if isinstance(prompt, list) else [{'role': 'user', 'content': prompt}]
         if schema is not None:
             messages.insert(0, {'role': 'system', 'content': structured_output_instruction(schema, max_new_tokens)})
         if self.tokenizer.chat_template:
-            template_options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
+            template_options = {} if thinking is None else {'enable_thinking': thinking}
             prompt = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True, **template_options,
             )
             inputs = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
         else:
+            if isinstance(prompt, list):
+                raise ValueError('Conversational inference requires a model chat template')
             if schema is not None:
                 prompt = messages[0]['content'] + '\n\n' + prompt
             inputs = self.tokenizer(prompt, return_tensors='pt')
@@ -145,7 +175,42 @@ class TransformersBackend:
         # Decode only the continuation, excluding the input prompt.
         continuation = output[0, inputs['input_ids'].shape[-1]:]
         text = self.tokenizer.decode(continuation, skip_special_tokens=True)
+        logger = logging.getLogger(__name__)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(json.dumps({
+                'formatted_prompt': prompt,
+                'raw_output': self.tokenizer.decode(continuation, skip_special_tokens=False),
+                'max_new_tokens': max_new_tokens, 'do_sample': options.get('do_sample'),
+            }, ensure_ascii=False))
         return validate_generated_output(text, continuation, max_new_tokens, response_format, schema)
+
+
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128, schema=None, **settings) -> dict:
+        """Separate Qwen3's documented leading think block from its final answer.
+
+        The existing template and enable_thinking setting are preserved. A trace
+        is never requested or reconstructed here. Other model families retain
+        their ordinary text, even if it happens to contain similar markup.
+        """
+        text = self.generate(prompt, max_new_tokens=max_new_tokens, schema=schema, _conversation_settings=settings)
+        result = {'response': text}
+        if getattr(self.model.config, 'model_type', None) == 'qwen3':
+            stripped = text.lstrip()
+            # Qwen can place the opening think delimiter in the generation prompt.
+            if (getattr(self, '_last_generation_settings', {}).get('enable_thinking')
+                    and not stripped.startswith('<think>') and '</think>' in stripped):
+                stripped = '<think>' + stripped
+            if stripped.startswith('<think>'):
+                thinking, separator, response = stripped[len('<think>'):].partition('</think>')
+                if not separator or not response.strip():
+                    raise RuntimeError('Incomplete Qwen thinking block or missing final response; increase the output budget')
+                result['response'] = response.strip()
+                if thinking.strip():
+                    result.update(thinking=thinking.strip(), reasoning_source='qwen3:<think>')
+        effective = getattr(self, '_last_generation_settings', None)
+        if isinstance(effective, dict):
+            result['effective_settings'] = effective
+        return result
 
 
 class TransformersVLM:

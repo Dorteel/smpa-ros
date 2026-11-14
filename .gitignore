@@ -213,6 +213,7 @@ tempCodeRunnerFile.py
 /log/
 /weights/
 /models/speech/
+/models/text/
 /models/llm/
 /models/vlm/
 /models/coding/

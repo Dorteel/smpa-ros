@@ -64,7 +64,16 @@ class APIBackend:
                               default_headers={'Accept-Encoding': 'gzip, deflate'})
 
     def _complete(self, content, max_new_tokens, schema=None, reasoning_effort=None,
-                  temperature=None, seed=None, response_format=None):
+                  temperature=None, seed=None, response_format=None, *,
+                  conversation=False, messages=None, generation=None):
+        """Complete one request while preserving each workflow's result type.
+
+        Robot requests retain canonical controls, provider capability checks and
+        string results. Conversation requests validate their separate interactive
+        controls and preserve supplied chat roles. Both paths reject truncation,
+        malformed schema output and credential echoes. Only the conversational
+        path returns explicitly supplied reasoning and effective request metadata.
+        """
         from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
 
         response_format = response_format or ('json_schema' if schema is not None else 'text')
@@ -78,9 +87,13 @@ class APIBackend:
         declaration = provider.get('generation_capabilities', {}).get(modality)
         capabilities = generation_capabilities('api', vision=modality == 'vision',
             provider=provider, model_id=self.model_id) if declaration is not None else None
-        validate_generation(settings, capabilities=capabilities)
+        validate_generation(settings, capabilities=capabilities if not conversation else None)
         options = {key: value for key, value in dict(temperature=temperature, seed=seed,
                    reasoning_effort=reasoning_effort).items() if value is not None}
+        if conversation:
+            from smpa_ros.conversation import validate_generation as validate_conversation
+            options.update(validate_conversation(generation or {}, {'temperature', 'top_p', 'seed'}))
+            options.setdefault('temperature', 0)
         if response_format == 'json_schema':
             options['response_format'] = {
                 'type': 'json_schema',
@@ -94,7 +107,7 @@ class APIBackend:
                 raise ValueError('json_object requires an explicit JSON instruction in the prompt')
         try:
             response = self._client.chat.completions.create(
-                model=self.model_id, messages=[{'role': 'user', 'content': content}],
+                model=self.model_id, messages=messages if messages is not None else [{'role': 'user', 'content': content}],
                 max_completion_tokens=max_new_tokens, **options,
             )
         except APITimeoutError:
@@ -164,7 +177,36 @@ class APIBackend:
             raise RuntimeError('API returned empty text despite finish_reason=stop.')
         if self._client.api_key in text:
             raise RuntimeError('API response contained credential data and was rejected.')
-        return validate_output(text, response_format, schema)
+        text = validate_output(text, response_format, schema)
+        if conversation:
+            result = {'response': text, 'effective_settings': dict(options, max_new_tokens=max_new_tokens),
+                      'system_fingerprint': getattr(response, 'system_fingerprint', None)}
+            reported_model = getattr(response, 'model', None)
+            if isinstance(reported_model, str) and reported_model:
+                result['model_id'] = reported_model
+            # These compatible-provider fields contain plain reasoning text.
+            # Opaque objects, token counts, and summaries are not inferred traces.
+            for field in ('reasoning_content', 'reasoning'):
+                thinking = getattr(message, field, None)
+                if isinstance(thinking, str) and thinking.strip():
+                    if self._client.api_key in thinking:
+                        raise RuntimeError('API reasoning contained credential data and was rejected.')
+                    result.update(thinking=thinking, reasoning_source=field)
+                    break
+            return result
+        return text
+
+    def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128,
+                              reasoning_effort: str | None = None, schema=None, **settings) -> dict:
+        """Generate a role-preserving reply with optional provider reasoning.
+
+        Forward chat messages and interactive controls to the shared request path.
+        Return structured response metadata only for this explicit conversation
+        call; ordinary robot generation continues to return validated text.
+        """
+        return self._complete(prompt, max_new_tokens, schema=schema, reasoning_effort=reasoning_effort, conversation=True,
+                              messages=prompt if isinstance(prompt, list) else None, generation=settings)
+
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
                  reasoning_effort: str | None = None, temperature=None, seed=None,

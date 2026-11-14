@@ -20,6 +20,7 @@ case "$mode" in
     --all) selector='integration or not integration' ;;
     *) echo 'Usage: ./test.sh [--unit|--integration|--all|--rlhf]' >&2; exit 2 ;;
 esac
+# Use the prepared environment for API imports in unit tests as well.
 test_python=$(command -v python3)
 if [[ -x "$PWD/.venv/bin/python" || "$mode" != --unit ]]; then
     test_python="$PWD/.venv/bin/python"
@@ -79,6 +80,14 @@ from memory import MemoryManager
 import yaml
 
 entries = {entry.name: entry for entry in distribution('smpa-ros').entry_points}
+assert entries['conversation'].value == 'smpa_ros.conversation_web:main'
+assert callable(entries['conversation'].load())
+assert b'Belief graph' in files('smpa_ros').joinpath('conversation.html').read_bytes()
+from smpa_ros.belief import ontology_graph
+ontology, digest = ontology_graph()
+assert len(ontology) > 0 and len(digest) == 64
+assert entries['segment_image'].value == 'smpa_ros.segmentation:main'
+assert callable(entries['segment_image'].load())
 assert entries['smpa'].value == 'smpa_ros.smpa:main'
 assert callable(entries['smpa'].load())
 import inspect
