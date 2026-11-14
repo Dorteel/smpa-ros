@@ -84,3 +84,51 @@ def test_sensor_conversions():
     assert result['rpy'] == pytest.approx([0, 0, 90])
     assert result['centre'] == pytest.approx([256, 256]) and result['north'][1] < 256
     assert result['steps'] == pytest.approx([2, 1, 0.2])
+
+
+def test_goal_form_defaults_merging_and_validation():
+    """The goal editor's pure logic fills defaults, keeps given values and reports the same rules as the gateway."""
+    script = """import {defaultFor, validate, withDefaults} from './tabs/actions/form.js';
+      const integer = {kind: 'integer', type: 'int8', minimum: -128, maximum: 127};
+      const big = {kind: 'integer', type: 'uint64', minimum: 0, maximum: 18446744073709551615};
+      const schema = {kind: 'message', type: 'pkg/msg/Goal', fields: [
+        {name: 'flag', schema: {kind: 'boolean', type: 'boolean'}}, {name: 'count', schema: integer},
+        {name: 'big', schema: big}, {name: 'ratio', schema: {kind: 'float', type: 'double', limit: null}},
+        {name: 'label', schema: {kind: 'string', type: 'string', max_length: 2}},
+        {name: 'pair', schema: {kind: 'array', item: integer, fixed_size: 2, max_size: null}},
+        {name: 'list', schema: {kind: 'array', item: {kind: 'message', type: 'pkg/msg/P', fields: [{name: 'x', schema: integer}]}, fixed_size: null, max_size: 1}}]};
+      const base = defaultFor(schema);
+      const paths = (value) => validate(schema, value).map((error) => error.path);
+      console.log(JSON.stringify({base, merged: withDefaults(schema, {count: 5, list: [{}]}, base),
+        good: paths({...base, count: -128, pair: [1, 2], list: [{x: 3}], label: 'ab'}),
+        bad: paths({flag: 'yes', count: 200, big: 9007199254740993, ratio: '1', label: 'abc', pair: [1], list: [{x: 1.5}, {x: 1}], extra: 1}),
+        notObject: paths([1])}));"""
+    result = run_module(script)
+    assert result['base'] == dict(flag=False, count=0, big=0, ratio=0, label='', pair=[0, 0], list=[])
+    assert result['merged'] == dict(flag=False, count=5, big=0, ratio=0, label='', pair=[0, 0], list=[{'x': 0}])
+    assert result['good'] == []
+    assert result['bad'] == ['flag', 'count', 'big', 'ratio', 'label', 'pair', 'list', 'list[0].x', 'extra']
+    assert result['notObject'] == ['']
+
+
+def test_saved_configurations_store():
+    """Configurations are stored per action type, survive re-reading, and tolerate broken storage."""
+    script = """import {configurationNames, deleteConfiguration, loadConfiguration, saveConfiguration} from './tabs/actions/store.js';
+      const data = new Map();
+      const storage = {getItem: (key) => (data.has(key) ? data.get(key) : null), setItem: (key, value) => data.set(key, value)};
+      saveConfiguration('a/action/T', 'home', {order: 3}, storage);
+      saveConfiguration('a/action/T', 'away', {order: 9}, storage);
+      saveConfiguration('b/action/U', 'home', {x: 1}, storage);
+      const names = configurationNames('a/action/T', storage);
+      const loaded = loadConfiguration('a/action/T', 'home', storage);
+      deleteConfiguration('a/action/T', 'home', storage);
+      const after = configurationNames('a/action/T', storage);
+      const other = loadConfiguration('b/action/U', 'home', storage);
+      data.set('smpa-gui.goal-configurations.v1', 'not json');
+      const broken = configurationNames('a/action/T', storage);
+      const refusing = {getItem: () => null, setItem: () => { throw new Error('full'); }};
+      console.log(JSON.stringify({names, loaded, after, other, broken, refused: saveConfiguration('t', 'n', {}, refusing),
+        missing: loadConfiguration('a/action/T', 'nothing', storage)}));"""
+    result = run_module(script)
+    assert result == dict(names=['away', 'home'], loaded={'order': 3}, after=['away'], other={'x': 1}, broken=[],
+                          refused=False, missing=None)

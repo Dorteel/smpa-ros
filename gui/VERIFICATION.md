@@ -1,4 +1,4 @@
-# Verification results (GUI version 1, 2026-11-14)
+# Verification results (GUI version 2, 2026-11-14)
 
 ## Where the verification ran
 
@@ -17,20 +17,33 @@ workstation**:
 The official ROS 2 apt repository was not reachable from that container, so the
 Debian-packaged Jazzy that the workstation uses was not available.
 
-## Automated tests: 49 passed
+## Automated tests: 90 passed
 
 | Suite | Tests | What it exercises |
 |---|---|---|
-| `tests/test_units.py` | 10 | Name rules, graph building, bounded message conversion, image/point cloud/scalar sensor encoders, registry |
-| `tests/test_frontend_logic.py` | 3 | Graph filters, layered layout including loops, IMU and map conversions (Node.js) |
-| `tests/test_ros_integration.py` | 26 | Real server process against real ROS 2 fixture nodes over HTTP and WebSocket |
-| `tests/test_browser.py` | 10 | The real frontend in headless Chromium against the same server and fixtures |
+| `tests/test_units.py` | 12 | Name rules, graph building, bounded message conversion, sensor encoders, registry, interface schemas and value validation |
+| `tests/test_frontend_logic.py` | 5 | Graph filters, layered layout, IMU and map conversions, goal form logic, saved configurations (Node.js) |
+| `tests/test_ros_integration.py` | 26 | Version 1 behaviour: real server process against real ROS 2 fixture nodes over HTTP and WebSocket |
+| `tests/test_actions.py` | 25 | Action execution over HTTP against real fixture action servers |
+| `tests/test_browser.py` | 10 | Version 1 frontend in headless Chromium |
+| `tests/test_browser_actions.py` | 12 | Actions tab in headless Chromium |
+
+All version 1 tests still pass. Two of them were changed on purpose: the tab list now
+includes Actions, and the "only GET routes" test now asserts that the two goal routes
+are the only non-GET routes.
 
 The fixture process (`tests/fixtures/fixture_nodes.py`) runs seven real nodes: a talker
 and listener, a node with declared parameters, a node that is never spun, an action
-server and client (`example_interfaces/action/Fibonacci`), and a sensor node publishing
-all nine supported sensor types plus a depth image and an image with an unsupported
-encoding.
+server node and an action client, and a sensor node publishing all nine supported
+sensor types plus a depth image and an image with an unsupported encoding.
+
+The action server node offers two real action servers:
+
+- `/fixture/fibonacci` (`example_interfaces/action/Fibonacci`): one feedback message
+  every 0.2 s, cancellable, concurrent goals; a negative order is rejected, order 13
+  aborts, order 7 refuses cancel requests.
+- `/fixture/lookup_transform` (`tf2_msgs/action/LookupTransform`): a goal with strings,
+  a boolean and nested time messages; answers at once and echoes goal values in its result.
 
 ### Comparison with the standard command-line tools
 
@@ -74,9 +87,37 @@ this was not investigated further.
   a panel's topic moves the subscription and clears the old picture; closing panels
   unsubscribes; the tab works with no sensor publishers; the 3D viewer rotates, zooms and pans.
 - **Launcher**: `install_gui.sh --dev`, `run_gui.sh` and `test_gui.sh` were run from a
-  fresh checkout of `gui/` in the container.
+  fresh checkout of `gui/` in the container (fresh install for version 1; `test_gui.sh`
+  again for version 2).
+
+### Action execution verified by tests
+
+| Requirement | Evidence |
+|---|---|
+| Discovery and dynamic interfaces | Both servers listed with type and availability; Goal, Feedback and Result schemas and defaults derived from the installed definitions, including nested messages; schemas of fixed arrays, sequences and arrays of messages checked on `sensor_msgs` types |
+| Goal submission | Accepted goal gets a UUID, runs, and ends `succeeded` with result, four feedback messages and ordered timestamps; nested values arrive at the server intact |
+| Field validation | Nine wrong-value cases (text for a number, fraction or boolean for an integer, out of range, unknown field, wrong nested type) give `422` naming the field, and no goal is created; the page reports the same before opening the dialog |
+| Feedback | Live feedback appears in the page while the goal runs |
+| Rejected and aborted goals | Reported as `rejected` and `aborted` |
+| Cancellation | Active goal cancelled (`canceled`, answer `accepted`); a server refusing cancellation is reported and the goal completes; finished and unknown goals cannot be cancelled |
+| Missing server, unknown type | `409` within the time limit; `404` |
+| Concurrent goals | Three goals execute at the same time with separate feedback and results; in the page two run together and cancelling one leaves the other running |
+| No accidental resend | Repeated request identifier returns the first goal; reading routes never create goals; three page reloads, back/forward navigation, loading a saved configuration and re-using history values create no goal; a failed `POST` is attempted exactly once and reported as "outcome unknown"; an outage of all API requests followed by recovery creates no goal; declining the dialog or pressing Escape sends nothing; a double click on the confirmation sends one goal |
+| Access control | No token, wrong token, foreign `Origin`, foreign `Host`, non-JSON body and malformed request identifiers are refused; a token from an earlier gateway process is refused; `--read-only` refuses goals and disables the button |
+| Footprint | The gateway appears as an action client only while a goal is active |
+| GUI shutdown | Ctrl+C cancels the active goal (the server's own status topic, read with `ros2 topic echo`, reports status 5); with `--keep-goals-on-exit` the server still reports status 2 (executing) after the GUI exited; a restarted GUI has an empty history |
+| Server loss | Killing the action server during a goal marks it `lost` |
+| Saved configurations | Save, reset, load and persistence across reloads, without sending |
 
 ## Not verified
+
+- **No action from the target system was exercised**: not `/look_left` or any other
+  `simulation_actions` action, no SMPA speech action, no real robot. The interface
+  discovery is generic, but those types were not installed in the test environment.
+- Action goals with arrays were exercised in the form component and in message
+  construction, but no fixture action server with an array goal was available.
+- Stopping the GUI server with SIGTERM or by killing it (only Ctrl+C was tested).
+- Bounded strings and bounded sequences in real interfaces (rules tested on schemas only).
 
 - **Nothing was run on the target workstation.** The session had file access to the
   repository but could not execute commands there. Installation and launch with the
@@ -98,8 +139,11 @@ this was not investigated further.
 ```bash
 cd <gui worktree>/gui
 ./install_gui.sh --dev
-./test_gui.sh                       # expect 39 passed (36 if Node.js is absent)
+./test_gui.sh                       # expect 68 passed (63 if Node.js is absent)
 ./run_gui.sh                        # open http://127.0.0.1:8765, stop with Ctrl+C
+
+# Try the Actions tab against a harmless action server first, for example:
+ros2 run action_tutorials_py fibonacci_action_server      # if that package is installed
 
 # With SMPA or any robot running, compare the GUI with:
 ros2 node list; ros2 topic list -t; ros2 action list -t

@@ -4,9 +4,11 @@
 
 1. **Detachable.** The GUI is one process with one ROS 2 node (`/smpa_gui`). It imports
    no SMPA module, reads no SMPA file, and changes no SMPA configuration.
-2. **Observational.** The gateway creates subscriptions and parameter-service clients
-   only. It has no application publishers, no service servers, sends no action goals
-   and writes no parameters. The HTTP application defines only `GET` and WebSocket routes.
+2. **Observational, with one narrow exception.** The gateway creates subscriptions and
+   parameter-service clients for inspection. It has no application publishers and no
+   service servers and writes no parameters. Since version 2 it can also send and cancel
+   action goals, through two `POST` routes that are local-only and need an explicit user
+   confirmation in the page. Every other route is `GET` or WebSocket.
 3. **Everything ROS stays behind the gateway.** The frontend knows only the contract in
    [API.md](API.md). Another frontend (for example TouchDesigner) can use the same contract.
 4. **Work only for what is visible.** Discovery is polled only by the visible view. A
@@ -36,6 +38,8 @@ All rclpy calls happen on the ROS thread. Web handlers pass small functions to
 | `ros_topics.py` | Message class lookup, QoS matching for subscriptions, bounded message-to-JSON conversion |
 | `ros_parameters.py` | Read another node's parameters with bounded waiting |
 | `sensors.py` | Sensor registry and one encoder per sensor type |
+| `ros_interfaces.py` | Action class lookup; schema of any message type from its definition; validation of JSON values; message construction |
+| `action_goals.py` | The only module that acts on ROS: action clients, goal records, cancel, tidy timer, shutdown policy |
 | `app.py` | Routes, the generic stream loop, static files |
 | `__main__.py` | Command-line entry point |
 
@@ -64,12 +68,42 @@ browser never causes a queue. Silence is explained with status messages.
 | `tabs/sensors/index.js` | Panel manager and sensor discovery list |
 | `tabs/sensors/registry.js` | Viewer name → viewer module |
 | `tabs/sensors/viewers/` | One module per viewer |
+| `tabs/actions/index.js` | Actions tab: server list, editor, confirmation dialog, monitor, history |
+| `tabs/actions/form.js` | Schema-driven goal form and client-side validation |
+| `tabs/actions/store.js` | Saved goal configurations in browser storage |
 | `tabs/smpa/index.js` | Empty module registry |
 | `vendor/cytoscape.min.js` | Cytoscape.js 3.35.0 (MIT), unmodified |
 
 A tab, a ROS 2 subview and an SMPA module share one contract: an object with `id`,
 `title`, `mount(container, route)` and `unmount()`. `unmount` must stop polling and
 close streams.
+
+## Action execution
+
+```
+click "Send Goal…" → validate in page → confirmation dialog → click "Send goal now"
+   → POST /actions/goals {action, type, goal, request_id} + session token   (once, never retried)
+      → access rules → request_id seen before? return the first record
+      → resolve action type → validate against the Goal definition → build message
+      → create action client → wait ≤2 s for the server → send with a UUID chosen by the gateway
+   ← goal record
+page polls GET /actions/goals twice per second → state, feedback, result, history
+```
+
+- **Records live in the gateway**, not in the browser. A page reload or a lost connection
+  only interrupts the display. The browser stores nothing that could cause a resend.
+- **Idempotency.** Each confirmation creates one request identifier; the gateway sends a
+  given identifier at most once, also under concurrent duplicates.
+- **Access control** is described in [API.md](API.md): loopback connection, local `Host`
+  and `Origin`, JSON body, per-process session token, optional `--read-only`.
+- **Footprint.** An action client exists only while one of its goals is active or being
+  submitted. A one-second timer on the ROS thread removes idle clients, refreshes states
+  and marks goals as `lost` when their server disappears.
+- **Shutdown.** On a normal stop the gateway requests cancellation of its active goals
+  and waits up to two seconds for the answers (`--keep-goals-on-exit` disables this).
+- **Interfaces are discovered, never hard-coded.** Schemas come from
+  `rosidl_runtime_py` and `rosidl_parser` definitions of whatever action type the ROS
+  graph reports. No SMPA action, type or name appears in the code.
 
 ## Sensor registry and adding a sensor type
 
@@ -99,3 +133,6 @@ needs an agreed interface with the SMPA core.
 - Actions are derived from the graph snapshot, so there is no separate `ros_actions.py`.
 - NumPy is used (it is part of every ROS 2 Python installation) but is not installed by the GUI.
 - `install_gui.sh` was added so that `run_gui.sh` never installs anything.
+- Version 2 adds action execution, which the report had excluded from version 1.
+  Goal monitoring uses polling of gateway-held records instead of a WebSocket, so that
+  a broken connection can never be mistaken for, or cause, a resend.

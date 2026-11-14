@@ -145,3 +145,17 @@ def lonely_server():
     yield base, environment, process
     if process.poll() is None:
         stop(process)
+
+
+@pytest.fixture(scope='session')
+def browser():
+    """Start one headless Chromium for all browser tests, or skip them without Playwright."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip('Playwright is not installed')
+    (GUI / 'tests' / 'artifacts').mkdir(exist_ok=True)
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        yield browser
+        browser.close()

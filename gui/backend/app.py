@@ -5,20 +5,32 @@ Concepts:
     A stream is a WebSocket on which the gateway sends the newest message of
     one topic at a bounded rate, together with status messages that explain
     silence (no publishers, waiting, unsupported data). Opening a stream
-    subscribes; closing it unsubscribes. No endpoint changes anything in ROS.
+    subscribes; closing it unsubscribes.
+
+    Everything is read-only except the action-execution routes under
+    ``/api/v1/actions/goals``: they can send one action goal and request its
+    cancellation, nothing else. They are accepted only from this computer,
+    only with the session token of this gateway process, and can be switched
+    off entirely. There is no route for publishing, calling services or
+    writing parameters.
 """
 import asyncio
+import ipaddress
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+import secrets
 import time
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend import CONTRACT_VERSION, ros_graph, ros_parameters, ros_topics, sensors
+from pydantic import BaseModel, Field
+
+from backend import CONTRACT_VERSION, ros_graph, ros_interfaces, ros_parameters, ros_topics, sensors
+from backend.action_goals import GoalManager, GoalRefused
 from backend.gateway import Gateway, GatewayError
 
 FRONTEND = Path(__file__).resolve().parent.parent / 'frontend'
@@ -50,22 +62,45 @@ def local_origin(origin):
     return origin is None or urlsplit(origin).hostname in LOCAL_HOSTS
 
 
-def create_app(gateway=None):
+def is_loopback(host):
+    """Tell whether a network address belongs to this computer itself."""
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class GoalSubmission(BaseModel):
+    """The body of a goal submission: which action, its type, the goal values and a request identifier."""
+
+    action: str = Field(min_length=2, max_length=512, pattern=r'^/')
+    type: str = Field(min_length=3, max_length=256)
+    goal: dict
+    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+def create_app(gateway=None, *, allow_actions=True, cancel_on_exit=True):
     """Build the web application around one gateway.
 
     The gateway joins ROS when the application starts and leaves when it
     stops, so starting and stopping the GUI never depends on other ROS
     processes. A gateway may be supplied by tests; otherwise one is created.
+    ``allow_actions`` false makes the whole application read-only.
+    ``cancel_on_exit`` decides whether goals that are still active when the
+    application stops are asked to cancel.
     """
     gateway = gateway or Gateway()
+    session_token = secrets.token_urlsafe(32)
 
     @asynccontextmanager
     async def lifespan(app):
-        """Start the ROS gateway before serving and stop it afterwards."""
+        """Start the ROS gateway before serving; on shutdown settle active goals, then stop it."""
         gateway.start()
+        app.state.goals = GoalManager(gateway)
         try:
             yield
         finally:
+            await asyncio.to_thread(app.state.goals.shutdown, cancel_on_exit)
             gateway.stop()
 
     app = FastAPI(title='SMPA-ROS GUI gateway', version=CONTRACT_VERSION, lifespan=lifespan,
@@ -349,6 +384,104 @@ def create_app(gateway=None):
 
         return StreamingResponse(frames(), media_type='multipart/x-mixed-replace; boundary=frame',
                                  headers={'Cache-Control': 'no-store'})
+
+    def local_request(request):
+        """Require that a request comes from a program or page on this computer.
+
+        The connection must originate from a loopback address, even if the
+        server was bound to another interface. The Host header must name
+        this computer, which defeats DNS rebinding. A browser page must have
+        been loaded from this computer. Anything else is refused with 403.
+        """
+        host = (request.headers.get('host') or '').rsplit(':', 1)[0].strip('[]')
+        if (request.client is None or not is_loopback(request.client.host) or host not in LOCAL_HOSTS
+                or not local_origin(request.headers.get('origin'))):
+            raise HTTPException(status_code=403, detail='Action execution is only available from this computer')
+
+    def authorised(request):
+        """Require everything a goal submission or cancellation needs.
+
+        Action execution must be enabled, the request must be local, its
+        body must be declared as JSON, and it must carry this gateway
+        process's session token. The token is handed only to local clients
+        and changes whenever the gateway restarts, so a page from another
+        site, or a page left over from an earlier gateway, cannot send goals.
+        """
+        if not allow_actions:
+            raise HTTPException(status_code=403, detail='Action execution is disabled (read-only mode)')
+        local_request(request)
+        if request.headers.get('content-type', '').split(';')[0].strip() != 'application/json':
+            raise HTTPException(status_code=415, detail='Send the request body as application/json')
+        if not secrets.compare_digest(request.headers.get('x-smpa-gui-token', ''), session_token):
+            raise HTTPException(status_code=403, detail='Missing or outdated session token; reload the page')
+
+    @app.get('/api/v1/actions/session')
+    def get_action_session(request: Request):
+        """Tell a local client whether action execution is enabled and give it the session token."""
+        local_request(request)
+        return envelope(enabled=allow_actions, token=session_token if allow_actions else None,
+                        cancel_on_exit=cancel_on_exit)
+
+    @app.get('/api/v1/actions/servers')
+    def get_action_servers():
+        """List discovered actions and whether a server is currently available for each."""
+        return envelope(actions=[dict(action, available=bool(action['servers'])) for action in graph()['actions']])
+
+    @app.get('/api/v1/actions/interface')
+    def get_action_interface(type: str = Query(...)):
+        """Describe an action type's Goal, Feedback and Result fields from its interface definition."""
+        try:
+            action_type = ros_interfaces.action_class(type)
+        except GatewayError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return envelope(type=type, goal=ros_interfaces.describe(action_type.Goal),
+                        goal_default=ros_interfaces.defaults(action_type.Goal),
+                        feedback=ros_interfaces.describe(action_type.Feedback),
+                        result=ros_interfaces.describe(action_type.Result))
+
+    @app.get('/api/v1/actions/goals')
+    def get_goals():
+        """List the goals this gateway process has submitted, newest first."""
+        return envelope(goals=app.state.goals.list())
+
+    @app.get('/api/v1/actions/goals/{goal_id}')
+    def get_goal(goal_id: str):
+        """Return one submitted goal with its state, feedback and result."""
+        record = app.state.goals.get(goal_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail='Unknown goal identifier')
+        return envelope(goal=record)
+
+    @app.post('/api/v1/actions/goals', status_code=201)
+    def post_goal(submission: GoalSubmission, request: Request):
+        """Send one action goal. Repeating a request identifier returns the first goal and sends nothing.
+
+        Invalid goal values give 422 with one entry per wrong field; a
+        missing action server gives 409; an unavailable action type gives 404.
+        """
+        authorised(request)
+        try:
+            record = app.state.goals.submit(submission.action, submission.type, submission.goal,
+                                            submission.request_id)
+        except ros_interfaces.InvalidValue as error:
+            return JSONResponse(status_code=422, content=dict(detail='The goal does not fit the action type',
+                                                              errors=error.errors))
+        except GoalRefused as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
+        except GatewayError as error:
+            raise HTTPException(status_code=404 if 'not available' in str(error) else 503, detail=str(error)) from error
+        return JSONResponse(status_code=200 if record.get('duplicate') else 201, content=envelope(goal=record))
+
+    @app.post('/api/v1/actions/goals/{goal_id}/cancel')
+    def post_cancel(goal_id: str, request: Request):
+        """Ask the action server to cancel one active goal."""
+        authorised(request)
+        try:
+            return envelope(goal=app.state.goals.cancel(goal_id))
+        except GoalRefused as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
+        except GatewayError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     app.mount('/', StaticFiles(directory=FRONTEND, html=True), name='frontend')
     return app
