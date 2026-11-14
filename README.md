@@ -703,6 +703,140 @@ The component reference below describes the individual operations. Its standalon
 servers need the assigned run parameters and remappings above; launching the loop
 creates a new execution session.
 
+## Visual Jev: image → forced-choice probabilities
+
+`smpa_ros` now exposes `/visual_jev/evaluate` using
+`smpa_ros_interfaces/srv/EvaluateVisualDecision`. The request carries an image,
+public context, a question, and 2–16 distinct nonempty choices. The response has
+success/error fields, labels in request order, probabilities, and the selected
+answer. Failures are returned explicitly. The defaults in the one-frame client
+ask whether an image contains something interesting, with choices `yes` and `no`.
+These are probabilities relative to the supplied choices, not calibrated
+interestingness measurements.
+
+The wrapper calls the released `VDM.prepare_group()` and `VDM.run_independent()`
+and follows the official example's probability readout. It does not replace the
+decision algorithm, generate an intermediate description, train, or merge away
+the adapter. `backend.vdm`, `backend.model` (PEFT), `backend.last_output`, and
+`backend.last_logits` remain available; transformer blocks and hooks are accessible
+through `backend.vdm.vl_model.language_model`.
+
+The existing `models/model_library.yaml` registers VisualJEV independently,
+without changing the shared robot model, conversation defaults, or the existing
+`llm/`, `vlm/`, or `coding/` directories or changing the existing model YAML files.
+Its base and adapter live under `models/vision/visual-jev-4b/`; model files are
+Git-ignored. `.gitmodules` supplies the URL for the existing pinned upstream Git
+link, so fresh clones can reproduce the same source without following its branch. The downloader reuses compatible
+cached/library files by revision rather than duplicating weights.
+
+### Source, dependencies, and model downloads
+
+Run from the repository root. The official code revision inspected for this
+integration is pinned below; the source is not copied into this ROS package.
+
+```bash
+git submodule update --init -- third_party/Visual-Jev
+git -C third_party/Visual-Jev rev-parse HEAD  # a392eaedfa41adae348f9767b55c0f54b3a13b57
+.venv/bin/python -m pip install -r requirements-visual-jev.txt
+.venv/bin/python scripts/download_models.py --visual-jev
+```
+
+If the checkout or dependency already exists, reuse it. The existing environment
+already supplies PyTorch, Transformers, Pillow, Accelerate, and Safetensors;
+PEFT was the only missing inference dependency. Full upstream reproduction pins
+are in `third_party/Visual-Jev/code/requirements.txt`; do not replace a working
+CUDA installation just to install benchmark/data-analysis dependencies.
+Both downloads completed: base revision `ebb281ec70b05090aa6165b016eac8ec08e71b17`
+and adapter revision `7a3f1bb0d8f7bfbbd8514d968ab7de3518849c8d`. Re-running the
+downloader resumes/verifies these files. The existing cognitive model batch remains the default when `--visual-jev` is
+omitted. Both VisualJEV model revisions are pinned in the registry. The optional
+requirements retain current compatible inference packages; upstream benchmark
+pins (including NumPy 2.x) are not applied to the ROS environment.
+
+### Hardware and loading
+
+The released loader accepts device/dtype but no quantization configuration. The
+official quickstart advertises CUDA/MPS; the underlying VDM implementation also
+accepts CPU tensors. This wrapper offers explicit CPU float32 or CUDA BF16, with
+no automatic substitution or fallback. It checks available memory before loading:
+32 GiB available RAM for CPU, or 9 GiB free VRAM for CUDA (conservative headroom
+over the project's reported 8.4 GiB one-question BF16 peak). These guards are not
+guarantees for arbitrary prompt lengths. Inputs default to the released 200704
+pixel budget. Neither GGUF nor an unvalidated quantized adapter path is provided.
+
+Sprint 4 verified real CPU inference with the intended base and PEFT adapter on
+both Torch 2.14.1 / Transformers 5.20.0 and a disposable Torch 2.15.0 CPU /
+Transformers 5.23.0 environment. The pinned bottle image produced probabilities
+approximately `[0.83986, 0.16014]` for `[yes, no]`. CUDA could not be tested because
+the NVIDIA driver was unavailable in this session. The CPU memory guard remains
+32 GiB, based on the original integration's approximately 26 GiB process peak.
+
+### Build, launch, request, and capture
+
+```bash
+source /opt/ros/jazzy/setup.bash
+./install.sh  # existing ROS/Webots prerequisites apply; builds at workspace root
+source ../../install/local_setup.bash
+OMP_NUM_THREADS=4 ros2 launch smpa_ros llm.launch.py service:=visual_jev model:=visual-jev-4b device:=cpu python:="$PWD/.venv/bin/python"
+```
+
+Explicit `service:=visual_jev` starts only the evaluator. The default remains
+`service:=vision`, preserving the current robot loop and its assigned participant
+servers. VisualJEV does not invoke robot Sense, Model, Plan or Act, conversation,
+RDF updates, or RLHF training. The legacy `smpa_ros.loop` execution path is not
+restored; its lossless image persistence is retained in modern Sense capture.
+`model_root` and `source_dir` launch arguments override absolute local paths.
+For CUDA on a machine meeting the memory guard, explicitly use `device:=cuda`.
+
+In a second terminal, source ROS and `install/setup.bash`, then send a minimal
+one-pixel request to check service communication:
+
+```bash
+ros2 service call /visual_jev/evaluate smpa_ros_interfaces/srv/EvaluateVisualDecision "{image: {height: 1, width: 1, encoding: rgb8, step: 3, data: [255, 0, 0]}, context: '', question: 'Does this image contain something interesting that deserves further investigation?', choices: ['yes', 'no']}"
+```
+
+For one actual camera frame, use `camera_topic` from the installed pipeline YAML:
+
+```bash
+ros2 run smpa_ros visual_jev_camera
+# Or supply the topic, arbitrary question, choices, and context:
+ros2 run smpa_ros visual_jev_camera --topic /tiago/camera/color/image_raw --question 'Is there a person?' --choices yes no --context 'Robot observation'
+```
+
+The client subscribes once, unsubscribes after its first frame, prints the answer
+and probabilities, and exits. Stop the service with Ctrl+C.
+
+### Tests
+
+```bash
+./test.sh --unit
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 ./test.sh --integration
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 ./test.sh --all
+```
+
+Unit tests never initialize/download large models. Integration uses the local
+base/adapter and the official bottle photograph, sending it through a ROS image
+publisher, service, and one-frame client. It defaults explicitly to CPU; set
+`SMPA_VISUAL_JEV_DEVICE=cuda` only for a supported GPU. It skips with a reason if
+the adapter or PEFT is missing, and does not download anything. The physical
+camera is not required for this reproducible transport test. Executors, nodes,
+subscriptions, clients, and temporary build products are cleaned up.
+Sprint 4 verification passed 286 unit tests (including 17 VisualJEV tests),
+with two opt-in conversational browser/Qwen checks skipped, all three integration
+tests (robot LLM, prerecorded speech and actual VisualJEV), and all 12 RLHF tests.
+Installed entry points and generated service types were checked outside the
+source tree. Provisioning was repeated offline with checksum verification; a
+fresh upstream clone successfully checked out the pinned source commit.
+
+The default ROS domain advertised `/tiago/camera/color/image_raw`; the actual
+VisualJEV acceptance run used the released bottle photograph through a temporary
+ROS publisher. No physical robot commands were sent. Upstream processor and
+checkpoint API deprecation warnings remain, without inference failures on either
+tested stack.
+
+References: [official source and hardware results](https://github.com/guanxuyu-sv/Visual-Jev),
+[released adapter](https://huggingface.co/guanxuyu/visual-jev-4b-answer-sft).
+
 ## Persistent local model library
 
 The standalone `scripts/download_models.py` uses the shared text registry plus the existing vision/coding library
@@ -974,10 +1108,13 @@ The source config can be selected through the `config` launch argument; otherwis
 the installed config is used. Rebuild after editing installed configuration assets.
 
 Each cycle waits for Sense, receives one frame with sensor-data QoS, requests its
-description, saves it under the run's `observations/vision/` directory, and continues through
+description, saves it under the run's `observations/vision/` directory alongside
+the original RGB PNG with the same UTC receipt timestamp, and continues through
 Model, Plan, and Act. The response text is saved verbatim. `capture_once()` remains
 available for callers with an explicitly assigned run. Errors stop the run;
-`--timeout` defaults to 120 seconds per camera/service waiting phase.
+`--timeout` defaults to 120 seconds per camera/service waiting phase. Each capture
+creates one `*_sense_output.md`/`.png` pair and one existing Sense record, whose
+source list includes both files. Service errors create neither observation file.
 
 ```bash
 ros2 topic list -t --no-daemon

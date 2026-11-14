@@ -1,5 +1,5 @@
 """Sense service, camera capture, and observation persistence."""
-from datetime import datetime
+from datetime import datetime, timezone
 from importlib.resources import files
 from pathlib import Path
 import json
@@ -222,7 +222,15 @@ class SenseService(Node):
 
 def capture_once(node: Node, config: dict, output_dir: Path,
                  executor: SingleThreadedExecutor, timeout: float = 120) -> Path:
-    """Receive one frame, request its description, and write the exact response."""
+    """Capture one image and description inside the assigned run's observations.
+
+    Receive the first camera frame and its UTC receipt time, then unsubscribe
+    and request Sense with that same frame. After a successful response, save
+    the original RGB pixels losslessly and the exact description under one shared
+    timestamp. Create both files exclusively; the existing caller records them
+    as sources of one Sense invocation. Service errors produce no observation
+    files. Always destroy the subscription and service client before returning.
+    """
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.task import Future
     from sensor_msgs.msg import Image
@@ -243,8 +251,9 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         image_future = Future()
 
         def receive(image: Image) -> None:
+            """Keep the first frame and its UTC receipt time; ignore later frames."""
             if not image_future.done():
-                image_future.set_result(image)
+                image_future.set_result((image, datetime.now(timezone.utc)))
 
         node.get_logger().info(f"Subscribing to camera topic: {config['camera_topic']}")
         subscription = node.create_subscription(
@@ -258,9 +267,10 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         node.get_logger().info(f'Image received after {perf_counter() - started:.2f}s')
         node.destroy_subscription(subscription)
         subscription = None
+        image, received_at = image_future.result()
         started = perf_counter()
         response_future = client.call_async(
-            DescribeScene.Request(image=image_future.result(), prompt=prompt),
+            DescribeScene.Request(image=image, prompt=prompt),
         )
         node.get_logger().info('Request sent to /sense')
         executor.spin_until_future_complete(response_future, timeout_sec=timeout)
@@ -270,9 +280,11 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         node.get_logger().info(f'/sense response received after {perf_counter() - started:.2f}s')
         if response.error:
             raise RuntimeError(response.error)
-        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S_%f')
+        timestamp = received_at.strftime('%Y-%m-%d_%H-%M-%S_%fZ')
         path = output_dir / f'{timestamp}_sense_output.md'
-        # Exclusive creation prevents an existing observation from being overwritten.
+        # One image/description pair belongs to the existing Sense invocation.
+        with path.with_suffix('.png').open('xb') as output:
+            image_to_pil(image).save(output, format='PNG')
         with path.open('x', encoding='utf-8', newline='') as output:
             output.write(response.description)
         node.get_logger().info(f'Markdown file saved: {path.resolve()}')

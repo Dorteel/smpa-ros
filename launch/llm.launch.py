@@ -14,7 +14,20 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def start(context):
+    """Start the selected workflow without coupling visual evaluation to cognition.
+
+    Explicit VisualJEV selection starts only its independent evaluator, with its
+    pixel-budget argument parsed as an integer ROS parameter. All other
+    selections retain the existing robot loop or assigned participant servers,
+    including run-scoped remappings and unchanged action execution.
+    """
     value = lambda name: LaunchConfiguration(name).perform(context)
+    if value('service') == 'visual_jev':
+        parameters = {'model': value('model'), 'model_root': value('model_root'),
+                      'source_dir': value('source_dir'), 'device': value('device'),
+                      'max_pixels': int(value('max_pixels'))}
+        return [Node(package='smpa_ros', executable='visual_jev', parameters=[parameters],
+                     prefix=[value('python')], output='screen')]
     if value('participants_only') == 'true':
         from memory import MemoryManager
         directory, identity = MemoryManager.assigned_run(value('world_model_dir'), value('run_id'))
@@ -48,9 +61,19 @@ def start(context):
 
 
 def generate_launch_description():
+    """Declare existing robot defaults and optional independent evaluator settings.
+
+    Keep vision as the default robot service. VisualJEV model, device, source and
+    pixel-budget arguments are used only when that service is explicitly selected.
+    Return the launch description whose existing callback starts the chosen path.
+    """
     share = Path(get_package_share_directory('smpa_ros'))
     return LaunchDescription([
-        DeclareLaunchArgument('service', default_value='vision', choices=['speech', 'vision', 'all']),
+        DeclareLaunchArgument('service', default_value='vision', choices=['speech', 'vision', 'all', 'visual_jev']),
+        DeclareLaunchArgument('model', default_value='visual-jev-4b'),
+        DeclareLaunchArgument('device', default_value='cuda', choices=['cpu', 'cuda']),
+        DeclareLaunchArgument('source_dir', default_value=str(Path.cwd() / 'third_party/Visual-Jev/code')),
+        DeclareLaunchArgument('max_pixels', default_value='200704'),
         DeclareLaunchArgument('run_name', default_value='smpa'),
         DeclareLaunchArgument('max_cycles', default_value='', description='Override execution.max_cycles'),
         DeclareLaunchArgument('timeout', default_value='', description='Override camera/Sense wait timeout in seconds (default: 120)'),

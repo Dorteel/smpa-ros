@@ -1,4 +1,8 @@
 from unittest.mock import MagicMock
+from datetime import datetime
+from pathlib import Path
+
+from PIL import Image as PILImage
 
 import pytest
 import rclpy
@@ -12,7 +16,12 @@ from smpa_ros.sense import SenseService
 
 @pytest.mark.parametrize('fails', [False, True])
 def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
-    """Only inference is mocked; camera messages and service calls use ROS."""
+    """Capture one original frame and its exact description through real ROS.
+
+    Only inference is mocked. On success require one UTC-stamped Markdown/PNG
+    pair in the assigned run, with unchanged pixels and text. On inference
+    failure require neither observation file, leaving run ownership unchanged.
+    """
     run_dir = assigned_test_run.directory
     rclpy.init(args=[])
     executor = SingleThreadedExecutor()
@@ -36,12 +45,30 @@ def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
         if fails:
             with pytest.raises(RuntimeError, match='model failed'):
                 capture_once(loop, config, run_dir, executor, timeout=5)
-            assert not list((run_dir / 'observations' / 'vision').glob('*.md'))
+            assert not list((run_dir / 'observations' / 'vision').iterdir())
         else:
-            path = capture_once(loop, config, run_dir, executor, timeout=5)
+            from smpa_ros.sense import record_observation
+            captured = {}
+
+            def capture(directory, cycle):
+                """Persist the one capture through the existing Sense record owner."""
+                captured['path'] = capture_once(loop, config, directory, executor, timeout=5)
+                return captured['path'].read_text()
+
+            value, sources = record_observation(run_dir, 1, capture)
+            path = captured['path']
+            assert value == text and len(sources) == 2
+            assert set(sources) == {str(path.relative_to(run_dir)),
+                                    str(path.with_suffix('.png').relative_to(run_dir))}
+            assert len(list((run_dir / 'state').glob('*/sense*.json'))) == 1
             assert path.name.endswith('_sense_output.md')
             assert path.read_bytes() == text.encode('utf-8')
             assert list((run_dir / 'observations' / 'vision').glob('*.md')) == [path]
+            with PILImage.open(path.with_suffix('.png')) as saved:
+                assert saved.size == (1, 1) and saved.mode == 'RGB'
+                assert saved.getpixel((0, 0)) == (255, 0, 0)
+            datetime.strptime(path.stem.removesuffix('_sense_output'), '%Y-%m-%d_%H-%M-%S_%fZ')
+            assert set(path.parent.iterdir()) == {path, path.with_suffix('.png')}
         backend.describe.assert_called_once()
         assert backend.describe.call_args.args[1] == 'Describe the scene.'
     finally:
@@ -55,7 +82,13 @@ def test_camera_sense_markdown(tmp_path, fails, assigned_test_run):
 @pytest.mark.parametrize('backend_kind', ['local', 'api'])
 @pytest.mark.parametrize('configured, override, expected', [(None, None, 1), (3, None, 3), (3, 1, 1)])
 def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, override, expected, backend_kind):
-    """Exercise main, real ROS image/service exchange and persistence; mock model/process creation."""
+    """Run configured robot cycles with real ROS image exchange and persistence.
+
+    Mock inference, process creation and action execution while preserving the
+    actual main loop. Verify one backend, one Sense record and one Markdown/PNG
+    pair per cycle, with both source files linked into the Model record. Retain
+    cycle limits, successful actions and separate Markdown world-model snapshots.
+    """
     import json
     import yaml
     import runner as module
@@ -120,7 +153,11 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     parameters = yaml.safe_load((directory / 'parameters.yaml').read_text())
     assert parameters.get('execution', {}).get('max_cycles', 1) == (configured or 1)
     assert parameters['_run']['max_cycles'] == expected
-    assert len(list((directory / 'observations' / 'vision').iterdir())) == expected
+    observations = directory / 'observations' / 'vision'
+    descriptions = list(observations.glob('*.md'))
+    assert len(descriptions) == expected
+    assert set(observations.iterdir()) == {file for description in descriptions
+                                         for file in (description, description.with_suffix('.png'))}
     assert len(list((directory / 'state').iterdir())) == expected
     constructor.assert_called_once()
     assert model_backend.generate.call_count == expected * 2
@@ -132,7 +169,13 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     else:
         assert metadata['models']['vision']['model_id'] == metadata['models']['model']['model_id'] == 'shared/vision-model'
     for cycle in range(1, expected + 1):
-        assert json.loads((directory / f'state/cycle_{cycle:06d}/act.json').read_text())['status'] == 'succeeded'
+        state = directory / f'state/cycle_{cycle:06d}'
+        assert len(list(state.glob('sense*.json'))) == 1
+        model = json.loads((state / 'model.json').read_text())
+        assert len(model['source_observations']) == 3
+        assert model['source_observations'][0] == f'state/cycle_{cycle:06d}/sense.json'
+        assert {Path(name).suffix for name in model['source_observations'][1:]} == {'.md', '.png'}
+        assert json.loads((state / 'act.json').read_text())['status'] == 'succeeded'
 
 
 @pytest.mark.parametrize('entry_point', ['source', 'installed'])

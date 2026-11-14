@@ -139,11 +139,14 @@ def test_anonymous_gated_repository_is_not_downloaded(downloader, tmp_path, monk
     assert not calls
 
 
-def test_cache_links_are_not_copied_onto_themselves(downloader, tmp_path, monkeypatch):
+@pytest.mark.parametrize('adapter', [False, True])
+def test_cache_links_are_not_copied_onto_themselves(downloader, tmp_path, monkeypatch, adapter):
     cache = tmp_path / 'cache'
     cache.mkdir()
     contents = {'config.json': b'{}', 'tokenizer.json': b'{}',
                 'model.safetensors': b'cached weights', 'preprocessor_config.json': b'{}'}
+    if adapter:
+        contents = {'adapter_config.json': b'{}', 'adapter_model.safetensors': b'cached weights'}
     for name, data in contents.items():
         (cache / name).write_bytes(data)
     calls = []
@@ -165,13 +168,14 @@ def test_cache_links_are_not_copied_onto_themselves(downloader, tmp_path, monkey
         HfHubHTTPError=AccessError,
     ))
     results = Queue()
-    model = downloader.MODELS[5]
+    model = downloader.VISUAL_JEV_MODELS[1] if adapter else downloader.MODELS[5]
     downloader.download(model, tmp_path, results)
     assert results.get() == {'revision': 'cached-revision'}
     assert results.get()['status'] == 'completed'
     assert not calls
-    target = tmp_path / model[0] / model[1] / 'model.safetensors'
-    assert target.samefile(cache / 'model.safetensors')
+    name = 'adapter_model.safetensors' if adapter else 'model.safetensors'
+    target = tmp_path / model[0] / model[1] / name
+    assert target.samefile(cache / name)
 
 
 def test_timeout_preserves_known_revision(downloader, tmp_path, monkeypatch):
@@ -291,3 +295,42 @@ def test_verifier_import_without_registry_rejects_cli_provisioning(tmp_path, mon
     with pytest.raises(SystemExit) as error:
         verifier.main()
     assert error.value.code == 2
+
+
+def test_visual_pins_do_not_change_cognitive_model_defaults(downloader):
+    """Keep VisualJEV provisioning pinned and separate from default model batches.
+
+    Compare both explicit evaluator destinations to their registry declarations.
+    Require immutable revisions and confirm they neither replace the existing
+    cognitive Qwen VLM destination nor pin its previously unpinned revision.
+    """
+    entry = downloader.registry_entries['visual-jev-4b']
+    for model, key in zip(downloader.VISUAL_JEV_MODELS, ('base_model', 'adapter')):
+        assert Path(model[0]) / model[1] == Path(entry[key]['path'])
+        assert downloader.VISUAL_JEV_REVISIONS[model[2]] == entry[key]['revision']
+        assert len(entry[key]['revision']) == 40
+        assert model not in downloader.MODELS
+    assert downloader.REVISIONS.get('Qwen/Qwen3-VL-4B-Instruct') is None
+
+
+def test_visual_cli_propagates_failed_downloads(downloader, monkeypatch, tmp_path):
+    """Fail explicit VisualJEV provisioning when either snapshot is incomplete.
+
+    Mock only the download boundary, preserve the storage-root argument and check
+    the exact selected pair. Reject ambiguous combined selection flags before any
+    download so existing cognitive model selection stays explicit.
+    """
+    run = MagicMock(return_value={})
+    monkeypatch.setattr(downloader, 'run', run)
+    monkeypatch.setattr(sys, 'argv', ['download_models.py', '--visual-jev', '--model-root', str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        downloader.main()
+    assert error.value.code == 1
+    assert run.call_args.kwargs['models'] == downloader.VISUAL_JEV_MODELS
+    assert run.call_args.kwargs['root'] == tmp_path.resolve()
+    run.reset_mock()
+    monkeypatch.setattr(sys, 'argv', ['download_models.py', '--visual-jev', '--all-text'])
+    with pytest.raises(SystemExit) as error:
+        downloader.main()
+    assert error.value.code == 2
+    run.assert_not_called()

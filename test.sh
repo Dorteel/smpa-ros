@@ -86,6 +86,15 @@ assert b'Belief graph' in files('smpa_ros').joinpath('conversation.html').read_b
 from smpa_ros.belief import ontology_graph
 ontology, digest = ontology_graph()
 assert len(ontology) > 0 and len(digest) == 64
+for name, target in {'visual_jev': 'smpa_ros.visual_jev.service:main',
+                     'visual_jev_camera': 'smpa_ros.visual_jev.camera:main'}.items():
+    assert entries[name].value == target
+    assert callable(entries[name].load())
+from smpa_ros_interfaces.srv import EvaluateVisualDecision
+from rclpy.type_support import check_for_type_support
+check_for_type_support(EvaluateVisualDecision)
+assert set(EvaluateVisualDecision.Response.get_fields_and_field_types()) == {
+    'success', 'selected_answer', 'answer_labels', 'probabilities', 'error_message'}
 assert entries['segment_image'].value == 'smpa_ros.segmentation:main'
 assert callable(entries['segment_image'].load())
 assert entries['smpa'].value == 'smpa_ros.smpa:main'
@@ -123,4 +132,5 @@ timeout --kill-after=2s 10s ros2 run smpa_ros smpa --help > "$work_dir/smpa-help
 grep -Fq -- '--max-cycles' "$work_dir/smpa-help.txt"
 timeout --kill-after=2s 10s ros2 launch smpa_ros speech.launch.py --show-args > /dev/null
 timeout --kill-after=2s 10s ros2 launch smpa_ros llm.launch.py --show-args > /dev/null
+timeout --kill-after=2s 10s ros2 run smpa_ros visual_jev_camera --help > /dev/null
 echo 'Build, tests (including SMPA cycles and audio persistence), installed assets, Speech entry points, and SMPA command checks passed.'

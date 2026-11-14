@@ -1,0 +1,3 @@
+[submodule "third_party/Visual-Jev"]
+	path = third_party/Visual-Jev
+	url = https://github.com/guanxuyu-sv/Visual-Jev.git

@@ -1,0 +1,10 @@
+sensor_msgs/Image image
+string context
+string question
+string[] choices
+---
+bool success
+string selected_answer
+string[] answer_labels
+float32[] probabilities
+string error_message

@@ -25,6 +25,8 @@ setup(
     tests_require=['pytest'],
     entry_points={'console_scripts': [
         'sense = smpa_ros.sense:main',
+        'visual_jev = smpa_ros.visual_jev.service:main',
+        'visual_jev_camera = smpa_ros.visual_jev.camera:main',
         'segment_image = smpa_ros.segmentation:main',
         'conversation = smpa_ros.conversation_web:main',
         'smpa = smpa_ros.smpa:main',

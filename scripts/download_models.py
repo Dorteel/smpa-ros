@@ -27,6 +27,10 @@ MODELS = [
     ('coding', 'qwen2.5_coder_1.5b', 'Qwen/Qwen2.5-Coder-1.5B-Instruct'),
     ('coding', 'qwen2.5_coder_7b', 'Qwen/Qwen2.5-Coder-7B-Instruct'),
 ]
+VISUAL_JEV_MODELS = [
+    ('vision', 'visual-jev-4b/base_model', 'Qwen/Qwen3-VL-4B-Instruct'),
+    ('vision', 'visual-jev-4b/adapter', 'guanxuyu/visual-jev-4b-answer-sft'),
+]
 ROOT = Path(__file__).resolve().parents[1] / 'models'
 # Text destinations and pinned revisions come from the shared inference registry.
 # Runtime manifest checks also import this script for arbitrary model roots.
@@ -38,6 +42,14 @@ TEXT_MODELS = {name: item for name, item in registry_entries.items()
 REGISTERED = {name: (*Path(item['path']).parts, item['model_id'])
               for name, item in TEXT_MODELS.items()}
 REVISIONS = {item['model_id']: item.get('revision') for item in TEXT_MODELS.values()}
+visual_entry = registry_entries.get('visual-jev-4b', {})
+VISUAL_JEV_REVISIONS = {}
+if visual_entry:
+    VISUAL_JEV_MODELS = [(Path(visual_entry[key]['path']).parts[0],
+                          str(Path(*Path(visual_entry[key]['path']).parts[1:])),
+                          visual_entry[key]['model_id']) for key in ('base_model', 'adapter')]
+    VISUAL_JEV_REVISIONS.update({visual_entry[key]['model_id']: visual_entry[key]['revision']
+                      for key in ('base_model', 'adapter')})
 # Retain old destinations as reusable sources, without moving existing weights.
 LEGACY_MODELS = MODELS[:]
 by_repo = {model[2]: model for model in REGISTERED.values()}
@@ -87,7 +99,13 @@ def save_report(path, records):
 
 
 def download(model, root, results):
-    """One bounded worker; authentication is explicitly enabled with --auth."""
+    """Download one pinned snapshot and report verified local files.
+
+    Read repository metadata with explicit optional authentication, validate model
+    or adapter assets, then reuse revision-matching reports or checksum-matching
+    cache and legacy files. Download remaining files and verify sizes and hashes.
+    Report failures without discarding valid weights or replacing model selections.
+    """
     category, folder, repo = model
     directory = root / category / folder
     result = {'status': 'failed', 'error': None, 'revision': None, 'files': {}}
@@ -100,7 +118,8 @@ def download(model, root, results):
         try:
             token = True if os.environ.get('SMPA_HF_AUTH') == '1' else False
             info = HfApi(token=token).model_info(
-                repo, revision=REVISIONS.get(repo), files_metadata=True, timeout=20)
+                repo, revision=(VISUAL_JEV_REVISIONS.get(repo) if model in VISUAL_JEV_MODELS
+                                else REVISIONS.get(repo)), files_metadata=True, timeout=20)
         except (GatedRepoError, RepositoryNotFoundError) as error:
             result.update(status='skipped', error=f'{type(error).__name__}: {error}')
             return
@@ -119,16 +138,20 @@ def download(model, root, results):
                     and file.rfilename.endswith(('.json', '.safetensors', '.model',
                                                  '.txt', '.tiktoken', '.jinja'))]
         names = {file.rfilename for file in siblings}
-        if 'config.json' not in names or not any(name.endswith('.safetensors') for name in names):
+        is_adapter = repo == 'guanxuyu/visual-jev-4b-answer-sft'
+        config_name = 'adapter_config.json' if is_adapter else 'config.json'
+        if config_name not in names or not any(name.endswith('.safetensors') for name in names):
             raise ValueError('Missing model config or safetensors weights')
-        if not any(name in names for name in ('tokenizer.json', 'tokenizer.model')):
+        if not is_adapter and not any(name in names for name in ('tokenizer.json', 'tokenizer.model')):
             raise ValueError('Missing tokenizer')
-        if category == 'vlm' and not any(name in names for name in
+        if (category == 'vlm' or (category == 'vision' and not is_adapter)) and not any(name in names for name in
                                        ('preprocessor_config.json', 'processor_config.json')):
             raise ValueError('Missing processor configuration')
         directory.mkdir(parents=True, exist_ok=True)
         needed = 0
         reused = set()
+        report_path = root / 'download_report.json'
+        previous = json.loads(report_path.read_text()).get('models', []) if report_path.exists() else []
         for file in siblings:
             if file.size is None:
                 raise ValueError(f'Unknown file size: {file.rfilename}')
@@ -147,6 +170,13 @@ def download(model, root, results):
                             and old.stat().st_size == file.size
                             and file.lfs and digest(old) == file.lfs.sha256):
                         cached = str(old)
+                        break
+            if not isinstance(cached, str):
+                for item in previous:
+                    candidate = Path(item.get('local_dir', '')) / file.rfilename
+                    if (item.get('repo_id') == repo and item.get('revision') == info.sha
+                            and candidate.is_file() and candidate.stat().st_size == file.size):
+                        cached = str(candidate)
                         break
             if not target.exists() and isinstance(cached, str):
                 source = Path(cached).resolve()
@@ -241,6 +271,14 @@ def record_attempt(model, result, root, records, report):
 
 
 def run(root=ROOT, retries=2, timeout=1800, models=None):
+    """Provision selected snapshots while preserving the existing cognitive defaults.
+
+    Read prior reports and reuse complete files only when their selected revision
+    and checksums match. Apply VisualJEV pins only to its explicit base/adapter
+    destinations, leaving cognitive model revisions unchanged. Attempt remaining
+    downloads with bounded retries, preserve partial files and write status records.
+    Return the existing repository-keyed report mapping and stop safely on low disk.
+    """
     models = MODELS if models is None else models
     root.mkdir(parents=True, exist_ok=True)
     report = root / 'download_report.json'
@@ -257,11 +295,12 @@ def run(root=ROOT, retries=2, timeout=1800, models=None):
         print(f'\n[{index}/{len(models)}] {repo}\nCategory: {category}\n'
               f'Destination: {directory}', flush=True)
         previous = records.get(repo, {})
+        revision = VISUAL_JEV_REVISIONS.get(repo) if model in VISUAL_JEV_MODELS else REVISIONS.get(repo)
         interrupted = False
         result = {'revision': None, 'files': {}}
         try:
             if (previous.get('status') == 'completed'
-                    and (not REVISIONS.get(repo) or previous.get('revision') == REVISIONS[repo])
+                    and (not revision or previous.get('revision') == revision)
                     and verified(directory, previous.get('files'))):
                 result = previous
                 print('Previously completed files verified; reusing.', flush=True)
@@ -307,6 +346,9 @@ def main():
     Require the registry for CLI operations, while allowing verifier-only imports
     without it. List assets without downloading when requested; otherwise retain
     retry, interruption and incomplete-download handling for selected snapshots.
+    Explicit VisualJEV selection provisions only its pinned base and adapter and
+    rejects combined cognitive selectors. Exit unsuccessfully if either requested
+    snapshot remains incomplete, preserving existing files for a later restart.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--retries', type=int, default=2, help='Retries per failed model')
@@ -317,6 +359,7 @@ def main():
     parser.add_argument('--list', action='store_true', help='List models and local asset availability')
     parser.add_argument('--model-root', type=Path, default=ROOT, help='Override model storage root')
     parser.add_argument('--auth', action='store_true', help='Use HF_TOKEN or stored hf login credentials')
+    parser.add_argument('--visual-jev', action='store_true', help='Download only the pinned VisualJEV base and adapter')
     options = parser.parse_args()
     if not registry_path.is_file():
         parser.error(f'Model registry is missing: {registry_path}')
@@ -344,6 +387,8 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupt)
+    if options.visual_jev and (options.model or options.all_text):
+        parser.error('--visual-jev cannot be combined with --model or --all-text')
     by_id = {model[2]: model for model in MODELS}
     by_id.update({model[2]: model for model in REGISTERED.values()})
     selected = list(REGISTERED.values()) if options.all_text else ([] if options.model else MODELS)
@@ -351,9 +396,11 @@ def main():
         model = REGISTERED[name] if name in REGISTERED else by_id[name]
         if model not in selected:
             selected.append(model)
+    if options.visual_jev:
+        selected = VISUAL_JEV_MODELS
     records = run(root=options.model_root.resolve(), retries=options.retries,
                   timeout=options.timeout, models=selected)
-    if (options.model or options.all_text) and any(records.get(model[2], {}).get('status') != 'completed'
+    if (options.model or options.all_text or options.visual_jev) and any(records.get(model[2], {}).get('status') != 'completed'
                              for model in selected):
         raise SystemExit(1)
 
