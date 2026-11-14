@@ -1,0 +1,42 @@
+# Explicit nonphysical profile: the unchanged planner may select only Observe.
+# Launch with --all-senses to bind the explicitly selected Read session.
+camera_topic: /tiago/camera/color/image_raw
+model:
+  path: models/vlm/qwen3_vl_2b
+  model_id: Qwen/Qwen3-VL-2B-Instruct
+  backend: transformers
+  model: qwen3_vl_2b
+  device: auto
+  dtype: auto
+prompt: describe_scene
+enabled_actions: [observe]
+execution:
+  max_cycles: 1
+  action_timeout: 30.0
+stage_settings:
+  sense:
+    temperature: 0.0
+    max_output_tokens: 1024
+    response_format: json_schema
+    output_schema:
+      type: object
+  model:
+    temperature: 0.0
+    max_output_tokens: 1024
+    response_format: text
+  plan:
+    temperature: 0.0
+    max_output_tokens: 256
+    response_format: json_schema
+    output_schema:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [observe]
+        target:
+          type: [string, 'null']
+        question:
+          type: [string, 'null']
+      required: [action, target, question]
+      additionalProperties: false

@@ -2062,3 +2062,86 @@ The normal robot command still performs real actions selected by its configured
 whitelist; do not use movement-enabled defaults for sensing-only verification.
 Run contract regressions with `./test.sh --unit` and existing local-model
 integration checks with `./test.sh --integration`.
+
+### Permanent all-modality launcher and Sense acceptance checks
+
+Select an existing conversation run explicitly. This command uses the installed
+workspace, existing Runner and native ROS participants; it neither builds nor
+starts another execution loop:
+
+```bash
+./run_smpa.sh --all-senses /absolute/path/to/conversation/run \
+  config:="$PWD/config/sense_observe.yaml" max_cycles:=1 timeout:=240
+```
+
+The checked-in `config/sense_observe.yaml` profile retains the configured default
+VLM and canonical planning schema, but permits only the existing nonphysical
+Observe action. It runs Sense → Model → Plan → Act without movement goals.
+Normal configurations retain their existing action semantics and may permit
+movement. No default configuration or action implementation is changed.
+
+`--all-senses` enables Hear and Vision and binds Read to the selected session.
+It rejects conflicting `service`, `hear`, `vision`, `read_session` or
+`participants_only` overrides. Conversation paths containing spaces are supported.
+The selected session is validated read-only before launch. Live Hear requires a
+working microphone and speech during its existing capture interval; silence is
+an observation error, not a successful empty transcript. This command does not
+start conversational inference or alter the session. Use the existing conversation
+application independently to persist further User messages.
+
+Rebuild an old workspace using the existing installation procedure before using
+this mode. The launcher checks installed modality imports outside the checkout;
+it does not repair stale installations or install dependencies during startup.
+Existing `./run_smpa.sh service:=vision|speech|all` argument forwarding remains
+supported. Node and endpoint names are unchanged from the modality reorganization:
+Hear, Read and Vision remain under `/run_<uuid>/sense/`, with Talk under
+`/run_<uuid>/act/`. External camera and independent evaluator interfaces remain
+unchanged. File-backed Read has a real ROS identity but no text topic.
+
+Inspect the same ROS domain from a second terminal:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+rqt_graph
+```
+
+For a machine-readable discovery inventory, a vector SVG of **observed topic
+endpoints only**, and a genuine rqt_graph screenshot:
+
+```bash
+QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/capture_sense_graph.py \
+  --output memory/sense-runtime-graph
+```
+
+Use `--run-prefix /run_<uuid>` to select one run. The SVG never draws Python/file
+relations or infers service invocation from matching client/server names. Services
+and actions are listed separately in `interfaces.json`. Isolated Read and service
+nodes are intentional; transient camera subscriptions may have ended before a
+snapshot. Parameter services, infrastructure topics and unrelated simulator nodes
+are excluded from the SVG. Graphviz and rqt_graph must already be available; the
+capture tool never installs them. `--no-screenshot` omits only the Qt capture.
+
+Reproducible acceptance with real local models and controlled sensor devices:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+ROS_DOMAIN_ID=61 SMPA_ACCEPTANCE_OUTPUT="$PWD/memory/sense-2b-acceptance" \
+  .venv/bin/python -m pytest test/test_sense_pipeline_integration.py -v -s
+./test.sh --unit
+./test.sh --integration
+./test.sh --rlhf
+```
+
+The acceptance test invokes the **production shell launcher**, publishes a known
+image in the isolated test domain, and substitutes only microphone input using
+`test/sense_audio_python.py`. Whisper, evidence persistence, the shared VLM, Read,
+planning and Observe execution remain production code. The prefix is an explicit
+test fixture, never the launcher's default interpreter. Test artifacts include
+the exact command, launch diagnostics, completed run, one-model-load check, child
+PIDs and sampled RSS. Controlled-device results do not establish live microphone
+reliability or live camera timing. No temporary audit script is required.
+
+When inspecting the isolated acceptance test, set `ROS_DOMAIN_ID=61` in the
+inspection terminal too; a viewer in the default domain cannot discover that run.
