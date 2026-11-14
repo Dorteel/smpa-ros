@@ -8,6 +8,51 @@ if TYPE_CHECKING:
     from PIL.Image import Image
 
 
+def structured_output_instruction(schema, max_new_tokens):
+    """Explain the requested JSON contract to the model before constrained decoding.
+
+    The schema describes the complete response, and max_new_tokens is the existing
+    output budget. A token mask enforces legal continuations but cannot tell the
+    model which content to produce or encourage it to finish within that budget.
+    Return a format instruction containing the unchanged schema so the model can
+    plan a concise, complete response. This instruction does not replace either
+    the token mask or validation of the final output.
+    """
+    return (
+        'Answer the user request with actual observations or requested values, '
+        'encoded as exactly one complete JSON value. Do not include reasoning, '
+        'Markdown fences, or text before or after the JSON. Keep the answer concise '
+        f'and finish the entire JSON within {max_new_tokens} output tokens.\n'
+        'Required JSON Schema (a description of the response structure, not the answer):\n'
+        + json.dumps(schema, ensure_ascii=False)
+        + '\nReturn the answer data matching this schema. Do not copy the schema '
+        'or describe its type. Use meaningful field names for the requested '
+        'information unless the schema already specifies those names.'
+    )
+
+
+def validate_generated_output(text, continuation, max_new_tokens, response_format, schema):
+    """Validate a decoded response and explain failures without repairing its content.
+
+    Text is the complete decoded continuation; continuation contains its original
+    token IDs. Apply the existing format and schema validator unchanged. Return
+    valid output exactly as supplied. If validation fails, report the token count,
+    whether the configured limit was reached, and a bounded representation of the
+    rejected text's tail. Preserve the validator's original exception as the cause.
+    Never accept a partial JSON value or silently retry with weaker constraints.
+    """
+    try:
+        return validate_output(text, response_format, schema)
+    except RuntimeError as error:
+        token_count = len(continuation)
+        stop = ('the output token limit was reached; the JSON may be incomplete'
+                if token_count >= max_new_tokens else 'generation stopped before the output token limit')
+        raise RuntimeError(
+            f'{error}. Generated {token_count}/{max_new_tokens} tokens; {stop}. '
+            f'Rejected output tail: {text[-500:]!r}'
+        ) from error
+
+
 def generation_options(model, tokenizer, temperature, schema):
     """Prepare independent sampling and schema masks for a single request."""
     options = {}
@@ -57,6 +102,17 @@ class TransformersBackend:
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
                  temperature=None, seed=None, reasoning_effort=None, response_format=None) -> str:
+        """Generate text using the selected model and the requested output contract.
+
+        Validate the decoding settings and create a fresh schema token mask when
+        JSON is required. Keep the user's prompt intact and precede it with an
+        explicit schema instruction for structured responses. Render the chat
+        template when available; otherwise prepend that instruction to the plain
+        prompt. Tokenize, generate within the unchanged output budget, and decode
+        only the continuation. A supplied seed is scoped to this request. Return
+        validated output or raise a diagnostic error without accepting malformed
+        or truncated JSON. Plain-text requests receive no schema instruction.
+        """
         response_format = response_format or ('json_schema' if schema is not None else 'text')
         if schema is not None and response_format != 'json_schema':
             raise ValueError('A schema requires response_format=json_schema')
@@ -67,6 +123,8 @@ class TransformersBackend:
             schema = {'type': 'object'}
         options = generation_options(self.model, self.tokenizer, temperature, schema)
         messages = [{'role': 'user', 'content': prompt}]
+        if schema is not None:
+            messages.insert(0, {'role': 'system', 'content': structured_output_instruction(schema, max_new_tokens)})
         if self.tokenizer.chat_template:
             template_options = {} if self.enable_thinking is None else {'enable_thinking': self.enable_thinking}
             prompt = self.tokenizer.apply_chat_template(
@@ -74,6 +132,8 @@ class TransformersBackend:
             )
             inputs = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
         else:
+            if schema is not None:
+                prompt = messages[0]['content'] + '\n\n' + prompt
             inputs = self.tokenizer(prompt, return_tensors='pt')
         inputs = inputs.to(self.model.device)
         # fork_rng restores CPU and all CUDA RNG states after this request.
@@ -83,10 +143,9 @@ class TransformersBackend:
             with self.torch.no_grad():
                 output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **options)
         # Decode only the continuation, excluding the input prompt.
-        text = self.tokenizer.decode(
-            output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=True,
-        )
-        return validate_output(text, response_format, schema)
+        continuation = output[0, inputs['input_ids'].shape[-1]:]
+        text = self.tokenizer.decode(continuation, skip_special_tokens=True)
+        return validate_generated_output(text, continuation, max_new_tokens, response_format, schema)
 
 
 class TransformersVLM:
@@ -132,6 +191,17 @@ class TransformersVLM:
 
     def describe(self, image: 'Image', prompt: str, *, max_new_tokens: int = 128,
                  temperature=None, seed=None, reasoning_effort=None, response_format=None, schema=None) -> str:
+        """Describe an image while enforcing the requested response format and schema.
+
+        Validate settings and build a fresh token mask for structured output. The
+        image and original user prompt remain together in the user message; an
+        explicit system instruction supplies the unchanged JSON schema and output
+        budget when needed. Render the processor's chat template and move image
+        tensors to the loaded model's device and precision, preserving integer
+        token IDs. Generate with the supplied controls and request-scoped seed,
+        then decode only new tokens. Return a validated description, or report the
+        rejected output and token-limit status without weakening schema enforcement.
+        """
         response_format = response_format or ('json_schema' if schema is not None else 'text')
         if schema is not None and response_format != 'json_schema':
             raise ValueError('A schema requires response_format=json_schema')
@@ -145,6 +215,8 @@ class TransformersVLM:
         messages = [{'role': 'user', 'content': [
             {'type': 'image'}, {'type': 'text', 'text': prompt},
         ]}]
+        if schema is not None:
+            messages.insert(0, {'role': 'system', 'content': structured_output_instruction(schema, max_new_tokens)})
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
         )
@@ -158,7 +230,6 @@ class TransformersVLM:
                 self.torch.manual_seed(seed)
             with self.torch.no_grad():
                 output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, **options)
-        text = self.processor.decode(
-            output[0, inputs['input_ids'].shape[-1]:], skip_special_tokens=True,
-        ).strip()
-        return validate_output(text, response_format, schema)
+        continuation = output[0, inputs['input_ids'].shape[-1]:]
+        text = self.processor.decode(continuation, skip_special_tokens=True).strip()
+        return validate_generated_output(text, continuation, max_new_tokens, response_format, schema)
