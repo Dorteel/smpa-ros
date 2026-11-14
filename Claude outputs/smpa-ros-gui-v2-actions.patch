@@ -1,0 +1,3228 @@
+From aeb6fb9b85bcb03841809baabe0fb90b6e88efb1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 23:05:49 +0100
+Subject: [PATCH] Add interactive Actions tab to the standalone GUI (gui/,
+ version 2)
+
+A fourth top-level tab discovers action servers, generates a goal editor
+from the action's Goal definition, and sends, monitors and cancels goals.
+All changes are under gui/.
+
+- backend/ros_interfaces.py: resolve action types at run time, describe
+  any message type as a schema, validate JSON values, build messages.
+- backend/action_goals.py: the only module that acts on ROS. Goal records
+  (UUID, state, feedback, result, timestamps) live in the gateway; action
+  clients exist only while a goal is active; one-time request identifiers
+  prevent duplicate goals; active goals are cancelled on normal shutdown
+  unless --keep-goals-on-exit is given.
+- backend/app.py: /api/v1/actions/* routes. The two POST routes need a
+  loopback connection, local Host and Origin, a JSON body and the
+  per-process session token; --read-only disables them. No publishing,
+  service-call or parameter-write route exists. Contract version 1.1.
+- frontend/tabs/actions/: server list, schema-driven form with JSON
+  alternative, saved configurations (browser storage), confirmation
+  dialog with a physical-action warning, monitor and history.
+- tests: real fixture action servers (Fibonacci with feedback, cancel,
+  reject, abort; LookupTransform with a nested goal); 25 HTTP tests and
+  12 browser tests for actions. All version 1 tests still pass; the tab
+  list test and the read-only-routes test were updated deliberately.
+
+Verified in a cloud container with RoboStack Jazzy (90 tests passed);
+not yet run on the target workstation. See gui/VERIFICATION.md.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TQArHBSyxZS2HP9MGqsusV
+---
+ gui/API.md                          | 123 +++++++-
+ gui/ARCHITECTURE.md                 |  43 ++-
+ gui/README.md                       |  85 ++++-
+ gui/VERIFICATION.md                 |  66 +++-
+ gui/backend/__init__.py             |  12 +-
+ gui/backend/__main__.py             |  21 +-
+ gui/backend/action_goals.py         | 292 +++++++++++++++++
+ gui/backend/app.py                  | 145 ++++++++-
+ gui/backend/ros_interfaces.py       | 195 ++++++++++++
+ gui/frontend/api.js                 |  19 +-
+ gui/frontend/app.js                 |   3 +-
+ gui/frontend/style.css              |  31 ++
+ gui/frontend/tabs/actions/form.js   | 173 +++++++++++
+ gui/frontend/tabs/actions/index.js  | 467 ++++++++++++++++++++++++++++
+ gui/frontend/tabs/actions/store.js  |  60 ++++
+ gui/frontend/tabs/ros/actions.js    |   5 +-
+ gui/test_gui.sh                     |   6 +-
+ gui/tests/conftest.py               |  14 +
+ gui/tests/fixtures/fixture_nodes.py |  59 +++-
+ gui/tests/test_actions.py           | 372 ++++++++++++++++++++++
+ gui/tests/test_browser.py           |  16 +-
+ gui/tests/test_browser_actions.py   | 345 ++++++++++++++++++++
+ gui/tests/test_frontend_logic.py    |  48 +++
+ gui/tests/test_ros_integration.py   |  12 +-
+ gui/tests/test_units.py             |  62 +++-
+ 25 files changed, 2596 insertions(+), 78 deletions(-)
+ create mode 100644 gui/backend/action_goals.py
+ create mode 100644 gui/backend/ros_interfaces.py
+ create mode 100644 gui/frontend/tabs/actions/form.js
+ create mode 100644 gui/frontend/tabs/actions/index.js
+ create mode 100644 gui/frontend/tabs/actions/store.js
+ create mode 100644 gui/tests/test_actions.py
+ create mode 100644 gui/tests/test_browser_actions.py
+
+diff --git a/gui/API.md b/gui/API.md
+index 3c29211..153d758 100644
+--- a/gui/API.md
++++ b/gui/API.md
+@@ -1,7 +1,8 @@
+-# Gateway API, contract version 1.0
++# Gateway API, contract version 1.1
+ 
+-Base URL: `http://127.0.0.1:8765/api/v1`. All routes are read-only: HTTP `GET` or
+-WebSocket. Every JSON response contains `contract_version`. ROS names are passed as
++Base URL: `http://127.0.0.1:8765/api/v1`. All routes are read-only (HTTP `GET` or
++WebSocket) except the two `POST` routes under [Action execution](#action-execution).
++Version 1.1 added the `/actions/...` routes; nothing from 1.0 changed. Every JSON response contains `contract_version`. ROS names are passed as
+ URL-encoded query parameters because they contain slashes. A machine-readable
+ description of the HTTP routes is served at `/api/openapi.json`.
+ 
+@@ -14,7 +15,7 @@ Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
+ ### `GET /health`
+ 
+ ```json
+-{"contract_version": "1.0", "status": "ok",
++{"contract_version": "1.1", "status": "ok",
+  "ros": {"ok": true, "node": "/smpa_gui", "domain_id": 0, "rmw": "rmw_fastrtps_cpp", "distro": "jazzy"},
+  "active_subscriptions": [{"topic": "/scan", "type": "sensor_msgs/msg/LaserScan", "viewers": 1}]}
+ ```
+@@ -24,7 +25,7 @@ Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
+ ### `GET /ros/graph`
+ 
+ ```json
+-{"contract_version": "1.0", "stamp": 1794679890.5,
++{"contract_version": "1.1", "stamp": 1794679890.5,
+  "nodes":   [{"id": "node:/talker", "name": "talker", "namespace": "/", "full_name": "/talker",
+               "hidden": false, "is_gateway": false}],
+  "topics":  [{"id": "topic:/chatter", "name": "/chatter", "types": ["std_msgs/msg/String"],
+@@ -61,7 +62,7 @@ The result is cached for one second.
+ ### `GET /ros/nodes/parameters?node=<full node name>&timeout=<seconds, 0.2–10, default 2>`
+ 
+ ```json
+-{"contract_version": "1.0", "node": "/talker", "state": "ok",
++{"contract_version": "1.1", "node": "/talker", "state": "ok",
+  "parameters": [{"name": "use_sim_time", "type": "bool", "value": false,
+                  "description": "", "read_only": false}]}
+ ```
+@@ -143,3 +144,113 @@ are sent as `null`.
+ | `navsatfix` | `latitude`, `longitude`, `altitude`, `status`, `service`, `horizontal_accuracy_m`, `valid` | – |
+ | `range` | `range`, `min_range`, `max_range`, `field_of_view`, `radiation_type` (`ultrasound`, `infrared`, `unknown`) | – |
+ | `camerainfo` | `width`, `height`, `distortion_model`, `d`, `k` (9), `r` (9), `p` (12), `binning_x`, `binning_y`, `roi {x_offset, y_offset, width, height, do_rectify}` | – |
++
++## Action execution
++
++These routes are the only way the gateway acts on ROS. They send and cancel action
++goals; there is no route for publishing, service calls or parameter writes.
++
++### Access rules for the `POST` routes
++
++A `POST` is accepted only if all of the following hold; otherwise the status is `403`
++(or `415`/`422` for a body that is not declared as JSON):
++
++1. Action execution is enabled (the server was not started with `--read-only`).
++2. The TCP connection comes from a loopback address.
++3. The `Host` header names `127.0.0.1`, `localhost` or `::1`.
++4. An `Origin` header, if present, is a local origin.
++5. `Content-Type` is `application/json`.
++6. The header `X-SMPA-GUI-Token` carries the current session token.
++
++`GET /actions/session` is subject to rules 2–4.
++
++### `GET /actions/session`
++
++`{"enabled": true, "token": "<session token>", "cancel_on_exit": true}`. The token is
++random per gateway process. In read-only mode `enabled` is `false` and `token` is `null`.
++
++### `GET /actions/servers`
++
++`{"actions": [{"id", "name", "types", "servers", "clients", "available"}]}`: the graph's
++action entries plus `available` (at least one server node is discovered).
++
++### `GET /actions/interface?type=<pkg/action/Name>`
++
++```json
++{"type": "example_interfaces/action/Fibonacci",
++ "goal": {"kind": "message", "type": "example_interfaces/action/Fibonacci_Goal",
++          "fields": [{"name": "order", "schema": {"kind": "integer", "type": "int32",
++                                                   "minimum": -2147483648, "maximum": 2147483647}}]},
++ "goal_default": {"order": 0},
++ "feedback": {"kind": "message", "...": "..."},
++ "result": {"kind": "message", "...": "..."}}
++```
++
++Schemas are derived from the installed interface definition. `404` when the type is not
++available in the gateway's ROS environment.
++
++| `kind` | Other keys |
++|---|---|
++| `boolean` | `type` |
++| `integer` | `type`, `minimum`, `maximum` |
++| `float` | `type`, `limit` (largest magnitude, or `null`) |
++| `string` | `type` (`string` or `wstring`), `max_length` (or `null`) |
++| `array` | `item` (schema), `fixed_size` (or `null`), `max_size` (or `null`) |
++| `message` | `type`, `fields: [{"name", "schema"}]` |
++
++### `POST /actions/goals`
++
++Body:
++
++```json
++{"action": "/fibonacci", "type": "example_interfaces/action/Fibonacci",
++ "goal": {"order": 5}, "request_id": "0f8fad5bd9cb469fa16570867728950e"}
++```
++
++- `goal` may omit fields; they keep the interface defaults. Unknown fields are refused.
++- `request_id` is 8–64 characters of `A–Z a–z 0–9 _ -`, chosen by the client once per
++  deliberate submission. **A repeated `request_id` never sends a second goal**: the
++  response is the first goal's record with `"duplicate": true` and status `200`.
++
++Responses: `201` with `{"goal": <goal record>}` when the goal was sent. `422` with
++`{"detail", "errors": [{"path": "source_time.sec", "message": "..."}]}` when the values do
++not fit the Goal definition (nothing is sent). `409` when no action server is available
++within two seconds. `404` when the action type is not available. `403` see access rules.
++
++### `POST /actions/goals/{goal_id}/cancel`
++
++Asks the action server to cancel an active goal (empty JSON body `{}`). `200` with the
++updated record; the server's answer arrives later in `cancel_answer`. `404` unknown
++goal, `409` goal not active.
++
++### `GET /actions/goals`, `GET /actions/goals/{goal_id}`
++
++`{"goals": [<goal record>, ...]}` newest first, or `{"goal": <goal record>}`. Records
++exist for goals sent by this gateway process since it started (at most 200).
++
++### Goal record
++
++```json
++{"goal_id": "010dd227-d1e0-4358-8d3d-fad4f2f248bb", "request_id": "...",
++ "action": "/fibonacci", "type": "example_interfaces/action/Fibonacci", "goal": {"order": 5},
++ "state": "succeeded", "created_at": 1794700546.39, "accepted_at": 1794700546.40,
++ "finished_at": 1794700547.20,
++ "feedback_count": 4, "feedback": [{"number": 4, "at": 1794700547.0, "message": {"sequence": [0, 1, 1, 2, 3, 5]}}],
++ "result": {"sequence": [0, 1, 1, 2, 3, 5]}, "result_truncated": false, "error": null,
++ "cancel_requested_at": null, "cancel_answer": null}
++```
++
++- `goal_id` is the ROS goal UUID. Times are seconds since the epoch on the gateway's clock.
++- `feedback` holds the most recent 100 messages; `feedback_count` counts all. Feedback
++  and result use the bounded JSON form of the echo stream.
++- `cancel_answer`: `pending`, `accepted`, `rejected`, `unknown goal`, `goal already finished`,
++  or `failed: ...`.
++
++| `state` | Meaning |
++|---|---|
++| `sending` | Sent, waiting for the server to accept or reject |
++| `accepted`, `executing`, `canceling` | Active, as reported by the server |
++| `succeeded`, `aborted`, `canceled` | Finished, as reported by the server |
++| `rejected` | The server refused the goal |
++| `failed` | Sending or waiting failed inside the gateway (`error` explains) |
++| `lost` | The action server disappeared while the goal was active; outcome unknown |
+diff --git a/gui/ARCHITECTURE.md b/gui/ARCHITECTURE.md
+index 4da82e2..e2b6e43 100644
+--- a/gui/ARCHITECTURE.md
++++ b/gui/ARCHITECTURE.md
+@@ -4,9 +4,11 @@
+ 
+ 1. **Detachable.** The GUI is one process with one ROS 2 node (`/smpa_gui`). It imports
+    no SMPA module, reads no SMPA file, and changes no SMPA configuration.
+-2. **Observational.** The gateway creates subscriptions and parameter-service clients
+-   only. It has no application publishers, no service servers, sends no action goals
+-   and writes no parameters. The HTTP application defines only `GET` and WebSocket routes.
++2. **Observational, with one narrow exception.** The gateway creates subscriptions and
++   parameter-service clients for inspection. It has no application publishers and no
++   service servers and writes no parameters. Since version 2 it can also send and cancel
++   action goals, through two `POST` routes that are local-only and need an explicit user
++   confirmation in the page. Every other route is `GET` or WebSocket.
+ 3. **Everything ROS stays behind the gateway.** The frontend knows only the contract in
+    [API.md](API.md). Another frontend (for example TouchDesigner) can use the same contract.
+ 4. **Work only for what is visible.** Discovery is polled only by the visible view. A
+@@ -36,6 +38,8 @@ All rclpy calls happen on the ROS thread. Web handlers pass small functions to
+ | `ros_topics.py` | Message class lookup, QoS matching for subscriptions, bounded message-to-JSON conversion |
+ | `ros_parameters.py` | Read another node's parameters with bounded waiting |
+ | `sensors.py` | Sensor registry and one encoder per sensor type |
++| `ros_interfaces.py` | Action class lookup; schema of any message type from its definition; validation of JSON values; message construction |
++| `action_goals.py` | The only module that acts on ROS: action clients, goal records, cancel, tidy timer, shutdown policy |
+ | `app.py` | Routes, the generic stream loop, static files |
+ | `__main__.py` | Command-line entry point |
+ 
+@@ -64,6 +68,9 @@ browser never causes a queue. Silence is explained with status messages.
+ | `tabs/sensors/index.js` | Panel manager and sensor discovery list |
+ | `tabs/sensors/registry.js` | Viewer name → viewer module |
+ | `tabs/sensors/viewers/` | One module per viewer |
++| `tabs/actions/index.js` | Actions tab: server list, editor, confirmation dialog, monitor, history |
++| `tabs/actions/form.js` | Schema-driven goal form and client-side validation |
++| `tabs/actions/store.js` | Saved goal configurations in browser storage |
+ | `tabs/smpa/index.js` | Empty module registry |
+ | `vendor/cytoscape.min.js` | Cytoscape.js 3.35.0 (MIT), unmodified |
+ 
+@@ -71,6 +78,33 @@ A tab, a ROS 2 subview and an SMPA module share one contract: an object with `id
+ `title`, `mount(container, route)` and `unmount()`. `unmount` must stop polling and
+ close streams.
+ 
++## Action execution
++
++```
++click "Send Goal…" → validate in page → confirmation dialog → click "Send goal now"
++   → POST /actions/goals {action, type, goal, request_id} + session token   (once, never retried)
++      → access rules → request_id seen before? return the first record
++      → resolve action type → validate against the Goal definition → build message
++      → create action client → wait ≤2 s for the server → send with a UUID chosen by the gateway
++   ← goal record
++page polls GET /actions/goals twice per second → state, feedback, result, history
++```
++
++- **Records live in the gateway**, not in the browser. A page reload or a lost connection
++  only interrupts the display. The browser stores nothing that could cause a resend.
++- **Idempotency.** Each confirmation creates one request identifier; the gateway sends a
++  given identifier at most once, also under concurrent duplicates.
++- **Access control** is described in [API.md](API.md): loopback connection, local `Host`
++  and `Origin`, JSON body, per-process session token, optional `--read-only`.
++- **Footprint.** An action client exists only while one of its goals is active or being
++  submitted. A one-second timer on the ROS thread removes idle clients, refreshes states
++  and marks goals as `lost` when their server disappears.
++- **Shutdown.** On a normal stop the gateway requests cancellation of its active goals
++  and waits up to two seconds for the answers (`--keep-goals-on-exit` disables this).
++- **Interfaces are discovered, never hard-coded.** Schemas come from
++  `rosidl_runtime_py` and `rosidl_parser` definitions of whatever action type the ROS
++  graph reports. No SMPA action, type or name appears in the code.
++
+ ## Sensor registry and adding a sensor type
+ 
+ The gateway registry (`sensors.REGISTRY`) maps a ROS message type to a viewer name, a
+@@ -99,3 +133,6 @@ needs an agreed interface with the SMPA core.
+ - Actions are derived from the graph snapshot, so there is no separate `ros_actions.py`.
+ - NumPy is used (it is part of every ROS 2 Python installation) but is not installed by the GUI.
+ - `install_gui.sh` was added so that `run_gui.sh` never installs anything.
++- Version 2 adds action execution, which the report had excluded from version 1.
++  Goal monitoring uses polling of gateway-held records instead of a WebSocket, so that
++  a broken connection can never be mistaken for, or cause, a resend.
+diff --git a/gui/README.md b/gui/README.md
+index 8b57142..5241c04 100644
+--- a/gui/README.md
++++ b/gui/README.md
+@@ -1,13 +1,15 @@
+ # SMPA-ROS GUI
+ 
+-A standalone, browser-based, strictly observational GUI for ROS 2. It runs as its own
+-process and its own ROS 2 node, imports nothing from SMPA, and works whether or not
+-SMPA is running.
++A standalone, browser-based GUI for ROS 2. It runs as its own process and its own
++ROS 2 node, imports nothing from SMPA, and works whether or not SMPA is running. It
++observes the ROS graph; its only way of acting on it is sending and cancelling action
++goals, and only when a user on this computer explicitly confirms each goal.
+ 
+ | Tab | Content |
+ |---|---|
+ | **ROS 2** | Graph (rqt_graph-like), Topics (types, endpoints, QoS, live messages), Parameters (read-only), Actions (read-only) |
+ | **Sensors** | Live viewers for nine `sensor_msgs` types in freely arranged panels |
++| **Actions** | Discover action servers, edit a goal in a generated form or as JSON, send and cancel goals, watch feedback, result and history |
+ | **SMPA** | Empty workspace reserved for future SMPA modules |
+ 
+ Further documentation: [ARCHITECTURE.md](ARCHITECTURE.md), [API.md](API.md),
+@@ -41,6 +43,8 @@ another `setup.bash`.
+ ```bash
+ ./run_gui.sh                       # then open http://127.0.0.1:8765
+ ./run_gui.sh --port 9000           # another port
++./run_gui.sh --read-only           # inspection only: sending and cancelling goals is disabled
++./run_gui.sh --keep-goals-on-exit  # do not cancel active goals when the GUI stops
+ ```
+ 
+ Stop it with Ctrl+C. Starting and stopping the GUI does not affect any other ROS
+@@ -49,6 +53,8 @@ process, and other ROS processes may start and stop while it runs.
+ | Variable | Meaning | Default |
+ |---|---|---|
+ | `SMPA_GUI_HOST`, `SMPA_GUI_PORT` | Listening address | `127.0.0.1`, `8765` |
++| `SMPA_GUI_READ_ONLY=1` | Same as `--read-only` | off |
++| `SMPA_GUI_KEEP_GOALS_ON_EXIT=1` | Same as `--keep-goals-on-exit` | off |
+ | `SMPA_GUI_ROS_SETUP` | ROS 2 `setup.bash` to source | `/opt/ros/$ROS_DISTRO/setup.bash` |
+ | `SMPA_GUI_OVERLAY` | Workspace `install/setup.bash` with custom message types, or `none` | the enclosing colcon workspace, if the checkout lies under a `src/` directory |
+ | `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, discovery settings | Standard ROS 2 settings; must match the system you want to observe | inherited |
+@@ -72,16 +78,56 @@ of the `smpa_ros` package sources. `gui/COLCON_IGNORE` only protects `gui/` itse
+   echo* subscribes and shows live messages; *Stop echo* unsubscribes.
+ - **Parameters**: select a node to read its parameters once. A node that does not
+   answer is reported as such; use *Refresh* to try again.
+-- **Actions**: lists actions with their types, servers and clients.
++- **ROS 2 → Actions**: passive list of actions with their types, servers and clients.
+ - **Sensors**: *Open* a discovered topic, or add an empty panel and choose a topic.
+   Any number of panels can be open. A panel subscribes only while it is open and the
+   Sensors tab is shown. In the 3D viewer: drag rotates, Shift-drag or right-drag pans,
+   wheel zooms, double click re-centres.
+ 
++## Sending action goals (Actions tab)
++
++1. Select an action server. The goal editor is generated from the action's real Goal
++   definition: text, numbers, check boxes, lists with add/remove, nested messages.
++   *JSON* shows the same values as editable JSON. Fields you leave out keep the
++   defaults of the definition.
++2. Optionally save the values under a name (*Saved configurations*, stored in this
++   browser, per action type) or load saved values. Loading never sends anything.
++3. *Send Goal…* checks the values against the field types and opens a confirmation
++   naming the action, the server node and the exact values. Only *Send goal now* in
++   that dialog sends the goal. One confirmation sends one goal.
++4. The right-hand side shows the selected goal: state, UUID, times, live feedback and
++   the result. *Cancel Goal* asks the server to cancel the selected active goal. The
++   history lists every goal sent since the GUI server started.
++
++**Every action is treated as potentially physical.** The GUI cannot know whether an
++action server moves a robot, so the warning and the confirmation appear for all of them.
++
++Safeguards:
++
++- Nothing is sent by selecting, editing, loading, reloading the page, navigating, or
++  reconnecting. A failed request is never retried automatically.
++- Each confirmation carries a one-time request identifier; the gateway refuses to send
++  the same identifier twice.
++- Goals are accepted only from this computer (loopback connection, local `Host` and
++  `Origin`), only with the session token of the running gateway, and not at all in
++  `--read-only` mode. The token changes whenever the gateway restarts.
++- The gateway can send and cancel action goals. It cannot publish to topics, call
++  services or write parameters.
++
++### What happens to active goals
++
++| Event | Effect on goals that are still active |
++|---|---|
++| Browser tab closed, reloaded, or network to the GUI server lost | Nothing. Goals keep running; the gateway keeps recording feedback and results. Reopen the page to see them. Nothing is resent. |
++| GUI server stopped normally (Ctrl+C) | The gateway asks each action server to cancel its active goals and waits up to two seconds for the answers, then exits. A server may refuse or take time to stop. With `--keep-goals-on-exit` nothing is cancelled and the goals continue on their servers. |
++| GUI server killed or crashed | No cancel request is sent. Goals continue on their servers until they finish or another client cancels them. |
++| GUI server restarted | The history starts empty and earlier goals cannot be monitored or cancelled from the GUI any more (use `ros2 action` tools). Pages still open from before must be reloaded before they can send again. |
++| Action server disappears during a goal | The goal is marked `lost`: its outcome is unknown. |
++
+ ## Tests
+ 
+ ```bash
+-./test_gui.sh              # unit tests + integration tests against real ROS 2 fixture nodes
++./test_gui.sh              # unit tests + integration tests against real ROS 2 fixture nodes and action servers
+ ./test_gui.sh --browser    # also headless-browser tests (needs Playwright with Chromium)
+ ```
+ 
+@@ -93,10 +139,13 @@ for what was and was not verified.
+ 
+ General
+ 
+-- Version 1 is read-only by design: no publishing, service calls, action goals or
++- Apart from action goals, the GUI is read-only: no publishing, service calls or
+   parameter changes.
+-- There is no authentication. The server listens on the loopback interface only.
+-  Binding it elsewhere with `--host` gives that network read access to every topic.
++- There is no user authentication. The server listens on the loopback interface only.
++  Binding it elsewhere with `--host` gives that network read access to every topic;
++  action goals stay restricted to this computer. Any program running on this computer
++  under any user can obtain the session token and send goals, exactly as it could with
++  `ros2 action send_goal`.
+ - The graph is refreshed by polling a snapshot every two seconds (a difference stream
+   was considered and not needed). Short-lived entities, such as SMPA's per-cycle camera
+   subscription and action clients, appear and disappear between refreshes.
+@@ -110,6 +159,26 @@ General
+ - A topic with several message types is shown using its first type.
+ - Open sensor panels are remembered while the page is open, not across reloads.
+ 
++Actions
++
++- The GUI cannot tell physical from harmless actions and cannot judge whether a goal is
++  safe. It checks field types and ranges only, not whether values make sense.
++- Cancelling is a request. Whether and how fast a goal stops is up to the action server.
++- The goal history lives in the gateway's memory: it is lost when the GUI server stops,
++  holds at most 200 goals, and keeps the last 100 feedback messages per goal. Feedback
++  and results are shown with long arrays shortened.
++- The page shows feedback by polling twice per second; faster feedback is recorded by
++  the gateway but displayed in steps.
++- Goals sent by other clients (SMPA, `ros2 action send_goal`) are not shown.
++- Whole numbers beyond ±2^53 cannot be entered exactly in a browser and are refused by
++  the form. NaN and infinity cannot be entered.
++- Byte arrays are edited as lists of numbers, which is impractical for large data.
++- Action types whose package is not sourced in the GUI's environment are listed but
++  cannot be used (see `SMPA_GUI_OVERLAY`).
++- An action with several types is used with its first type.
++- While a goal is active the gateway appears on the ROS graph as a client of that
++  action; the client is removed when its last goal has finished.
++
+ Sensors
+ 
+ - No coordinate transforms (TF) are applied. Every viewer draws data in the sensor's
+diff --git a/gui/VERIFICATION.md b/gui/VERIFICATION.md
+index eabb1be..e4782a8 100644
+--- a/gui/VERIFICATION.md
++++ b/gui/VERIFICATION.md
+@@ -1,4 +1,4 @@
+-# Verification results (GUI version 1, 2026-11-14)
++# Verification results (GUI version 2, 2026-11-14)
+ 
+ ## Where the verification ran
+ 
+@@ -17,20 +17,33 @@ workstation**:
+ The official ROS 2 apt repository was not reachable from that container, so the
+ Debian-packaged Jazzy that the workstation uses was not available.
+ 
+-## Automated tests: 49 passed
++## Automated tests: 90 passed
+ 
+ | Suite | Tests | What it exercises |
+ |---|---|---|
+-| `tests/test_units.py` | 10 | Name rules, graph building, bounded message conversion, image/point cloud/scalar sensor encoders, registry |
+-| `tests/test_frontend_logic.py` | 3 | Graph filters, layered layout including loops, IMU and map conversions (Node.js) |
+-| `tests/test_ros_integration.py` | 26 | Real server process against real ROS 2 fixture nodes over HTTP and WebSocket |
+-| `tests/test_browser.py` | 10 | The real frontend in headless Chromium against the same server and fixtures |
++| `tests/test_units.py` | 12 | Name rules, graph building, bounded message conversion, sensor encoders, registry, interface schemas and value validation |
++| `tests/test_frontend_logic.py` | 5 | Graph filters, layered layout, IMU and map conversions, goal form logic, saved configurations (Node.js) |
++| `tests/test_ros_integration.py` | 26 | Version 1 behaviour: real server process against real ROS 2 fixture nodes over HTTP and WebSocket |
++| `tests/test_actions.py` | 25 | Action execution over HTTP against real fixture action servers |
++| `tests/test_browser.py` | 10 | Version 1 frontend in headless Chromium |
++| `tests/test_browser_actions.py` | 12 | Actions tab in headless Chromium |
++
++All version 1 tests still pass. Two of them were changed on purpose: the tab list now
++includes Actions, and the "only GET routes" test now asserts that the two goal routes
++are the only non-GET routes.
+ 
+ The fixture process (`tests/fixtures/fixture_nodes.py`) runs seven real nodes: a talker
+ and listener, a node with declared parameters, a node that is never spun, an action
+-server and client (`example_interfaces/action/Fibonacci`), and a sensor node publishing
+-all nine supported sensor types plus a depth image and an image with an unsupported
+-encoding.
++server node and an action client, and a sensor node publishing all nine supported
++sensor types plus a depth image and an image with an unsupported encoding.
++
++The action server node offers two real action servers:
++
++- `/fixture/fibonacci` (`example_interfaces/action/Fibonacci`): one feedback message
++  every 0.2 s, cancellable, concurrent goals; a negative order is rejected, order 13
++  aborts, order 7 refuses cancel requests.
++- `/fixture/lookup_transform` (`tf2_msgs/action/LookupTransform`): a goal with strings,
++  a boolean and nested time messages; answers at once and echoes goal values in its result.
+ 
+ ### Comparison with the standard command-line tools
+ 
+@@ -74,10 +87,38 @@ this was not investigated further.
+   a panel's topic moves the subscription and clears the old picture; closing panels
+   unsubscribes; the tab works with no sensor publishers; the 3D viewer rotates, zooms and pans.
+ - **Launcher**: `install_gui.sh --dev`, `run_gui.sh` and `test_gui.sh` were run from a
+-  fresh checkout of `gui/` in the container.
++  fresh checkout of `gui/` in the container (fresh install for version 1; `test_gui.sh`
++  again for version 2).
++
++### Action execution verified by tests
++
++| Requirement | Evidence |
++|---|---|
++| Discovery and dynamic interfaces | Both servers listed with type and availability; Goal, Feedback and Result schemas and defaults derived from the installed definitions, including nested messages; schemas of fixed arrays, sequences and arrays of messages checked on `sensor_msgs` types |
++| Goal submission | Accepted goal gets a UUID, runs, and ends `succeeded` with result, four feedback messages and ordered timestamps; nested values arrive at the server intact |
++| Field validation | Nine wrong-value cases (text for a number, fraction or boolean for an integer, out of range, unknown field, wrong nested type) give `422` naming the field, and no goal is created; the page reports the same before opening the dialog |
++| Feedback | Live feedback appears in the page while the goal runs |
++| Rejected and aborted goals | Reported as `rejected` and `aborted` |
++| Cancellation | Active goal cancelled (`canceled`, answer `accepted`); a server refusing cancellation is reported and the goal completes; finished and unknown goals cannot be cancelled |
++| Missing server, unknown type | `409` within the time limit; `404` |
++| Concurrent goals | Three goals execute at the same time with separate feedback and results; in the page two run together and cancelling one leaves the other running |
++| No accidental resend | Repeated request identifier returns the first goal; reading routes never create goals; three page reloads, back/forward navigation, loading a saved configuration and re-using history values create no goal; a failed `POST` is attempted exactly once and reported as "outcome unknown"; an outage of all API requests followed by recovery creates no goal; declining the dialog or pressing Escape sends nothing; a double click on the confirmation sends one goal |
++| Access control | No token, wrong token, foreign `Origin`, foreign `Host`, non-JSON body and malformed request identifiers are refused; a token from an earlier gateway process is refused; `--read-only` refuses goals and disables the button |
++| Footprint | The gateway appears as an action client only while a goal is active |
++| GUI shutdown | Ctrl+C cancels the active goal (the server's own status topic, read with `ros2 topic echo`, reports status 5); with `--keep-goals-on-exit` the server still reports status 2 (executing) after the GUI exited; a restarted GUI has an empty history |
++| Server loss | Killing the action server during a goal marks it `lost` |
++| Saved configurations | Save, reset, load and persistence across reloads, without sending |
+ 
+ ## Not verified
+ 
++- **No action from the target system was exercised**: not `/look_left` or any other
++  `simulation_actions` action, no SMPA speech action, no real robot. The interface
++  discovery is generic, but those types were not installed in the test environment.
++- Action goals with arrays were exercised in the form component and in message
++  construction, but no fixture action server with an array goal was available.
++- Stopping the GUI server with SIGTERM or by killing it (only Ctrl+C was tested).
++- Bounded strings and bounded sequences in real interfaces (rules tested on schemas only).
++
+ - **Nothing was run on the target workstation.** The session had file access to the
+   repository but could not execute commands there. Installation and launch with the
+   apt-packaged ROS 2 Jazzy, the system Python and its Pillow/NumPy versions are untested.
+@@ -98,9 +139,12 @@ this was not investigated further.
+ ```bash
+ cd <gui worktree>/gui
+ ./install_gui.sh --dev
+-./test_gui.sh                       # expect 39 passed (36 if Node.js is absent)
++./test_gui.sh                       # expect 68 passed (63 if Node.js is absent)
+ ./run_gui.sh                        # open http://127.0.0.1:8765, stop with Ctrl+C
+ 
++# Try the Actions tab against a harmless action server first, for example:
++ros2 run action_tutorials_py fibonacci_action_server      # if that package is installed
++
+ # With SMPA or any robot running, compare the GUI with:
+ ros2 node list; ros2 topic list -t; ros2 action list -t
+ rqt_graph
+diff --git a/gui/backend/__init__.py b/gui/backend/__init__.py
+index 2427d61..9e1280a 100644
+--- a/gui/backend/__init__.py
++++ b/gui/backend/__init__.py
+@@ -1,13 +1,15 @@
+-"""Standalone, observational ROS 2 gateway for the browser GUI.
++"""Standalone ROS 2 gateway for the browser GUI: observation plus explicit action goals.
+ 
+ Concepts:
+     The gateway is one ROS 2 node in its own process. It discovers the ROS
+-    graph and subscribes to topics only while a browser view needs them. It
+-    never publishes application data, calls application services, sends
+-    action goals, or sets parameters. It imports nothing from SMPA.
++    graph and subscribes to topics only while a browser view needs them. Its
++    only way of acting on ROS is sending and cancelling action goals, and only
++    when a local user explicitly asks for it. It never publishes application
++    data, calls application services, or sets parameters. It imports nothing
++    from SMPA.
+ 
+     The contract version names the JSON shapes documented in ``gui/API.md``.
+     Every HTTP response and every stream message follows that document.
+ """
+ 
+-CONTRACT_VERSION = '1.0'
++CONTRACT_VERSION = '1.1'
+diff --git a/gui/backend/__main__.py b/gui/backend/__main__.py
+index ff5c002..4b49c72 100644
+--- a/gui/backend/__main__.py
++++ b/gui/backend/__main__.py
+@@ -13,15 +13,26 @@ def main(args=None):
+     The address defaults to the loopback interface on port 8765 and can be
+     set by arguments or the ``SMPA_GUI_HOST`` and ``SMPA_GUI_PORT`` variables.
+     Binding to another interface exposes read access to ROS data to that
+-    network, so it must be requested explicitly. Ctrl+C stops the web server,
+-    which in turn removes the gateway node from the ROS graph.
++    network, so it must be requested explicitly; action goals are accepted
++    from this computer only in any case. ``--read-only`` disables action
++    execution altogether. Ctrl+C stops the web server, which asks the action
++    servers to cancel goals that are still active (unless
++    ``--keep-goals-on-exit`` is given) and then removes the gateway node
++    from the ROS graph.
+     """
+-    parser = argparse.ArgumentParser(description='Standalone observational ROS 2 GUI gateway.')
++    parser = argparse.ArgumentParser(description='Standalone ROS 2 GUI gateway: inspection plus explicit action goals.')
+     parser.add_argument('--host', default=os.environ.get('SMPA_GUI_HOST', '127.0.0.1'))
+     parser.add_argument('--port', type=int, default=int(os.environ.get('SMPA_GUI_PORT', '8765')))
++    parser.add_argument('--read-only', action='store_true', default=os.environ.get('SMPA_GUI_READ_ONLY') == '1',
++                        help='disable sending and cancelling action goals; inspection only')
++    parser.add_argument('--keep-goals-on-exit', action='store_true',
++                        default=os.environ.get('SMPA_GUI_KEEP_GOALS_ON_EXIT') == '1',
++                        help='do not ask action servers to cancel active goals when the GUI stops')
+     options = parser.parse_args(args)
+-    print(f'SMPA-ROS GUI: http://{options.host}:{options.port}', flush=True)
+-    uvicorn.run(create_app(), host=options.host, port=options.port, log_level='warning')
++    print(f'SMPA-ROS GUI: http://{options.host}:{options.port}'
++          + (' (read-only)' if options.read_only else ' (action goals can be sent from this computer)'), flush=True)
++    uvicorn.run(create_app(allow_actions=not options.read_only, cancel_on_exit=not options.keep_goals_on_exit),
++                host=options.host, port=options.port, log_level='warning')
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/gui/backend/action_goals.py b/gui/backend/action_goals.py
+new file mode 100644
+index 0000000..5c17d84
+--- /dev/null
++++ b/gui/backend/action_goals.py
+@@ -0,0 +1,292 @@
++"""Send action goals on explicit request and keep a record of what happened to them.
++
++Concepts:
++    A goal record is the gateway's memory of one submitted goal: which
++    action, the goal values, its UUID, its state, recent feedback, the result
++    and all timestamps. Records live in the gateway process, not in the
++    browser, so reloading a page or losing the connection neither loses nor
++    resends a goal. Records are kept until the gateway stops.
++
++    A request identifier is chosen by the client for each deliberate
++    submission. Submitting the same identifier again returns the existing
++    record instead of sending a second goal.
++
++    An action client exists only while one of its goals is active. When the
++    last goal of an action finishes, its client is removed again, so an idle
++    gateway offers and uses nothing on the ROS graph.
++
++    This is the only module that makes the gateway act on ROS. It can send
++    and cancel action goals and nothing else.
++"""
++import threading
++import time
++import uuid
++
++from backend import ros_interfaces, ros_topics
++from backend.gateway import GatewayError
++
++STATES = {0: 'unknown', 1: 'accepted', 2: 'executing', 3: 'canceling', 4: 'succeeded', 5: 'canceled', 6: 'aborted'}
++TERMINAL = ('succeeded', 'canceled', 'aborted', 'rejected', 'failed', 'lost')
++CANCEL_ANSWERS = {0: 'accepted', 1: 'rejected', 2: 'unknown goal', 3: 'goal already finished'}
++FEEDBACK_KEPT = 100
++RECORDS_KEPT = 200
++
++
++class GoalRefused(GatewayError):
++    """A goal could not be submitted; ``status`` is the HTTP status that explains why."""
++
++    def __init__(self, message, status):
++        """Remember the explanation and the HTTP status for the web layer."""
++        super().__init__(message)
++        self.status = status
++
++
++class GoalManager:
++    """Own the action clients, the active goal handles and the goal records."""
++
++    def __init__(self, gateway):
++        """Start with no clients and no records, attached to a running gateway.
++
++        A one-second timer on the ROS thread tidies up: it notices servers
++        that disappeared while a goal was active and removes clients that no
++        longer have active goals.
++        """
++        self.gateway = gateway
++        self.lock = threading.Lock()
++        self.records = {}
++        self.requests = {}
++        self.handles = {}
++        self.clients = {}
++        self.pending = {}
++        self.timer = gateway.call(lambda: gateway.node.create_timer(1.0, self.tidy))
++
++    def summary(self, record):
++        """Return a copy of a record that is safe to hand to another thread."""
++        with self.lock:
++            return dict(record, feedback=list(record['feedback']))
++
++    def list(self):
++        """Return all goal records, newest first."""
++        with self.lock:
++            return [dict(record, feedback=list(record['feedback']))
++                    for record in sorted(self.records.values(), key=lambda item: item['created_at'], reverse=True)]
++
++    def get(self, goal_id):
++        """Return one goal record or ``None`` when the identifier is unknown."""
++        with self.lock:
++            record = self.records.get(goal_id)
++            return dict(record, feedback=list(record['feedback'])) if record else None
++
++    def client_for(self, action, type_name, action_type):
++        """Return the action client for an action, creating it on the ROS thread if needed."""
++        from rclpy.action import ActionClient
++        key = (action, type_name)
++        if key not in self.clients:
++            self.clients[key] = ActionClient(self.gateway.node, action_type, action)
++        return self.clients[key]
++
++    def submit(self, action, type_name, goal, request_id):
++        """Send one goal and return its record; a repeated request identifier sends nothing.
++
++        First look up the request identifier: if this submission was already
++        handled, return its record marked as a duplicate. Otherwise resolve
++        the action type, check the goal values against the Goal definition
++        and build the message; invalid values raise ``InvalidValue`` and
++        nothing is sent. Then create the client and wait up to two seconds
++        for the action server to be discovered; without a server the goal is
++        refused. While this waits, the action is marked as pending so the
++        tidy timer does not remove the client that is being used. Finally send the goal with a UUID chosen here, so the record
++        exists before the server answers. Acceptance, feedback and the result
++        update the record later on the ROS thread.
++        """
++        with self.lock:
++            if request_id in self.requests:
++                record = self.records[self.requests[request_id]]
++                return dict(record, feedback=list(record['feedback']), duplicate=True)
++        action_type = ros_interfaces.action_class(type_name)
++        message = ros_interfaces.build(action_type.Goal, goal)
++        key = (action, type_name)
++        with self.lock:
++            self.pending[key] = self.pending.get(key, 0) + 1
++        try:
++            client = self.gateway.call(lambda: self.client_for(action, type_name, action_type))
++            deadline = time.monotonic() + 2.0
++            while not self.gateway.call(client.server_is_ready):
++                if time.monotonic() > deadline:
++                    raise GoalRefused(f'No action server is available for {action} ({type_name})', 409)
++                time.sleep(0.1)
++            return self.gateway.call(lambda: self.start(client, action, type_name, message, request_id))
++        finally:
++            with self.lock:
++                self.pending[key] -= 1
++                if not self.pending[key]:
++                    del self.pending[key]
++
++    def start(self, client, action, type_name, message, request_id):
++        """Create the record and send the goal; runs on the ROS thread.
++
++        The request identifier is checked once more under the lock, so two
++        simultaneous submissions with the same identifier still send one goal.
++        """
++        from unique_identifier_msgs.msg import UUID
++        with self.lock:
++            if request_id in self.requests:
++                record = self.records[self.requests[request_id]]
++                return dict(record, feedback=list(record['feedback']), duplicate=True)
++            identifier = uuid.uuid4()
++            record = dict(goal_id=str(identifier), request_id=request_id, action=action, type=type_name,
++                          goal=ros_interfaces.to_json(message), state='sending', created_at=time.time(),
++                          accepted_at=None, finished_at=None, feedback=[], feedback_count=0, result=None,
++                          result_truncated=False, error=None, cancel_requested_at=None, cancel_answer=None)
++            self.records[record['goal_id']] = record
++            self.requests[request_id] = record['goal_id']
++            while len(self.records) > RECORDS_KEPT:
++                oldest = min((item for item in self.records.values() if item['state'] in TERMINAL),
++                             key=lambda item: item['created_at'], default=None)
++                if oldest is None:
++                    break
++                del self.records[oldest['goal_id']]
++                self.requests.pop(oldest['request_id'], None)
++        future = client.send_goal_async(message, feedback_callback=lambda feedback: self.on_feedback(record, feedback),
++                                        goal_uuid=UUID(uuid=list(identifier.bytes)))
++        future.add_done_callback(lambda done: self.on_response(record, done))
++        return self.summary(record)
++
++    def on_response(self, record, future):
++        """Record whether the server accepted the goal and, if so, wait for its result."""
++        try:
++            handle = future.result()
++        except Exception as error:
++            self.finish(record, 'failed', error=f'Sending the goal failed: {error}')
++            return
++        if not handle.accepted:
++            self.finish(record, 'rejected', error='The action server rejected the goal')
++            return
++        with self.lock:
++            record.update(state='accepted', accepted_at=time.time())
++            self.handles[record['goal_id']] = handle
++        handle.get_result_async().add_done_callback(lambda done: self.on_result(record, done))
++
++    def on_feedback(self, record, feedback):
++        """Append one feedback message to the record, keeping only the most recent ones."""
++        with self.lock:
++            record['feedback_count'] += 1
++            record['feedback'].append(dict(at=time.time(), number=record['feedback_count'],
++                                           message=ros_topics.plain(feedback.feedback)))
++            del record['feedback'][:-FEEDBACK_KEPT]
++            if record['state'] == 'accepted':
++                record['state'] = 'executing'
++
++    def on_result(self, record, future):
++        """Store the final status and result of a goal."""
++        try:
++            response = future.result()
++        except Exception as error:
++            self.finish(record, 'failed', error=f'Waiting for the result failed: {error}')
++            return
++        state = {}
++        result = ros_topics.plain(response.result, state)
++        self.finish(record, STATES.get(response.status, 'unknown'), result=result,
++                    result_truncated=bool(state.get('truncated')))
++
++    def finish(self, record, state, **fields):
++        """Mark a goal as finished and forget its handle."""
++        with self.lock:
++            if record['state'] in TERMINAL:
++                return
++            record.update(fields, state=state, finished_at=time.time())
++            self.handles.pop(record['goal_id'], None)
++
++    def cancel(self, goal_id):
++        """Ask the action server to cancel an active goal and return the updated record.
++
++        Only goals that were accepted and have not finished can be cancelled.
++        The server's answer (accepted, rejected, unknown goal, already
++        finished) is stored in the record when it arrives. Whether and when
++        the goal actually stops is decided by the action server.
++        """
++        with self.lock:
++            record = self.records.get(goal_id)
++            handle = self.handles.get(goal_id)
++        if record is None:
++            raise GoalRefused('Unknown goal identifier', 404)
++        if handle is None:
++            raise GoalRefused(f"This goal is {record['state']} and cannot be cancelled", 409)
++
++        def request():
++            """Send the cancel request on the ROS thread."""
++            with self.lock:
++                record.update(cancel_requested_at=time.time(), cancel_answer='pending')
++            handle.cancel_goal_async().add_done_callback(lambda done: self.on_cancel(record, done))
++
++        self.gateway.call(request)
++        return self.summary(record)
++
++    def on_cancel(self, record, future):
++        """Store the action server's answer to a cancel request."""
++        try:
++            response = future.result()
++            answer = 'accepted' if response.goals_canceling else CANCEL_ANSWERS.get(response.return_code, 'rejected')
++            if response.return_code == 0 and not response.goals_canceling:
++                answer = 'rejected'
++        except Exception as error:
++            answer = f'failed: {error}'
++        with self.lock:
++            record['cancel_answer'] = answer
++
++    def tidy(self):
++        """Keep records truthful and the ROS graph clean; runs every second on the ROS thread.
++
++        Refresh the state of active goals from their handles (accepted,
++        executing, canceling). If a goal is active but its action server is
++        no longer present, mark it as lost, because no result can arrive and
++        the outcome is unknown. Destroy clients that have no active goals and
++        no submission in progress.
++        """
++        with self.lock:
++            active = {goal_id: self.records[goal_id] for goal_id in self.handles}
++            sending = [record for record in self.records.values() if record['state'] == 'sending']
++        with self.lock:
++            busy = set(self.pending)
++        for goal_id, record in list(active.items()) + [(item['goal_id'], item) for item in sending]:
++            key = (record['action'], record['type'])
++            client = self.clients.get(key)
++            if client is not None and not client.server_is_ready():
++                self.finish(record, 'lost', error='The action server disappeared; the outcome of this goal is unknown')
++                continue
++            busy.add(key)
++            handle = self.handles.get(goal_id)
++            if handle is not None:
++                with self.lock:
++                    if record['state'] not in TERMINAL:
++                        record['state'] = STATES.get(handle.status, record['state'])
++        for key in [key for key in self.clients if key not in busy]:
++            self.clients.pop(key).destroy()
++
++    def active_goal_ids(self):
++        """Return the identifiers of goals that were accepted and have not finished."""
++        with self.lock:
++            return list(self.handles)
++
++    def shutdown(self, cancel_active=True, patience=2.0):
++        """Prepare for the gateway stopping.
++
++        By default, ask the action servers to cancel every goal that is still
++        active and wait briefly for their answers, so that a robot does not
++        keep executing goals nobody can watch or cancel any more. With
++        ``cancel_active`` false, active goals are left alone and continue on
++        their servers. Either way the records end with the gateway process.
++        """
++        if cancel_active:
++            for goal_id in self.active_goal_ids():
++                try:
++                    self.cancel(goal_id)
++                except GatewayError:
++                    pass
++            deadline = time.monotonic() + patience
++            while time.monotonic() < deadline:
++                with self.lock:
++                    waiting = [record for record in self.records.values() if record['cancel_answer'] == 'pending']
++                if not waiting:
++                    break
++                time.sleep(0.05)
+diff --git a/gui/backend/app.py b/gui/backend/app.py
+index 465c3b0..4a5f732 100644
+--- a/gui/backend/app.py
++++ b/gui/backend/app.py
+@@ -5,20 +5,32 @@ Concepts:
+     A stream is a WebSocket on which the gateway sends the newest message of
+     one topic at a bounded rate, together with status messages that explain
+     silence (no publishers, waiting, unsupported data). Opening a stream
+-    subscribes; closing it unsubscribes. No endpoint changes anything in ROS.
++    subscribes; closing it unsubscribes.
++
++    Everything is read-only except the action-execution routes under
++    ``/api/v1/actions/goals``: they can send one action goal and request its
++    cancellation, nothing else. They are accepted only from this computer,
++    only with the session token of this gateway process, and can be switched
++    off entirely. There is no route for publishing, calling services or
++    writing parameters.
+ """
+ import asyncio
++import ipaddress
+ import logging
+ from contextlib import asynccontextmanager
+ from pathlib import Path
++import secrets
+ import time
+ from urllib.parse import urlsplit
+ 
+-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+-from fastapi.responses import Response, StreamingResponse
++from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
++from fastapi.responses import JSONResponse, Response, StreamingResponse
+ from fastapi.staticfiles import StaticFiles
+ 
+-from backend import CONTRACT_VERSION, ros_graph, ros_parameters, ros_topics, sensors
++from pydantic import BaseModel, Field
++
++from backend import CONTRACT_VERSION, ros_graph, ros_interfaces, ros_parameters, ros_topics, sensors
++from backend.action_goals import GoalManager, GoalRefused
+ from backend.gateway import Gateway, GatewayError
+ 
+ FRONTEND = Path(__file__).resolve().parent.parent / 'frontend'
+@@ -50,22 +62,45 @@ def local_origin(origin):
+     return origin is None or urlsplit(origin).hostname in LOCAL_HOSTS
+ 
+ 
+-def create_app(gateway=None):
++def is_loopback(host):
++    """Tell whether a network address belongs to this computer itself."""
++    try:
++        return ipaddress.ip_address(host).is_loopback
++    except ValueError:
++        return False
++
++
++class GoalSubmission(BaseModel):
++    """The body of a goal submission: which action, its type, the goal values and a request identifier."""
++
++    action: str = Field(min_length=2, max_length=512, pattern=r'^/')
++    type: str = Field(min_length=3, max_length=256)
++    goal: dict
++    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
++
++
++def create_app(gateway=None, *, allow_actions=True, cancel_on_exit=True):
+     """Build the web application around one gateway.
+ 
+     The gateway joins ROS when the application starts and leaves when it
+     stops, so starting and stopping the GUI never depends on other ROS
+     processes. A gateway may be supplied by tests; otherwise one is created.
++    ``allow_actions`` false makes the whole application read-only.
++    ``cancel_on_exit`` decides whether goals that are still active when the
++    application stops are asked to cancel.
+     """
+     gateway = gateway or Gateway()
++    session_token = secrets.token_urlsafe(32)
+ 
+     @asynccontextmanager
+     async def lifespan(app):
+-        """Start the ROS gateway before serving and stop it afterwards."""
++        """Start the ROS gateway before serving; on shutdown settle active goals, then stop it."""
+         gateway.start()
++        app.state.goals = GoalManager(gateway)
+         try:
+             yield
+         finally:
++            await asyncio.to_thread(app.state.goals.shutdown, cancel_on_exit)
+             gateway.stop()
+ 
+     app = FastAPI(title='SMPA-ROS GUI gateway', version=CONTRACT_VERSION, lifespan=lifespan,
+@@ -350,5 +385,103 @@ def create_app(gateway=None):
+         return StreamingResponse(frames(), media_type='multipart/x-mixed-replace; boundary=frame',
+                                  headers={'Cache-Control': 'no-store'})
+ 
++    def local_request(request):
++        """Require that a request comes from a program or page on this computer.
++
++        The connection must originate from a loopback address, even if the
++        server was bound to another interface. The Host header must name
++        this computer, which defeats DNS rebinding. A browser page must have
++        been loaded from this computer. Anything else is refused with 403.
++        """
++        host = (request.headers.get('host') or '').rsplit(':', 1)[0].strip('[]')
++        if (request.client is None or not is_loopback(request.client.host) or host not in LOCAL_HOSTS
++                or not local_origin(request.headers.get('origin'))):
++            raise HTTPException(status_code=403, detail='Action execution is only available from this computer')
++
++    def authorised(request):
++        """Require everything a goal submission or cancellation needs.
++
++        Action execution must be enabled, the request must be local, its
++        body must be declared as JSON, and it must carry this gateway
++        process's session token. The token is handed only to local clients
++        and changes whenever the gateway restarts, so a page from another
++        site, or a page left over from an earlier gateway, cannot send goals.
++        """
++        if not allow_actions:
++            raise HTTPException(status_code=403, detail='Action execution is disabled (read-only mode)')
++        local_request(request)
++        if request.headers.get('content-type', '').split(';')[0].strip() != 'application/json':
++            raise HTTPException(status_code=415, detail='Send the request body as application/json')
++        if not secrets.compare_digest(request.headers.get('x-smpa-gui-token', ''), session_token):
++            raise HTTPException(status_code=403, detail='Missing or outdated session token; reload the page')
++
++    @app.get('/api/v1/actions/session')
++    def get_action_session(request: Request):
++        """Tell a local client whether action execution is enabled and give it the session token."""
++        local_request(request)
++        return envelope(enabled=allow_actions, token=session_token if allow_actions else None,
++                        cancel_on_exit=cancel_on_exit)
++
++    @app.get('/api/v1/actions/servers')
++    def get_action_servers():
++        """List discovered actions and whether a server is currently available for each."""
++        return envelope(actions=[dict(action, available=bool(action['servers'])) for action in graph()['actions']])
++
++    @app.get('/api/v1/actions/interface')
++    def get_action_interface(type: str = Query(...)):
++        """Describe an action type's Goal, Feedback and Result fields from its interface definition."""
++        try:
++            action_type = ros_interfaces.action_class(type)
++        except GatewayError as error:
++            raise HTTPException(status_code=404, detail=str(error)) from error
++        return envelope(type=type, goal=ros_interfaces.describe(action_type.Goal),
++                        goal_default=ros_interfaces.defaults(action_type.Goal),
++                        feedback=ros_interfaces.describe(action_type.Feedback),
++                        result=ros_interfaces.describe(action_type.Result))
++
++    @app.get('/api/v1/actions/goals')
++    def get_goals():
++        """List the goals this gateway process has submitted, newest first."""
++        return envelope(goals=app.state.goals.list())
++
++    @app.get('/api/v1/actions/goals/{goal_id}')
++    def get_goal(goal_id: str):
++        """Return one submitted goal with its state, feedback and result."""
++        record = app.state.goals.get(goal_id)
++        if record is None:
++            raise HTTPException(status_code=404, detail='Unknown goal identifier')
++        return envelope(goal=record)
++
++    @app.post('/api/v1/actions/goals', status_code=201)
++    def post_goal(submission: GoalSubmission, request: Request):
++        """Send one action goal. Repeating a request identifier returns the first goal and sends nothing.
++
++        Invalid goal values give 422 with one entry per wrong field; a
++        missing action server gives 409; an unavailable action type gives 404.
++        """
++        authorised(request)
++        try:
++            record = app.state.goals.submit(submission.action, submission.type, submission.goal,
++                                            submission.request_id)
++        except ros_interfaces.InvalidValue as error:
++            return JSONResponse(status_code=422, content=dict(detail='The goal does not fit the action type',
++                                                              errors=error.errors))
++        except GoalRefused as error:
++            raise HTTPException(status_code=error.status, detail=str(error)) from error
++        except GatewayError as error:
++            raise HTTPException(status_code=404 if 'not available' in str(error) else 503, detail=str(error)) from error
++        return JSONResponse(status_code=200 if record.get('duplicate') else 201, content=envelope(goal=record))
++
++    @app.post('/api/v1/actions/goals/{goal_id}/cancel')
++    def post_cancel(goal_id: str, request: Request):
++        """Ask the action server to cancel one active goal."""
++        authorised(request)
++        try:
++            return envelope(goal=app.state.goals.cancel(goal_id))
++        except GoalRefused as error:
++            raise HTTPException(status_code=error.status, detail=str(error)) from error
++        except GatewayError as error:
++            raise HTTPException(status_code=503, detail=str(error)) from error
++
+     app.mount('/', StaticFiles(directory=FRONTEND, html=True), name='frontend')
+     return app
+diff --git a/gui/backend/ros_interfaces.py b/gui/backend/ros_interfaces.py
+new file mode 100644
+index 0000000..ccc2e48
+--- /dev/null
++++ b/gui/backend/ros_interfaces.py
+@@ -0,0 +1,195 @@
++"""Describe ROS 2 message types and check JSON values against them.
++
++Concepts:
++    A schema is plain data describing one message type: every field with its
++    kind (boolean, integer, float, string, array or nested message) and the
++    limits ROS imposes on it, such as integer ranges, string bounds and
++    array sizes. Schemas are derived from the installed interface
++    definitions at run time, so no action or message is known in advance.
++
++    Validation compares a JSON value with a schema and collects every
++    disagreement as a path and an explanation. Only a value without
++    disagreements is turned into a ROS message.
++"""
++import math
++
++from backend.gateway import GatewayError
++
++INTEGER_RANGES = {
++    'int8': (-2 ** 7, 2 ** 7 - 1), 'uint8': (0, 2 ** 8 - 1), 'int16': (-2 ** 15, 2 ** 15 - 1),
++    'uint16': (0, 2 ** 16 - 1), 'int32': (-2 ** 31, 2 ** 31 - 1), 'uint32': (0, 2 ** 32 - 1),
++    'int64': (-2 ** 63, 2 ** 63 - 1), 'uint64': (0, 2 ** 64 - 1),
++    'octet': (0, 255), 'byte': (0, 255), 'char': (0, 255), 'wchar': (0, 2 ** 16 - 1),
++}
++FLOAT_LIMITS = {'float': 3.4028234663852886e38, 'double': None, 'long double': None}
++
++
++class InvalidValue(ValueError):
++    """A JSON value does not fit the message type; ``errors`` lists every disagreement."""
++
++    def __init__(self, errors):
++        """Keep the list of ``{'path', 'message'}`` entries for the caller to show."""
++        super().__init__('; '.join(f"{error['path'] or 'goal'}: {error['message']}" for error in errors))
++        self.errors = errors
++
++
++def action_class(type_name):
++    """Find the Python class of an action type such as ``example_interfaces/action/Fibonacci``.
++
++    The class comes from the ROS environment this process was started in. A
++    type whose package is not sourced cannot be used; that is reported as a
++    ``GatewayError`` naming the type.
++    """
++    from rosidl_runtime_py.utilities import get_action
++    try:
++        return get_action(type_name)
++    except (AttributeError, ModuleNotFoundError, ValueError) as error:
++        raise GatewayError(f'Action type {type_name} is not available in this ROS environment '
++                           f'(source the workspace that defines it): {error}') from error
++
++
++def describe_type(slot_type):
++    """Describe one field type from the interface definition as schema data.
++
++    Basic types become boolean, integer (with range) or float (with limit).
++    Strings carry their maximum length when bounded. Arrays and sequences
++    carry their fixed or maximum size and the schema of their elements.
++    Nested messages are described recursively through their own class.
++    """
++    from rosidl_parser import definition
++    from rosidl_runtime_py.import_message import import_message_from_namespaced_type
++
++    if isinstance(slot_type, definition.BasicType):
++        name = slot_type.typename
++        if name == 'boolean':
++            return dict(kind='boolean', type=name)
++        if name in INTEGER_RANGES:
++            low, high = INTEGER_RANGES[name]
++            return dict(kind='integer', type=name, minimum=low, maximum=high)
++        return dict(kind='float', type=name, limit=FLOAT_LIMITS.get(name))
++    if isinstance(slot_type, definition.AbstractGenericString):
++        return dict(kind='string', type='wstring' if isinstance(slot_type, definition.AbstractWString) else 'string',
++                    max_length=getattr(slot_type, 'maximum_size', None))
++    if isinstance(slot_type, definition.AbstractNestedType):
++        return dict(kind='array', item=describe_type(slot_type.value_type),
++                    fixed_size=slot_type.size if isinstance(slot_type, definition.Array) else None,
++                    max_size=getattr(slot_type, 'maximum_size', None))
++    if isinstance(slot_type, definition.NamespacedType):
++        return describe(import_message_from_namespaced_type(slot_type))
++    raise GatewayError(f'Unsupported interface field type: {slot_type!r}')
++
++
++def describe(message_class):
++    """Describe a message class as a schema listing its fields in definition order."""
++    module = message_class.__module__.split('.')
++    names = list(message_class.get_fields_and_field_types())
++    return dict(kind='message', type=f'{module[0]}/{module[1]}/{message_class.__name__}',
++                fields=[dict(name=name, schema=describe_type(slot_type))
++                        for name, slot_type in zip(names, message_class.SLOT_TYPES)])
++
++
++def to_json(value):
++    """Convert a ROS message or field value to complete JSON data, without shortening.
++
++    Used for default values and submitted goals, which must round-trip
++    exactly. Non-finite floats become ``None`` because JSON cannot express
++    them. Byte strings become lists of integers.
++    """
++    if hasattr(value, 'get_fields_and_field_types'):
++        return {name: to_json(getattr(value, name)) for name in value.get_fields_and_field_types()}
++    if isinstance(value, (bool, str)) or value is None:
++        return value
++    if isinstance(value, (bytes, bytearray)):
++        return list(value)
++    if isinstance(value, float):
++        return value if math.isfinite(value) else None
++    if isinstance(value, int):
++        return value
++    if hasattr(value, 'tolist'):
++        return to_json(value.tolist())
++    if hasattr(value, '__len__'):
++        return [to_json(item) for item in value]
++    return str(value)
++
++
++def defaults(message_class):
++    """Return the default field values the interface definition gives a new message."""
++    return to_json(message_class())
++
++
++def check(schema, value, path, errors):
++    """Compare one JSON value with its schema and record every disagreement.
++
++    Booleans must be true or false, not numbers. Integers must be whole
++    numbers within the type's range. Floats must be finite numbers within the
++    type's limit. Strings must respect a bound. Arrays must have the fixed
++    size or stay within the maximum, and each element is checked. Messages
++    must be objects containing only known fields; missing fields keep their
++    defaults. Return the value in the form the message setters accept.
++    """
++    kind = schema['kind']
++    if kind == 'boolean':
++        if not isinstance(value, bool):
++            errors.append(dict(path=path, message='must be true or false'))
++        return value
++    if kind == 'integer':
++        if isinstance(value, bool) or not isinstance(value, int):
++            errors.append(dict(path=path, message=f"must be a whole number ({schema['type']})"))
++        elif not schema['minimum'] <= value <= schema['maximum']:
++            errors.append(dict(path=path, message=f"must be between {schema['minimum']} and {schema['maximum']} "
++                                                  f"({schema['type']})"))
++        return value
++    if kind == 'float':
++        if isinstance(value, bool) or not isinstance(value, (int, float)):
++            errors.append(dict(path=path, message=f"must be a number ({schema['type']})"))
++            return value
++        if not math.isfinite(value) or (schema['limit'] and abs(value) > schema['limit']):
++            errors.append(dict(path=path, message=f"must be a finite number that fits {schema['type']}"))
++        return float(value)
++    if kind == 'string':
++        if not isinstance(value, str):
++            errors.append(dict(path=path, message='must be text'))
++        elif schema['max_length'] is not None and len(value) > schema['max_length']:
++            errors.append(dict(path=path, message=f"must have at most {schema['max_length']} characters"))
++        return value
++    if kind == 'array':
++        if not isinstance(value, list):
++            errors.append(dict(path=path, message='must be a list'))
++            return value
++        if schema['fixed_size'] is not None and len(value) != schema['fixed_size']:
++            errors.append(dict(path=path, message=f"must have exactly {schema['fixed_size']} elements"))
++        if schema['max_size'] is not None and len(value) > schema['max_size']:
++            errors.append(dict(path=path, message=f"must have at most {schema['max_size']} elements"))
++        return [check(schema['item'], item, f'{path}[{index}]', errors) for index, item in enumerate(value)]
++    if not isinstance(value, dict):
++        errors.append(dict(path=path, message=f"must be an object with the fields of {schema['type']}"))
++        return value
++    known = {field['name']: field['schema'] for field in schema['fields']}
++    checked = {}
++    for name, item in value.items():
++        if name not in known:
++            errors.append(dict(path=f'{path}.{name}'.lstrip('.'), message=f"is not a field of {schema['type']}"))
++        else:
++            checked[name] = check(known[name], item, f'{path}.{name}'.lstrip('.'), errors)
++    return checked
++
++
++def build(message_class, value):
++    """Create a ROS message from a JSON value, or raise ``InvalidValue`` listing what is wrong.
++
++    The value is checked completely first, so the message setters are only
++    reached with data of the right types and sizes. Fields left out of the
++    value keep the defaults of the interface definition.
++    """
++    from rosidl_runtime_py.set_message import set_message_fields
++
++    errors = []
++    checked = check(describe(message_class), value, '', errors)
++    if errors:
++        raise InvalidValue(errors)
++    message = message_class()
++    try:
++        set_message_fields(message, checked)
++    except Exception as error:  # a rule of the generated setters that the schema did not capture
++        raise InvalidValue([dict(path='', message=f'was not accepted by the ROS message type: {error}')]) from error
++    return message
+diff --git a/gui/frontend/api.js b/gui/frontend/api.js
+index 91527c5..e8fa398 100644
+--- a/gui/frontend/api.js
++++ b/gui/frontend/api.js
+@@ -1,7 +1,8 @@
+ /**
+  * The only place where the frontend talks to the gateway.
+  *
+- * Concepts: a snapshot is one JSON answer fetched over HTTP. A stream is a
++ * Concepts: a snapshot is one JSON answer fetched over HTTP. A command is a
++ * single POST made because the user clicked something. A stream is a
+  * WebSocket on which the gateway sends "data" and "status" messages; a data
+  * message may be followed by one binary block (a JPEG or packed points).
+  * Views never open sockets or build URLs themselves, so a different
+@@ -48,6 +49,22 @@ export async function getJSON(path, parameters = {}) {
+   return body;
+ }
+ 
++/**
++ * Send one JSON POST request and return {ok, status, body}.
++ *
++ * Used only for deliberate user actions (sending or cancelling an action
++ * goal). The request is made exactly once: it is never retried here, because
++ * repeating it could repeat a physical action. A response outside the 2xx
++ * range is returned, not thrown, so the caller can show the gateway's
++ * explanation. A network failure throws; the caller must then tell the user
++ * that the outcome is unknown.
++ */
++export async function postJSON(path, body, token) {
++  const response = await fetch(BASE + path, {method: 'POST', cache: 'no-store',
++    headers: {'Content-Type': 'application/json', 'X-SMPA-GUI-Token': token || ''}, body: JSON.stringify(body)});
++  return {ok: response.ok, status: response.status, body: await response.json().catch(() => ({}))};
++}
++
+ /**
+  * Open a stream and keep it open until the returned close function is called.
+  *
+diff --git a/gui/frontend/app.js b/gui/frontend/app.js
+index 5d16d8c..f0a328e 100644
+--- a/gui/frontend/app.js
++++ b/gui/frontend/app.js
+@@ -10,9 +10,10 @@
+ import {getJSON, h, poll} from './api.js';
+ import ros from './tabs/ros/index.js';
+ import sensors from './tabs/sensors/index.js';
++import actions from './tabs/actions/index.js';
+ import smpa from './tabs/smpa/index.js';
+ 
+-const TABS = [ros, sensors, smpa];
++const TABS = [ros, sensors, actions, smpa];
+ const workspace = document.getElementById('workspace');
+ const tabBar = document.getElementById('primary-tabs');
+ const connection = document.getElementById('connection');
+diff --git a/gui/frontend/style.css b/gui/frontend/style.css
+index 599ae9c..e36eea5 100644
+--- a/gui/frontend/style.css
++++ b/gui/frontend/style.css
+@@ -70,3 +70,34 @@ h2 { font-size: 16px; margin: 0 0 4px; word-break: break-all; } h3 { font-size:
+ .big { font-size: 34px; font-weight: 600; font-variant-numeric: tabular-nums; padding: 18px 12px 4px; }
+ .matrix td { font-family: var(--mono); font-size: 12.5px; text-align: right; border: 1px solid var(--line); }
+ .notice { padding: 10px 12px; color: var(--warn); }
++.actions-view { flex: 1; min-height: 0; display: grid; grid-template-columns: 300px minmax(360px, 1fr) minmax(380px, 1fr); }
++.actions-view > section { min-height: 0; overflow: auto; border-right: 1px solid var(--line); }
++.actions-view > section:first-child { background: var(--panel); }
++.pad { padding: 12px 16px; }
++.warning { border: 1px solid var(--warn); color: var(--warn); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
++.goal-form { margin: 8px 0; }
++.goal-field { display: grid; grid-template-columns: minmax(150px, 220px) 1fr; gap: 6px 12px; align-items: center; padding: 3px 0; }
++.goal-field-block { grid-template-columns: 1fr; }
++.goal-field label { display: flex; flex-direction: column; }
++.goal-field label .muted { font-size: 11px; }
++.goal-message .goal-message, .goal-array { border-left: 2px solid var(--line); padding-left: 12px; margin-left: 4px; }
++.goal-array-item { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
++.goal-array-item > input, .goal-array-item > .goal-message { flex: 1; }
++input[type="number"] { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; min-width: 0; }
++input.invalid, textarea.invalid { border-color: var(--bad); outline: 1px solid var(--bad); }
++textarea { width: 100%; min-height: 220px; font-family: var(--mono); font-size: 12.5px; color: var(--text); background: var(--bg);
++           border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
++.error-list { color: var(--bad); margin: 6px 0; padding-left: 18px; }
++button.primary { font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 7px 14px; cursor: pointer; }
++button.danger { font: inherit; color: var(--bad); background: var(--bg); border: 1px solid var(--bad); border-radius: 6px; padding: 7px 14px; cursor: pointer; }
++button:disabled { opacity: .45; cursor: not-allowed; }
++.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
++.state { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
++.state[data-state="succeeded"] { color: var(--ok); border-color: var(--ok); }
++.state[data-state="executing"], .state[data-state="accepted"], .state[data-state="sending"], .state[data-state="canceling"] { color: var(--accent); border-color: var(--accent); }
++.state[data-state="aborted"], .state[data-state="rejected"], .state[data-state="failed"], .state[data-state="lost"] { color: var(--bad); border-color: var(--bad); }
++.state[data-state="canceled"] { color: var(--warn); border-color: var(--warn); }
++.feedback-list { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
++.feedback-list div { padding: 3px 8px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; }
++dialog { color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; max-width: 560px; }
++dialog::backdrop { background: rgba(0, 0, 0, .45); }
+diff --git a/gui/frontend/tabs/actions/form.js b/gui/frontend/tabs/actions/form.js
+new file mode 100644
+index 0000000..88c173b
+--- /dev/null
++++ b/gui/frontend/tabs/actions/form.js
+@@ -0,0 +1,173 @@
++/**
++ * Build a goal editor from an action's Goal schema and check values against it.
++ *
++ * Concepts: the schema comes from the gateway and describes every field of
++ * the Goal message: booleans, integers with their range, floats, strings,
++ * arrays (fixed, bounded or unbounded) and nested messages. The editor keeps
++ * one plain JavaScript value shaped like the goal and draws one input per
++ * field. Checking here gives immediate hints; the gateway checks again and
++ * has the final say.
++ */
++import {h} from '../../api.js';
++
++/** Return the value a field has before the user edits it: false, 0, empty text, or defaults of its parts. */
++export function defaultFor(schema) {
++  if (schema.kind === 'boolean') return false;
++  if (schema.kind === 'integer' || schema.kind === 'float') return 0;
++  if (schema.kind === 'string') return '';
++  if (schema.kind === 'array') return Array.from({length: schema.fixed_size || 0}, () => defaultFor(schema.item));
++  return Object.fromEntries(schema.fields.map((field) => [field.name, defaultFor(field.schema)]));
++}
++
++/**
++ * Fill in whatever a value leaves out, using the given defaults.
++ *
++ * Saved configurations and hand-written JSON may omit fields. Missing
++ * message fields take their default; everything that is present is kept as
++ * it is, even if it is wrong, so that checking can point at it.
++ */
++export function withDefaults(schema, value, fallback) {
++  if (schema.kind !== 'message') {
++    if (schema.kind === 'array' && Array.isArray(value)) {
++      return value.map((item) => withDefaults(schema.item, item, defaultFor(schema.item)));
++    }
++    return value === undefined ? fallback : value;
++  }
++  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value === undefined ? fallback : value;
++  const result = {...value};
++  for (const field of schema.fields) {
++    const base = fallback && fallback[field.name] !== undefined ? fallback[field.name] : defaultFor(field.schema);
++    result[field.name] = withDefaults(field.schema, value[field.name], base);
++  }
++  return result;
++}
++
++/**
++ * Compare a value with its schema and return every disagreement as {path, message}.
++ *
++ * The rules are the gateway's: booleans are true or false; integers are
++ * whole numbers in the type's range; floats are finite numbers; strings
++ * respect their bound; arrays respect their fixed or maximum size; messages
++ * contain only known fields. Whole numbers beyond what JavaScript represents
++ * exactly are flagged, because they would silently change.
++ */
++export function validate(schema, value, path = '') {
++  const errors = [];
++  const fail = (message) => errors.push({path, message});
++  if (schema.kind === 'boolean') {
++    if (typeof value !== 'boolean') fail('must be true or false');
++  } else if (schema.kind === 'integer') {
++    if (typeof value !== 'number' || !Number.isInteger(value)) fail(`must be a whole number (${schema.type})`);
++    else if (value < schema.minimum || value > schema.maximum) fail(`must be between ${schema.minimum} and ${schema.maximum} (${schema.type})`);
++    else if (!Number.isSafeInteger(value)) fail('is too large to be entered exactly in a browser');
++  } else if (schema.kind === 'float') {
++    if (typeof value !== 'number' || !Number.isFinite(value)) fail(`must be a finite number (${schema.type})`);
++    else if (schema.limit && Math.abs(value) > schema.limit) fail(`must fit ${schema.type}`);
++  } else if (schema.kind === 'string') {
++    if (typeof value !== 'string') fail('must be text');
++    else if (schema.max_length !== null && value.length > schema.max_length) fail(`must have at most ${schema.max_length} characters`);
++  } else if (schema.kind === 'array') {
++    if (!Array.isArray(value)) fail('must be a list');
++    else {
++      if (schema.fixed_size !== null && value.length !== schema.fixed_size) fail(`must have exactly ${schema.fixed_size} elements`);
++      if (schema.max_size !== null && value.length > schema.max_size) fail(`must have at most ${schema.max_size} elements`);
++      value.forEach((item, index) => errors.push(...validate(schema.item, item, `${path}[${index}]`)));
++    }
++  } else if (value === null || typeof value !== 'object' || Array.isArray(value)) {
++    fail(`must be an object with the fields of ${schema.type}`);
++  } else {
++    const known = new Map(schema.fields.map((field) => [field.name, field.schema]));
++    for (const [name, item] of Object.entries(value)) {
++      const child = path ? `${path}.${name}` : name;
++      if (!known.has(name)) errors.push({path: child, message: `is not a field of ${schema.type}`});
++      else errors.push(...validate(known.get(name), item, child));
++    }
++  }
++  return errors;
++}
++
++/** Describe a field's type briefly for the label next to its input. */
++function typeHint(schema) {
++  if (schema.kind === 'array') {
++    const size = schema.fixed_size !== null ? schema.fixed_size : schema.max_size !== null ? `≤${schema.max_size}` : '';
++    return `${typeHint(schema.item)}[${size}]`;
++  }
++  return schema.type;
++}
++
++/**
++ * Create an editor for a goal and return its element with get, set and showErrors functions.
++ *
++ * Every input writes straight into the editor's value and then calls
++ * onChange. Adding or removing an array element redraws the form. A number
++ * input holding something that is not a number keeps the raw text as the
++ * value, so checking reports it instead of silently sending zero.
++ * showErrors marks the inputs named by a list of {path, message} entries.
++ */
++export function createEditor(schema, initial, onChange) {
++  let value = structuredClone(initial);
++  const host = h('div', {class: 'goal-form'});
++
++  /** Draw the input (or group of inputs) for one field and wire it to its place in the value. */
++  function field(itemSchema, current, assign, path) {
++    if (itemSchema.kind === 'boolean') {
++      return h('input', {type: 'checkbox', checked: current === true, 'data-path': path,
++        onchange: (event) => { assign(event.target.checked); onChange(); }});
++    }
++    if (itemSchema.kind === 'integer' || itemSchema.kind === 'float') {
++      return h('input', {type: 'number', value: typeof current === 'number' ? String(current) : '', 'data-path': path,
++        step: itemSchema.kind === 'integer' ? '1' : 'any',
++        oninput: (event) => {
++          const text = event.target.value.trim();
++          assign(text !== '' && Number.isFinite(Number(text)) ? Number(text) : text);
++          onChange();
++        }});
++    }
++    if (itemSchema.kind === 'string') {
++      return h('input', {type: 'text', value: typeof current === 'string' ? current : '', 'data-path': path,
++        oninput: (event) => { assign(event.target.value); onChange(); }});
++    }
++    if (itemSchema.kind === 'array') {
++      const items = Array.isArray(current) ? current : [];
++      const fixed = itemSchema.fixed_size !== null;
++      const full = itemSchema.max_size !== null && items.length >= itemSchema.max_size;
++      return h('div', {class: 'goal-array', 'data-path': path},
++        items.map((item, index) => h('div', {class: 'goal-array-item'},
++          h('span', {class: 'muted'}, `[${index}]`),
++          field(itemSchema.item, item, (next) => { items[index] = next; }, `${path}[${index}]`),
++          fixed ? null : h('button', {class: 'action', title: 'Remove element', type: 'button',
++            onclick: () => { items.splice(index, 1); render(); onChange(); }}, '−'))),
++        fixed || full ? null : h('button', {class: 'action', type: 'button', 'data-add': path,
++          onclick: () => { if (!Array.isArray(current)) assign(items); items.push(defaultFor(itemSchema.item)); render(); onChange(); }},
++          '+ element'));
++    }
++    const object = current && typeof current === 'object' && !Array.isArray(current) ? current : {};
++    return h('div', {class: 'goal-message'}, itemSchema.fields.map((part) => {
++      const child = path ? `${path}.${part.name}` : part.name;
++      return h('div', {class: 'goal-field' + (part.schema.kind === 'message' || part.schema.kind === 'array' ? ' goal-field-block' : '')},
++        h('label', {}, h('span', {class: 'mono'}, part.name), h('span', {class: 'muted'}, typeHint(part.schema))),
++        field(part.schema, object[part.name], (next) => { object[part.name] = next; }, child));
++    }));
++  }
++
++  /** Redraw the whole form from the current value. */
++  function render() {
++    host.replaceChildren(schema.fields.length
++      ? field(schema, value, (next) => { value = next; }, '')
++      : h('p', {class: 'muted'}, 'This action\'s goal has no fields.'));
++  }
++
++  render();
++  return {
++    element: host,
++    get: () => structuredClone(value),
++    set: (next) => { value = structuredClone(next); render(); },
++    showErrors: (errors) => {
++      for (const input of host.querySelectorAll('[data-path]')) { input.classList.remove('invalid'); input.removeAttribute('title'); }
++      for (const error of errors) {
++        const input = host.querySelector(`[data-path="${CSS.escape(error.path)}"]`);
++        if (input) { input.classList.add('invalid'); input.title = error.message; }
++      }
++    },
++  };
++}
+diff --git a/gui/frontend/tabs/actions/index.js b/gui/frontend/tabs/actions/index.js
+new file mode 100644
+index 0000000..1e2f5a9
+--- /dev/null
++++ b/gui/frontend/tabs/actions/index.js
+@@ -0,0 +1,467 @@
++/**
++ * The Actions tab: discover action servers, edit a goal, send it, and watch what happens.
++ *
++ * Concepts: a goal is sent only by the confirmation button in the dialog
++ * that the Send Goal button opens. Nothing else in this tab sends anything:
++ * selecting a server, editing values, loading a saved configuration,
++ * re-using values from the history, reloading the page and reconnecting
++ * after a failure only read from the gateway.
++ *
++ * The gateway keeps the record of every goal it sent (state, feedback,
++ * result). This tab shows those records by polling, so the display survives
++ * page reloads and connection losses without the browser remembering goals.
++ * A goal submission carries a request identifier created for that one click;
++ * the gateway refuses to send the same identifier twice.
++ */
++import {getJSON, h, poll, postJSON} from '../../api.js';
++import {createEditor, validate, withDefaults} from './form.js';
++import {configurationNames, deleteConfiguration, loadConfiguration, saveConfiguration} from './store.js';
++
++const ACTIVE = ['sending', 'accepted', 'executing', 'canceling'];
++const interfaces = new Map();
++const drafts = new Map();
++let session = {enabled: false, token: null, cancel_on_exit: true};
++let servers = [];
++let selected = null;
++let described = null;
++let editor = null;
++let mode = 'form';
++let goals = [];
++let selectedGoalId = null;
++let shownGoal = '';
++let shownHistory = '';
++let stops = [];
++let dom = {};
++
++/** Format a time stamp in seconds as local clock time with milliseconds, or a dash. */
++function clock(seconds) {
++  if (!seconds) return '–';
++  const date = new Date(seconds * 1000);
++  return date.toLocaleTimeString([], {hour12: false}) + '.' + String(date.getMilliseconds()).padStart(3, '0');
++}
++
++/** Show a message under the editor; kind "error" is red, "note" is neutral, empty text clears it. */
++function notify(text, kind = 'note') {
++  dom.notice.textContent = text;
++  dom.notice.className = kind === 'error' ? 'notice' : 'muted';
++  dom.notice.style.color = kind === 'error' ? 'var(--bad)' : '';
++}
++
++/** List field problems under the editor and mark the affected inputs. */
++function showErrors(errors) {
++  dom.errors.replaceChildren(...errors.map((error) => h('li', {}, h('span', {class: 'mono'}, error.path || 'goal'), ' ', error.message)));
++  if (editor && mode === 'form') editor.showErrors(errors);
++  dom.json.classList.toggle('invalid', mode === 'json' && errors.length > 0);
++}
++
++/**
++ * Redraw the list of discovered action servers.
++ *
++ * Each row shows the action name, its type and whether a server is
++ * currently available. Clicking a row selects the action for editing; it
++ * does not send anything.
++ */
++function renderServers() {
++  const text = dom.filter.value.trim().toLowerCase();
++  const rows = servers.filter((action) => !text || action.name.toLowerCase().includes(text) || action.types.join(' ').toLowerCase().includes(text))
++    .map((action) => h('tr', {class: 'selectable' + (selected && selected.name === action.name ? ' selected' : ''), 'data-action': action.name,
++      onclick: () => selectAction(action.name, action.types[0])},
++      h('td', {}, h('div', {class: 'mono', style: 'word-break:break-all'}, action.name),
++        h('div', {class: 'mono muted', style: 'word-break:break-all'}, action.types.join(', ')),
++        h('span', {class: 'pill ' + (action.available ? 'pill-ok' : 'pill-off')}, action.available ? 'available' : 'no server'))));
++  dom.servers.replaceChildren(...(rows.length ? rows : [h('tr', {}, h('td', {class: 'empty'}, 'No action servers discovered.'))]));
++  updateControls();
++}
++
++/** Return the discovered entry of the selected action, or null when it is not currently discovered. */
++function selectedServer() {
++  return selected ? servers.find((action) => action.name === selected.name) || null : null;
++}
++
++/**
++ * Enable or disable the Send and Cancel buttons to match the current situation.
++ *
++ * Sending needs action execution to be enabled, a selected action and an
++ * available server. Cancelling needs a selected goal that is still active.
++ * The reason for a disabled Send button is shown next to it.
++ */
++function updateControls() {
++  const server = selectedServer();
++  const reason = !session.enabled ? 'Action execution is disabled (read-only mode).'
++    : !selected ? 'Select an action server.'
++    : !described ? 'Loading the action interface…'
++    : !server || !server.available ? 'No server is currently available for this action.' : '';
++  dom.send.disabled = reason !== '';
++  dom.sendReason.textContent = reason;
++  const goal = goals.find((item) => item.goal_id === selectedGoalId);
++  dom.cancel.disabled = !session.enabled || !goal || !ACTIVE.includes(goal.state) || goal.state === 'sending';
++}
++
++/**
++ * Select an action and show an editor for its Goal definition.
++ *
++ * The values being edited for the previously selected action are kept as a
++ * draft for this page visit. The interface description is fetched from the
++ * gateway (once per type) and the editor starts from the draft or from the
++ * interface's default values. This function only reads; it never sends a goal.
++ */
++async function selectAction(name, type) {
++  rememberDraft();
++  selected = {name, type};
++  described = null;
++  editor = null;
++  dom.editorTitle.textContent = name;
++  dom.editorType.textContent = type;
++  dom.form.replaceChildren(h('p', {class: 'muted'}, 'Loading the action interface…'));
++  showErrors([]);
++  notify('');
++  renderServers();
++  try {
++    if (!interfaces.has(type)) interfaces.set(type, await getJSON('/actions/interface', {type}));
++  } catch (error) {
++    if (selected && selected.name === name) dom.form.replaceChildren(h('p', {class: 'notice'}, error.message));
++    return;
++  }
++  if (!selected || selected.name !== name) return;
++  described = interfaces.get(type);
++  const start = drafts.has(name) ? drafts.get(name) : described.goal_default;
++  editor = createEditor(described.goal, withDefaults(described.goal, start, described.goal_default), () => showErrors([]));
++  dom.form.replaceChildren(editor.element);
++  dom.json.value = JSON.stringify(editor.get(), null, 2);
++  setMode(mode);
++  renderConfigurations();
++  updateControls();
++}
++
++/** Keep the values currently in the editor as the draft of the selected action. */
++function rememberDraft() {
++  if (!selected || !editor) return;
++  const current = readValue();
++  if (current.value !== undefined) drafts.set(selected.name, current.value);
++}
++
++/**
++ * Read the goal value from whichever editor is shown.
++ *
++ * In form mode this is the form's value. In JSON mode the text is parsed;
++ * text that is not valid JSON gives an error entry instead of a value.
++ */
++function readValue() {
++  if (mode === 'form') return {value: editor.get(), errors: []};
++  try {
++    return {value: JSON.parse(dom.json.value), errors: []};
++  } catch (error) {
++    return {value: undefined, errors: [{path: '', message: 'is not valid JSON: ' + error.message}]};
++  }
++}
++
++/**
++ * Switch between the generated form and the JSON text editor.
++ *
++ * The value moves with the switch. Leaving JSON mode needs valid JSON that
++ * is an object; otherwise the switch is refused and the problem is shown,
++ * so no edits are lost.
++ */
++function setMode(next) {
++  if (editor && next !== mode) {
++    const current = readValue();
++    if (current.value === undefined || (next === 'form' && (current.value === null || typeof current.value !== 'object' || Array.isArray(current.value)))) {
++      showErrors(current.errors.length ? current.errors : [{path: '', message: 'must be a JSON object to be shown as a form'}]);
++      return;
++    }
++    if (next === 'form') editor.set(withDefaults(described.goal, current.value, described.goal_default));
++    else dom.json.value = JSON.stringify(current.value, null, 2);
++    showErrors([]);
++  }
++  mode = next;
++  dom.form.style.display = mode === 'form' ? '' : 'none';
++  dom.json.style.display = mode === 'json' ? '' : 'none';
++  dom.modeForm.setAttribute('aria-selected', String(mode === 'form'));
++  dom.modeJson.setAttribute('aria-selected', String(mode === 'json'));
++}
++
++/** Put a goal value into the editor that is currently shown; this never sends it. */
++function putValue(value) {
++  const filled = withDefaults(described.goal, value, described.goal_default);
++  editor.set(filled && typeof filled === 'object' && !Array.isArray(filled) ? filled : described.goal_default);
++  dom.json.value = JSON.stringify(filled, null, 2);
++  showErrors([]);
++}
++
++/** Refresh the list of saved configurations for the selected action's type. */
++function renderConfigurations() {
++  const names = selected ? configurationNames(selected.type) : [];
++  dom.configSelect.replaceChildren(h('option', {value: ''}, names.length ? '— saved configurations —' : '— none saved —'),
++    ...names.map((name) => h('option', {value: name}, name)));
++}
++
++/**
++ * Check the edited goal and, if it fits the action's definition, open the confirmation dialog.
++ *
++ * Problems are listed and nothing further happens. Otherwise the dialog
++ * names the action, the server nodes and the exact values, and warns that a
++ * robot may move. The goal is sent only when the user confirms there.
++ */
++function askToSend() {
++  if (!editor || !described) return;
++  const current = readValue();
++  const errors = current.errors.length ? current.errors : validate(described.goal, current.value);
++  showErrors(errors);
++  if (errors.length) { notify('The goal was not sent: fix the listed fields first.', 'error'); return; }
++  notify('');
++  const server = selectedServer();
++  dom.dialogAction.textContent = `${selected.name}  (${selected.type})`;
++  dom.dialogServer.textContent = server && server.servers.length ? server.servers.join(', ') : 'unknown';
++  dom.dialogGoal.textContent = JSON.stringify(current.value, null, 2);
++  dom.confirm.disabled = false;
++  dom.dialog.returnValue = '';
++  dom.dialog.pendingGoal = {action: selected.name, type: selected.type, goal: current.value};
++  dom.dialog.showModal();
++}
++
++/**
++ * Send the confirmed goal exactly once and select it in the monitor.
++ *
++ * A fresh request identifier is created for this confirmation. The request
++ * is not retried. If the gateway refuses the goal, its explanation and any
++ * field problems are shown. If the network fails, the user is told that the
++ * outcome is unknown and to check the history before trying again, because
++ * the goal may have been sent.
++ */
++async function sendConfirmed() {
++  const pending = dom.dialog.pendingGoal;
++  dom.dialog.pendingGoal = null;
++  dom.confirm.disabled = true;
++  dom.dialog.close();
++  if (!pending) return;
++  const requestId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/-/g, '');
++  let answer;
++  try {
++    answer = await postJSON('/actions/goals', {...pending, request_id: requestId}, session.token);
++  } catch (error) {
++    notify('The request did not complete. It is not known whether the goal was sent: check the history before sending again.', 'error');
++    return;
++  }
++  if (!answer.ok) {
++    showErrors(answer.body.errors || []);
++    notify(`The goal was not sent: ${typeof answer.body.detail === 'string' ? answer.body.detail : 'the gateway refused the request'}`, 'error');
++    if (answer.status === 403) refreshSession();
++    return;
++  }
++  selectedGoalId = answer.body.goal.goal_id;
++  notify(`Goal ${selectedGoalId} sent at ${clock(answer.body.goal.created_at)}.`);
++  await refreshGoals();
++}
++
++/** Ask the gateway to request cancellation of the selected goal; done once, on click. */
++async function cancelSelected() {
++  if (!selectedGoalId) return;
++  try {
++    const answer = await postJSON(`/actions/goals/${selectedGoalId}/cancel`, {}, session.token);
++    notify(answer.ok ? 'Cancellation requested; the action server decides whether and when the goal stops.'
++      : `Cancellation was not requested: ${answer.body.detail || 'the gateway refused the request'}`, answer.ok ? 'note' : 'error');
++  } catch (error) {
++    notify('The cancel request did not complete; check the goal state and try again if it is still active.', 'error');
++  }
++  await refreshGoals();
++}
++
++/** Build one labelled line of the goal monitor. */
++function line(label, value, id) {
++  return [h('dt', {}, label), h('dd', {id}, value)];
++}
++
++/**
++ * Redraw the monitor for the selected goal: state, identifiers, times, feedback and result.
++ *
++ * The monitor is rebuilt only when the goal's record changed, so text
++ * selections and scroll positions survive the frequent polling.
++ */
++function renderMonitor() {
++  const goal = goals.find((item) => item.goal_id === selectedGoalId);
++  const signature = JSON.stringify(goal || null);
++  if (signature === shownGoal) return;
++  shownGoal = signature;
++  if (!goal) {
++    dom.monitor.replaceChildren(h('p', {class: 'muted'}, 'No goal selected. Send a goal or pick one from the history.'));
++    return;
++  }
++  const cancel = goal.cancel_requested_at ? `requested ${clock(goal.cancel_requested_at)} · server answer: ${goal.cancel_answer}` : 'not requested';
++  dom.monitor.replaceChildren(
++    h('div', {class: 'row'}, h('span', {class: 'state', id: 'goal-state', 'data-state': goal.state}, goal.state),
++      h('span', {class: 'mono'}, goal.action)),
++    h('p', {class: 'notice', id: 'goal-error', style: goal.error ? '' : 'display:none'}, goal.error || ''),
++    h('dl', {class: 'readout', style: 'padding:0'},
++      ...line('Goal UUID', goal.goal_id, 'goal-uuid'), ...line('Type', goal.type),
++      ...line('Sent', clock(goal.created_at)), ...line('Accepted', clock(goal.accepted_at)),
++      ...line('Finished', clock(goal.finished_at)), ...line('Cancellation', cancel, 'goal-cancel')),
++    h('h3', {}, `Feedback (${goal.feedback_count} received` + (goal.feedback_count > goal.feedback.length ? `, last ${goal.feedback.length} shown` : '') + ')'),
++    h('div', {class: 'feedback-list', id: 'goal-feedback'}, goal.feedback.length
++      ? goal.feedback.slice().reverse().map((item) => h('div', {}, `#${item.number}  ${clock(item.at)}  ${JSON.stringify(item.message)}`))
++      : h('div', {class: 'muted'}, 'No feedback received.')),
++    h('h3', {}, 'Result' + (goal.result_truncated ? ' (long fields shortened)' : '')),
++    h('pre', {id: 'goal-result'}, goal.result === null ? (ACTIVE.includes(goal.state) ? 'Waiting for the result…' : 'No result.') : JSON.stringify(goal.result, null, 2)),
++    h('h3', {}, 'Goal values'), h('pre', {id: 'goal-values'}, JSON.stringify(goal.goal, null, 2)),
++    h('button', {class: 'action', id: 'reuse-goal', type: 'button', onclick: () => reuse(goal)}, 'Copy these values into the editor (does not send)'));
++}
++
++/** Load a history entry's action and values into the editor for editing; nothing is sent. */
++async function reuse(goal) {
++  drafts.set(goal.action, goal.goal);
++  if (selected && selected.name === goal.action && editor) putValue(goal.goal);
++  else { editor = null; await selectAction(goal.action, goal.type); }
++  notify('Values copied into the editor. Nothing was sent.');
++}
++
++/** Redraw the history table when the list of goals or their states changed. */
++function renderHistory() {
++  const signature = JSON.stringify(goals.map((goal) => [goal.goal_id, goal.state, goal.feedback_count])) + selectedGoalId;
++  if (signature === shownHistory) return;
++  shownHistory = signature;
++  dom.history.replaceChildren(...(goals.length ? goals.map((goal) => h('tr', {
++    class: 'selectable' + (goal.goal_id === selectedGoalId ? ' selected' : ''), 'data-goal': goal.goal_id, 'data-state': goal.state,
++    onclick: () => { selectedGoalId = goal.goal_id; renderGoals(); }},
++    h('td', {}, clock(goal.created_at)), h('td', {class: 'mono'}, goal.action),
++    h('td', {}, h('span', {class: 'state', 'data-state': goal.state}, goal.state)),
++    h('td', {class: 'mono', title: goal.goal_id}, goal.goal_id.slice(0, 8)), h('td', {class: 'mono'}, JSON.stringify(goal.goal).slice(0, 60))))
++    : [h('tr', {}, h('td', {class: 'empty', colspan: 5}, 'No goals have been sent since the GUI server started.'))]));
++}
++
++/** Redraw everything that depends on the goal records. */
++function renderGoals() {
++  renderHistory();
++  renderMonitor();
++  updateControls();
++}
++
++/** Read the goal records from the gateway and redraw; reading never sends anything. */
++async function refreshGoals() {
++  goals = (await getJSON('/actions/goals')).goals;
++  dom.offline.style.display = 'none';
++  renderGoals();
++}
++
++/** Ask the gateway whether action execution is enabled and fetch the current session token. */
++async function refreshSession() {
++  try {
++    session = await getJSON('/actions/session');
++  } catch (error) {
++    session = {enabled: false, token: null, cancel_on_exit: true};
++  }
++  dom.readOnly.style.display = session.enabled ? 'none' : '';
++  dom.exitPolicy.textContent = session.cancel_on_exit
++    ? 'If the GUI server is stopped normally, it asks the servers to cancel goals that are still active.'
++    : 'If the GUI server is stopped, active goals keep running on their servers.';
++  updateControls();
++}
++
++export default {
++  id: 'actions',
++  title: 'Actions',
++
++  /**
++   * Build the three areas (servers, goal editor, monitor with history) and start reading.
++   *
++   * Mounting only reads: it fetches the session, the server list and the
++   * goal records. If an action was selected earlier in this page visit its
++   * editor is restored with its draft values, without sending anything.
++   */
++  mount(container) {
++    dom = {
++      filter: h('input', {type: 'search', placeholder: 'Filter actions…', style: 'flex:1', oninput: renderServers}),
++      servers: h('tbody', {id: 'action-server-list'}),
++      editorTitle: h('h2', {id: 'editor-action'}, 'No action selected'),
++      editorType: h('p', {class: 'mono muted', id: 'editor-type'}, ''),
++      form: h('div', {id: 'goal-editor'}, h('p', {class: 'muted'}, 'Select an action server to edit a goal.')),
++      json: h('textarea', {id: 'goal-json', spellcheck: 'false', style: 'display:none', oninput: () => showErrors([])}),
++      modeForm: h('button', {id: 'mode-form', type: 'button', role: 'tab', onclick: () => setMode('form')}, 'Form'),
++      modeJson: h('button', {id: 'mode-json', type: 'button', role: 'tab', onclick: () => setMode('json')}, 'JSON'),
++      errors: h('ul', {class: 'error-list', id: 'goal-errors'}),
++      notice: h('p', {class: 'muted', id: 'action-notice'}, ''),
++      send: h('button', {class: 'primary', id: 'send-goal', type: 'button', disabled: true, onclick: askToSend}, 'Send Goal…'),
++      sendReason: h('span', {class: 'muted', id: 'send-reason'}, ''),
++      cancel: h('button', {class: 'danger', id: 'cancel-goal', type: 'button', disabled: true, onclick: cancelSelected}, 'Cancel Goal'),
++      configSelect: h('select', {id: 'config-select'}),
++      configName: h('input', {type: 'text', id: 'config-name', placeholder: 'Configuration name'}),
++      monitor: h('div', {id: 'goal-monitor'}),
++      history: h('tbody', {id: 'goal-history'}),
++      readOnly: h('p', {class: 'warning', id: 'read-only-notice', style: 'display:none'},
++        'Action execution is disabled or not available from this address. Goals can be inspected but not sent.'),
++      offline: h('p', {class: 'warning', id: 'actions-offline', style: 'display:none'},
++        'The GUI server cannot be reached. Goals already sent keep running on their action servers; nothing is resent when the connection returns.'),
++      exitPolicy: h('span', {id: 'exit-policy'}, ''),
++      dialogAction: h('dd', {class: 'mono'}), dialogServer: h('dd', {class: 'mono'}), dialogGoal: h('pre', {id: 'confirm-values'}),
++      confirm: h('button', {class: 'primary', id: 'confirm-send', type: 'button', onclick: sendConfirmed}, 'Send goal now'),
++    };
++    dom.dialog = h('dialog', {id: 'confirm-dialog'},
++      h('h2', {}, 'Send this action goal?'),
++      h('p', {class: 'warning'}, 'This sends a real goal to a running action server. If that server controls a robot or other hardware, ',
++        'it may start moving immediately. Make sure the surroundings are safe and that you can stop it.'),
++      h('dl', {class: 'readout', style: 'padding:0'}, h('dt', {}, 'Action'), dom.dialogAction, h('dt', {}, 'Server node'), dom.dialogServer),
++      dom.dialogGoal,
++      h('div', {class: 'row'}, dom.confirm,
++        h('button', {class: 'action', id: 'decline-send', type: 'button', onclick: () => { dom.dialog.pendingGoal = null; dom.dialog.close(); }}, 'Do not send')));
++    dom.dialog.addEventListener('cancel', () => { dom.dialog.pendingGoal = null; });
++
++    const configurations = h('div', {class: 'row'},
++      dom.configSelect,
++      h('button', {class: 'action', id: 'config-load', type: 'button', onclick: () => {
++        const values = selected && dom.configSelect.value ? loadConfiguration(selected.type, dom.configSelect.value) : null;
++        if (values === null || !editor) return;
++        putValue(values);
++        notify(`Configuration "${dom.configSelect.value}" loaded into the editor. Nothing was sent.`);
++      }}, 'Load'),
++      h('button', {class: 'action', id: 'config-delete', type: 'button', onclick: () => {
++        if (!selected || !dom.configSelect.value) return;
++        deleteConfiguration(selected.type, dom.configSelect.value);
++        renderConfigurations();
++      }}, 'Delete'),
++      dom.configName,
++      h('button', {class: 'action', id: 'config-save', type: 'button', onclick: () => {
++        const name = dom.configName.value.trim();
++        const current = editor ? readValue() : {value: undefined};
++        if (!selected || !name || current.value === undefined) { notify('Enter a name and valid goal values to save a configuration.', 'error'); return; }
++        notify(saveConfiguration(selected.type, name, current.value) ? `Configuration "${name}" saved in this browser.`
++          : 'The browser refused to store the configuration.', 'note');
++        renderConfigurations();
++        dom.configSelect.value = name;
++      }}, 'Save'));
++
++    container.append(h('div', {class: 'actions-view'},
++      h('section', {}, h('div', {class: 'toolbar'}, dom.filter), h('table', {}, dom.servers)),
++      h('section', {class: 'pad'}, dom.readOnly, dom.editorTitle, dom.editorType,
++        h('p', {class: 'warning', id: 'physical-warning'}, 'Sending a goal makes the action server act. A server that controls a robot will move it. ',
++          'Goals are sent only after you confirm them. ', dom.exitPolicy),
++        h('nav', {class: 'subtabs', style: 'padding:0;background:none'}, dom.modeForm, dom.modeJson,
++          h('span', {style: 'flex:1'}),
++          h('button', {class: 'action', id: 'reset-defaults', type: 'button', style: 'margin:4px 0',
++            onclick: () => { if (editor) { putValue(described.goal_default); notify('Default values restored. Nothing was sent.'); } }}, 'Reset to defaults')),
++        dom.form, dom.json, dom.errors,
++        h('h3', {}, 'Saved configurations (this browser only)'), configurations,
++        h('div', {class: 'row'}, dom.send, dom.cancel, dom.sendReason), dom.notice),
++      h('section', {class: 'pad'}, dom.offline, h('h3', {style: 'margin-top:0'}, 'Selected goal'), dom.monitor,
++        h('h3', {}, 'History (goals sent since the GUI server started)'),
++        h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Sent'), h('th', {}, 'Action'), h('th', {}, 'State'), h('th', {}, 'UUID'), h('th', {}, 'Goal'))), dom.history))),
++      dom.dialog);
++
++    shownGoal = shownHistory = '';
++    setMode(mode);
++    renderConfigurations();
++    refreshSession();
++    stops = [
++      poll(async () => { servers = (await getJSON('/actions/servers')).actions; renderServers(); }, 2000),
++      poll(refreshGoals, 500, () => { dom.offline.style.display = ''; }),
++      poll(refreshSession, 5000),
++    ];
++    if (selected) { const again = selected; selected = null; editor = null; selectAction(again.name, again.type); }
++  },
++
++  /** Stop polling and keep the draft of the action being edited; active goals are unaffected. */
++  unmount() {
++    rememberDraft();
++    for (const stop of stops) stop();
++    stops = [];
++    if (dom.dialog && dom.dialog.open) dom.dialog.close();
++    editor = null;
++  },
++};
+diff --git a/gui/frontend/tabs/actions/store.js b/gui/frontend/tabs/actions/store.js
+new file mode 100644
+index 0000000..1f2e79b
+--- /dev/null
++++ b/gui/frontend/tabs/actions/store.js
+@@ -0,0 +1,60 @@
++/**
++ * Saved goal configurations, kept in this browser's local storage.
++ *
++ * Concepts: a configuration is a named set of goal values for one action
++ * type. Configurations are stored per action type, so they can be reused
++ * with any server of that type. They are data only: loading one fills the
++ * editor and never sends anything.
++ */
++
++const KEY = 'smpa-gui.goal-configurations.v1';
++
++/**
++ * Read all saved configurations as {actionType: {name: goalValues}}.
++ *
++ * Storage that is unavailable or holds something unreadable counts as empty,
++ * so the Actions tab works in private windows and after manual tampering.
++ */
++function readAll(storage) {
++  try {
++    const parsed = JSON.parse(storage.getItem(KEY) || '{}');
++    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
++  } catch (error) {
++    return {};
++  }
++}
++
++/** List the names of the configurations saved for an action type, alphabetically. */
++export function configurationNames(type, storage = window.localStorage) {
++  return Object.keys(readAll(storage)[type] || {}).sort();
++}
++
++/** Return the goal values saved under a name for an action type, or null. */
++export function loadConfiguration(type, name, storage = window.localStorage) {
++  const found = (readAll(storage)[type] || {})[name];
++  return found === undefined ? null : found;
++}
++
++/**
++ * Save goal values under a name for an action type, replacing an earlier entry of that name.
++ *
++ * Return true when the values were stored and false when the browser
++ * refused (for example because storage is disabled or full).
++ */
++export function saveConfiguration(type, name, values, storage = window.localStorage) {
++  const all = readAll(storage);
++  all[type] = {...(all[type] || {}), [name]: values};
++  try {
++    storage.setItem(KEY, JSON.stringify(all));
++    return true;
++  } catch (error) {
++    return false;
++  }
++}
++
++/** Remove one saved configuration; other configurations are untouched. */
++export function deleteConfiguration(type, name, storage = window.localStorage) {
++  const all = readAll(storage);
++  if (all[type]) delete all[type][name];
++  try { storage.setItem(KEY, JSON.stringify(all)); } catch (error) { /* nothing to undo */ }
++}
+diff --git a/gui/frontend/tabs/ros/actions.js b/gui/frontend/tabs/ros/actions.js
+index 0fc3e9c..233f6d7 100644
+--- a/gui/frontend/tabs/ros/actions.js
++++ b/gui/frontend/tabs/ros/actions.js
+@@ -3,7 +3,7 @@
+  *
+  * Concepts: an action server is a node that can execute goals of an action;
+  * an action client is a node that can send them. This view only lists them.
+- * It never sends, cancels or monitors goals.
++ * It never sends, cancels or monitors goals; the separate Actions tab does.
+  */
+ import {getJSON, h, poll} from '../../api.js';
+ 
+@@ -27,7 +27,8 @@ export default {
+     const body = h('tbody', {id: 'action-list'});
+     const count = h('span', {class: 'count'}, '');
+     container.append(h('div', {class: 'column', style: 'flex:1'},
+-      h('div', {class: 'toolbar'}, h('span', {}, 'Discovered actions (read-only)'), count),
++      h('div', {class: 'toolbar'}, h('span', {}, 'Discovered actions (read-only view; goals are sent from the '),
++        h('a', {href: '#actions'}, 'Actions tab'), h('span', {}, ')'), count),
+       h('div', {class: 'detail', style: 'padding:0'}, h('table', {},
+         h('thead', {}, h('tr', {}, h('th', {}, 'Action'), h('th', {}, 'Type'), h('th', {}, 'Servers'), h('th', {}, 'Clients'))), body))));
+     stop = poll(async () => {
+diff --git a/gui/test_gui.sh b/gui/test_gui.sh
+index 448049e..36c931b 100755
+--- a/gui/test_gui.sh
++++ b/gui/test_gui.sh
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ # Run the GUI's own tests. Requires ./install_gui.sh --dev.
+-#   ./test_gui.sh              unit tests and ROS integration tests (real fixture nodes)
++#   ./test_gui.sh              unit tests and ROS integration tests (real fixture nodes and action servers)
+ #   ./test_gui.sh --browser    also drive the frontend in a headless browser; needs
+ #                              Playwright with Chromium in the interpreter named by
+ #                              SMPA_GUI_BROWSER_PYTHON (default: python3)
+@@ -16,7 +16,7 @@ if ! "$gui/.venv/bin/python" -c 'import rclpy' 2>/dev/null; then
+ fi
+ "$gui/.venv/bin/python" -c 'import pytest, httpx' 2>/dev/null || fail 'Test packages are missing; run ./install_gui.sh --dev.'
+ cd "$gui"
+-"$gui/.venv/bin/python" -m pytest tests/test_units.py tests/test_frontend_logic.py tests/test_ros_integration.py -v
++"$gui/.venv/bin/python" -m pytest tests/test_units.py tests/test_frontend_logic.py tests/test_ros_integration.py tests/test_actions.py -v
+ if [[ "${1:-}" == --browser ]]; then
+-    GUI_TEST_PYTHON="$gui/.venv/bin/python" "${SMPA_GUI_BROWSER_PYTHON:-python3}" -m pytest tests/test_browser.py -v
++    GUI_TEST_PYTHON="$gui/.venv/bin/python" "${SMPA_GUI_BROWSER_PYTHON:-python3}" -m pytest tests/test_browser.py tests/test_browser_actions.py -v
+ fi
+diff --git a/gui/tests/conftest.py b/gui/tests/conftest.py
+index e109ef2..f2e294c 100644
+--- a/gui/tests/conftest.py
++++ b/gui/tests/conftest.py
+@@ -145,3 +145,17 @@ def lonely_server():
+     yield base, environment, process
+     if process.poll() is None:
+         stop(process)
++
++
++@pytest.fixture(scope='session')
++def browser():
++    """Start one headless Chromium for all browser tests, or skip them without Playwright."""
++    try:
++        from playwright.sync_api import sync_playwright
++    except ImportError:
++        pytest.skip('Playwright is not installed')
++    (GUI / 'tests' / 'artifacts').mkdir(exist_ok=True)
++    with sync_playwright() as driver:
++        browser = driver.chromium.launch()
++        yield browser
++        browser.close()
+diff --git a/gui/tests/fixtures/fixture_nodes.py b/gui/tests/fixtures/fixture_nodes.py
+index 2a1cc3a..d028404 100644
+--- a/gui/tests/fixtures/fixture_nodes.py
++++ b/gui/tests/fixtures/fixture_nodes.py
+@@ -3,8 +3,13 @@
+ Concepts:
+     A fixture is a small, predictable ROS participant: a talker and listener
+     pair, a node with declared parameters, a node that exists but never
+-    answers (it is not spun), an action server with a client, and one
+-    publisher per supported sensor type. All names start with ``fixture`` so
++    answers (it is not spun), two action servers with a client, and one
++    publisher per supported sensor type.
++
++    The Fibonacci action server behaves like a slow robot action: it sends
++    feedback five times per second, can be cancelled, and has special orders
++    that make it reject a goal, abort, or refuse cancellation. The lookup
++    action server has a goal with nested messages and answers at once. All names start with ``fixture`` so
+     tests can tell them from anything else on the ROS graph.
+ """
+ import array
+@@ -14,7 +19,8 @@ import struct
+ import sys
+ 
+ import rclpy
+-from rclpy.action import ActionClient, ActionServer
++from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
++from rclpy.callback_groups import ReentrantCallbackGroup
+ from rclpy.executors import MultiThreadedExecutor
+ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+ 
+@@ -22,6 +28,7 @@ from example_interfaces.action import Fibonacci
+ from sensor_msgs.msg import (CameraInfo, CompressedImage, Image, Imu, JointState, LaserScan, NavSatFix,
+                              PointCloud2, PointField, Range)
+ from std_msgs.msg import String
++from tf2_msgs.action import LookupTransform
+ 
+ IMAGE_WIDTH, IMAGE_HEIGHT = 64, 48
+ CLOUD_POINTS = 5000
+@@ -107,8 +114,13 @@ class Fixtures:
+         self.parameters.declare_parameter('fixture_flags', [True, False])
+         self.silent.declare_parameter('never_readable', 1)
+ 
+-        self.action_server = ActionServer(self.action_server_node, Fibonacci, '/fixture/fibonacci',
+-                                          self.execute)
++        group = ReentrantCallbackGroup()
++        self.action_server = ActionServer(
++            self.action_server_node, Fibonacci, '/fixture/fibonacci', self.execute, callback_group=group,
++            goal_callback=lambda goal: GoalResponse.REJECT if goal.order < 0 else GoalResponse.ACCEPT,
++            cancel_callback=lambda handle: CancelResponse.REJECT if handle.request.order == 7 else CancelResponse.ACCEPT)
++        self.lookup_server = ActionServer(self.action_server_node, LookupTransform, '/fixture/lookup_transform',
++                                          self.lookup, callback_group=group)
+         self.action_client = ActionClient(self.action_client_node, Fibonacci, '/fixture/fibonacci')
+ 
+         create = self.sensors.create_publisher
+@@ -127,9 +139,40 @@ class Fixtures:
+         self.sensors.create_timer(0.1, self.publish_sensors)
+ 
+     def execute(self, goal_handle):
+-        """Answer a Fibonacci goal immediately; the tests only need the server to exist."""
++        """Compute a Fibonacci sequence slowly, one number and one feedback message every 0.2 seconds.
++
++        A negative order was already rejected before this runs. Order 13
++        aborts after the first feedback. A cancel request ends the goal as
++        cancelled with the numbers computed so far (order 7 refuses cancel
++        requests and therefore always completes). Otherwise the goal
++        succeeds with ``order + 1`` numbers.
++        """
++        import time
++        sequence = [0, 1]
++        for index in range(1, goal_handle.request.order):
++            if goal_handle.is_cancel_requested:
++                goal_handle.canceled()
++                return Fibonacci.Result(sequence=sequence)
++            sequence.append(sequence[index] + sequence[index - 1])
++            goal_handle.publish_feedback(Fibonacci.Feedback(sequence=sequence))
++            if goal_handle.request.order == 13:
++                goal_handle.abort()
++                return Fibonacci.Result(sequence=sequence)
++            time.sleep(0.2)
++        goal_handle.succeed()
++        return Fibonacci.Result(sequence=sequence[:goal_handle.request.order + 1])
++
++    def lookup(self, goal_handle):
++        """Answer a lookup goal at once, echoing goal values so tests can see they arrived intact."""
++        goal = goal_handle.request
++        result = LookupTransform.Result()
++        result.transform.header.frame_id = goal.target_frame
++        result.transform.child_frame_id = goal.source_frame
++        result.transform.header.stamp = goal.source_time
++        result.transform.transform.translation.x = float(goal.timeout.sec)
++        result.transform.transform.translation.y = 1.0 if goal.advanced else 0.0
+         goal_handle.succeed()
+-        return Fibonacci.Result(sequence=[0, 1])
++        return result
+ 
+     def publish_chatter(self):
+         """Publish a numbered text message ten times per second."""
+@@ -228,7 +271,7 @@ def main():
+     """
+     rclpy.init()
+     fixtures = Fixtures()
+-    executor = MultiThreadedExecutor(num_threads=2)
++    executor = MultiThreadedExecutor(num_threads=8)
+     for node in fixtures.spun:
+         executor.add_node(node)
+     print('FIXTURES READY', flush=True)
+diff --git a/gui/tests/test_actions.py b/gui/tests/test_actions.py
+new file mode 100644
+index 0000000..a5651a9
+--- /dev/null
++++ b/gui/tests/test_actions.py
+@@ -0,0 +1,372 @@
++"""Tests of interactive action execution against real ROS 2 fixture action servers.
++
++The server under test is the real GUI process; goals travel over HTTP exactly
++as the browser sends them. The Fibonacci fixture server sends feedback five
++times per second and has special orders: negative is rejected, 13 aborts, 7
++refuses cancellation.
++"""
++import json
++import os
++import subprocess
++import time
++import uuid
++from urllib.error import HTTPError
++from urllib.parse import urlencode
++from urllib.request import Request, urlopen
++
++import pytest
++
++from conftest import GUI, PYTHON, fetch, start_server, stop
++
++API = '/api/v1'
++FIBONACCI = dict(action='/fixture/fibonacci', type='example_interfaces/action/Fibonacci')
++LOOKUP = dict(action='/fixture/lookup_transform', type='tf2_msgs/action/LookupTransform')
++
++
++def token(base):
++    """Fetch the session token the way the page does."""
++    return fetch(base + API + '/actions/session')['token']
++
++
++def post(base, path, body, headers=None, session=True):
++    """Send a JSON POST and return the HTTP status and parsed body, also for error statuses."""
++    send = {'Content-Type': 'application/json'}
++    if session:
++        send['X-SMPA-GUI-Token'] = token(base)
++    send.update(headers or {})
++    request = Request(base + API + path, data=json.dumps(body).encode(), headers=send, method='POST')
++    try:
++        with urlopen(request, timeout=15) as response:
++            return response.status, json.load(response)
++    except HTTPError as error:
++        return error.code, json.load(error)
++
++
++def submit(base, target, goal, request_id=None):
++    """Submit a goal and return the status and the response body."""
++    return post(base, '/actions/goals', dict(target, goal=goal, request_id=request_id or uuid.uuid4().hex))
++
++
++def goal(base, goal_id):
++    """Read one goal record."""
++    return fetch(f'{base}{API}/actions/goals/{goal_id}')['goal']
++
++
++def wait_for_state(base, goal_id, states, timeout=20.0):
++    """Wait until a goal reaches one of the given states and return its record."""
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        record = goal(base, goal_id)
++        if record['state'] in states:
++            return record
++        time.sleep(0.1)
++    raise AssertionError(f"goal stayed {record['state']}, expected one of {states}")
++
++
++def wait_until(condition, timeout=15.0, message='condition was not reached'):
++    """Poll a condition until it holds or fail after the timeout."""
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if condition():
++            return
++        time.sleep(0.2)
++    raise AssertionError(message)
++
++
++def gateway_is_action_client(base):
++    """Ask ROS discovery whether the gateway node currently appears as a client of the Fibonacci action."""
++    actions = fetch(base + API + '/ros/actions')['actions']
++    return '/smpa_gui' in next(item for item in actions if item['name'] == '/fixture/fibonacci')['clients']
++
++
++def test_servers_are_discovered_with_availability(server):
++    """Both fixture actions are listed with their types and marked available."""
++    actions = {item['name']: item for item in fetch(server + API + '/actions/servers')['actions']}
++    assert actions['/fixture/fibonacci']['types'] == ['example_interfaces/action/Fibonacci']
++    assert actions['/fixture/fibonacci']['available'] and actions['/fixture/fibonacci']['servers'] == ['/fixture_action_server']
++    assert actions['/fixture/lookup_transform']['types'] == ['tf2_msgs/action/LookupTransform']
++
++
++def test_interface_is_derived_from_the_ros_definition(server):
++    """Goal, feedback and result fields come from the installed interface, including nested messages."""
++    simple = fetch(server + API + '/actions/interface?' + urlencode(dict(type=FIBONACCI['type'])))
++    assert simple['goal']['fields'] == [dict(name='order', schema=dict(kind='integer', type='int32',
++                                                                     minimum=-2 ** 31, maximum=2 ** 31 - 1))]
++    assert simple['goal_default'] == {'order': 0}
++    assert simple['feedback']['fields'][0]['schema']['kind'] == 'array'
++    nested = fetch(server + API + '/actions/interface?' + urlencode(dict(type=LOOKUP['type'])))
++    fields = {field['name']: field['schema'] for field in nested['goal']['fields']}
++    assert fields['target_frame'] == dict(kind='string', type='string', max_length=None)
++    assert fields['advanced'] == dict(kind='boolean', type='boolean')
++    assert fields['source_time']['type'] == 'builtin_interfaces/msg/Time'
++    assert [field['name'] for field in fields['source_time']['fields']] == ['sec', 'nanosec']
++    assert nested['goal_default']['timeout'] == {'sec': 0, 'nanosec': 0}
++    with pytest.raises(HTTPError) as missing:
++        fetch(server + API + '/actions/interface?' + urlencode(dict(type='no_pkg/action/Nothing')))
++    assert missing.value.code == 404
++
++
++def test_goal_succeeds_with_feedback_result_uuid_and_timestamps(server):
++    """A submitted goal is accepted, streams feedback, and ends with its result and timestamps."""
++    before = time.time()
++    status, body = submit(server, FIBONACCI, {'order': 5})
++    assert status == 201
++    record = body['goal']
++    assert uuid.UUID(record['goal_id']) and record['goal'] == {'order': 5} and record['state'] in ('sending', 'accepted', 'executing')
++    running = wait_for_state(server, record['goal_id'], ('executing',))
++    assert running['accepted_at'] >= before and running['finished_at'] is None
++    done = wait_for_state(server, record['goal_id'], ('succeeded',))
++    assert done['result'] == {'sequence': [0, 1, 1, 2, 3, 5]}
++    assert done['feedback_count'] == 4 and [item['number'] for item in done['feedback']] == [1, 2, 3, 4]
++    assert done['feedback'][-1]['message'] == {'sequence': [0, 1, 1, 2, 3, 5]}
++    assert before <= done['created_at'] <= done['accepted_at'] <= done['finished_at']
++    assert done['error'] is None and done['cancel_requested_at'] is None
++    assert fetch(server + API + '/actions/goals')['goals'][0]['goal_id'] == record['goal_id']
++
++
++def test_nested_goal_values_reach_the_server_intact(server):
++    """Strings, booleans and nested time values arrive at the action server unchanged."""
++    values = {'target_frame': 'map', 'source_frame': 'base_link', 'source_time': {'sec': 12, 'nanosec': 34},
++              'timeout': {'sec': 3, 'nanosec': 0}, 'advanced': True}
++    status, body = submit(server, LOOKUP, values)
++    assert status == 201
++    done = wait_for_state(server, body['goal']['goal_id'], ('succeeded',))
++    transform = done['result']['transform']
++    assert transform['header']['frame_id'] == 'map' and transform['child_frame_id'] == 'base_link'
++    assert transform['header']['stamp'] == {'sec': 12, 'nanosec': 34}
++    assert transform['transform']['translation']['x'] == 3.0 and transform['transform']['translation']['y'] == 1.0
++    assert done['goal']['fixed_frame'] == '' and done['goal']['target_time'] == {'sec': 0, 'nanosec': 0}
++
++
++@pytest.mark.parametrize('target, values, path, fragment', [
++    (FIBONACCI, {'order': 'five'}, 'order', 'whole number'),
++    (FIBONACCI, {'order': 2.5}, 'order', 'whole number'),
++    (FIBONACCI, {'order': True}, 'order', 'whole number'),
++    (FIBONACCI, {'order': 2 ** 31}, 'order', 'between'),
++    (FIBONACCI, {'order': 1, 'speed': 2}, 'speed', 'not a field'),
++    (LOOKUP, {'advanced': 1}, 'advanced', 'true or false'),
++    (LOOKUP, {'target_frame': 7}, 'target_frame', 'text'),
++    (LOOKUP, {'source_time': {'sec': -2 ** 40}}, 'source_time.sec', 'between'),
++    (LOOKUP, {'source_time': 5}, 'source_time', 'object'),
++])
++def test_invalid_goal_fields_are_refused_and_nothing_is_sent(server, target, values, path, fragment):
++    """Values that do not fit the ROS field types give 422 naming the field, and create no goal."""
++    count = len(fetch(server + API + '/actions/goals')['goals'])
++    status, body = submit(server, target, values)
++    assert status == 422
++    assert [error['path'] for error in body['errors']] == [path] and fragment in body['errors'][0]['message']
++    assert len(fetch(server + API + '/actions/goals')['goals']) == count
++
++
++def test_rejected_and_aborted_goals_are_reported(server):
++    """A goal the server rejects ends as rejected; a goal the server aborts ends as aborted with its result."""
++    status, body = submit(server, FIBONACCI, {'order': -1})
++    assert status == 201
++    rejected = wait_for_state(server, body['goal']['goal_id'], ('rejected',))
++    assert rejected['accepted_at'] is None and 'rejected' in rejected['error'] and rejected['result'] is None
++    _, body = submit(server, FIBONACCI, {'order': 13})
++    aborted = wait_for_state(server, body['goal']['goal_id'], ('aborted',))
++    assert aborted['result'] == {'sequence': [0, 1, 1]} and aborted['feedback_count'] == 1
++
++
++def test_cancellation(server):
++    """An active goal can be cancelled; finished goals cannot; a server may refuse cancellation."""
++    _, body = submit(server, FIBONACCI, {'order': 40})
++    goal_id = body['goal']['goal_id']
++    wait_for_state(server, goal_id, ('executing',))
++    status, cancel = post(server, f'/actions/goals/{goal_id}/cancel', {})
++    assert status == 200 and cancel['goal']['cancel_requested_at'] is not None
++    canceled = wait_for_state(server, goal_id, ('canceled',))
++    assert canceled['cancel_answer'] == 'accepted' and 2 <= len(canceled['result']['sequence']) < 40
++    status, again = post(server, f'/actions/goals/{goal_id}/cancel', {})
++    assert status == 409 and 'canceled' in again['detail']
++    assert post(server, '/actions/goals/' + str(uuid.uuid4()) + '/cancel', {})[0] == 404
++
++    _, body = submit(server, FIBONACCI, {'order': 7})
++    stubborn = body['goal']['goal_id']
++    wait_for_state(server, stubborn, ('executing',))
++    post(server, f'/actions/goals/{stubborn}/cancel', {})
++    wait_until(lambda: goal(server, stubborn)['cancel_answer'] == 'rejected', message='the refusal was not recorded')
++    assert wait_for_state(server, stubborn, ('succeeded',))['result']['sequence'][-1] == 13
++
++
++def test_missing_server_and_unknown_type(server):
++    """Without an action server the goal is refused with 409; an uninstalled type gives 404."""
++    started = time.monotonic()
++    status, body = submit(server, dict(FIBONACCI, action='/nobody/serves/this'), {'order': 1})
++    assert status == 409 and 'No action server' in body['detail'] and time.monotonic() - started < 6
++    status, body = submit(server, dict(action='/fixture/fibonacci', type='no_pkg/action/Nothing'), {})
++    assert status == 404 and 'not available' in body['detail']
++    wait_until(lambda: not gateway_is_action_client(server))
++
++
++def test_concurrent_goals_run_independently(server):
++    """Several goals on the same server run at the same time and keep their own feedback and results."""
++    ids = {order: submit(server, FIBONACCI, {'order': order})[1]['goal']['goal_id'] for order in (4, 6, 8)}
++    assert len(set(ids.values())) == 3
++    wait_until(lambda: all(goal(server, goal_id)['state'] == 'executing' for goal_id in ids.values()),
++               message='the goals did not execute concurrently')
++    for order, goal_id in ids.items():
++        done = wait_for_state(server, goal_id, ('succeeded',))
++        assert len(done['result']['sequence']) == order + 1 and done['feedback_count'] == order - 1
++
++
++def test_repeating_a_request_identifier_never_sends_a_second_goal(server):
++    """A retried submission with the same request identifier returns the first goal."""
++    request_id = uuid.uuid4().hex
++    count = len(fetch(server + API + '/actions/goals')['goals'])
++    status, first = submit(server, FIBONACCI, {'order': 3}, request_id)
++    status_again, second = submit(server, FIBONACCI, {'order': 3}, request_id)
++    assert (status, status_again) == (201, 200) and second['goal']['duplicate'] is True
++    assert second['goal']['goal_id'] == first['goal']['goal_id']
++    wait_for_state(server, first['goal']['goal_id'], ('succeeded',))
++    assert submit(server, FIBONACCI, {'order': 9}, request_id)[1]['goal']['goal'] == {'order': 3}
++    assert len(fetch(server + API + '/actions/goals')['goals']) == count + 1
++
++
++def test_reading_never_sends_goals(server):
++    """Reading servers, interfaces, the session and the history any number of times creates no goal."""
++    count = len(fetch(server + API + '/actions/goals')['goals'])
++    for _ in range(3):
++        fetch(server + API + '/actions/servers')
++        fetch(server + API + '/actions/session')
++        fetch(server + API + '/actions/interface?' + urlencode(dict(type=FIBONACCI['type'])))
++        fetch(server + API + '/actions/goals')
++    assert len(fetch(server + API + '/actions/goals')['goals']) == count
++
++
++def test_action_client_exists_only_while_a_goal_is_active(server):
++    """The gateway appears as an action client during a goal and disappears from the ROS graph afterwards."""
++    wait_until(lambda: not gateway_is_action_client(server))
++    _, body = submit(server, FIBONACCI, {'order': 12})
++    wait_until(lambda: gateway_is_action_client(server), message='the gateway never appeared as an action client')
++    post(server, f"/actions/goals/{body['goal']['goal_id']}/cancel", {})
++    wait_for_state(server, body['goal']['goal_id'], ('canceled',))
++    wait_until(lambda: not gateway_is_action_client(server), message='the action client was not removed after the goal')
++
++
++def test_access_controls(server):
++    """Goals need the session token, a JSON body, a local origin and a local Host header."""
++    body = dict(FIBONACCI, goal={'order': 1}, request_id=uuid.uuid4().hex)
++    count = len(fetch(server + API + '/actions/goals')['goals'])
++    assert post(server, '/actions/goals', body, session=False)[0] == 403
++    assert post(server, '/actions/goals', body, headers={'X-SMPA-GUI-Token': 'wrong'}, session=False)[0] == 403
++    assert post(server, '/actions/goals', body, headers={'Origin': 'https://example.com'})[0] == 403
++    assert post(server, '/actions/goals', body, headers={'Host': 'attacker.example:8765'})[0] == 403
++    assert post(server, '/actions/goals', body, headers={'Content-Type': 'text/plain'})[0] in (415, 422)
++    assert post(server, '/actions/goals', dict(body, request_id='x'))[0] == 422
++    assert post(server, '/actions/goals', dict(body, action='no-leading-slash'))[0] == 422
++    request = Request(server + API + '/actions/session', headers={'Origin': 'https://example.com'})
++    with pytest.raises(HTTPError) as foreign:
++        urlopen(request, timeout=5)
++    assert foreign.value.code == 403
++    assert len(fetch(server + API + '/actions/goals')['goals']) == count
++    assert post(server, '/actions/goals', body, headers={'Origin': server})[0] == 201
++
++
++def run_lonely(arguments=()):
++    """Start fixture nodes and a GUI server with extra arguments in a fresh isolated domain."""
++    from conftest import isolated_environment
++    environment = isolated_environment()
++    fixtures = subprocess.Popen([PYTHON, str(GUI / 'tests/fixtures/fixture_nodes.py')], env=environment,
++                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    assert 'FIXTURES READY' in fixtures.stdout.readline()
++    import conftest
++    original = conftest.PYTHON
++    port = conftest.free_port()
++    process = subprocess.Popen([original, '-m', 'backend', '--port', str(port), *arguments], cwd=GUI,
++                               env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    base = f'http://127.0.0.1:{port}'
++    wait_until(lambda: reachable(base), timeout=20, message='the GUI server did not start')
++    wait_until(lambda: any(item['available'] for item in fetch(base + API + '/actions/servers')['actions']), timeout=30,
++               message='the action server was not discovered')
++    return environment, fixtures, process, base
++
++
++def reachable(base):
++    """Tell whether the GUI server answers its health check."""
++    try:
++        fetch(base + API + '/health', timeout=1)
++        return True
++    except OSError:
++        return False
++
++
++def fibonacci_status(environment):
++    """Read the Fibonacci server's own goal status list with the ros2 command-line tool.
++
++    The status topic lists every goal the server knows with its status
++    number (2 executing, 4 succeeded, 5 cancelled). Return those numbers.
++    """
++    output = subprocess.run(['ros2', 'topic', 'echo', '--once', '--qos-durability', 'transient_local',
++                             '--qos-reliability', 'reliable', '/fixture/fibonacci/_action/status'],
++                            env=environment, capture_output=True, text=True, timeout=30).stdout
++    return [int(line.split(':')[1]) for line in output.splitlines() if line.strip().startswith('status:')]
++
++
++def test_read_only_mode_refuses_goals():
++    """With --read-only the session offers no token and goals are refused."""
++    environment, fixtures, process, base = run_lonely(['--read-only'])
++    try:
++        session = fetch(base + API + '/actions/session')
++        assert session['enabled'] is False and session['token'] is None
++        body = dict(FIBONACCI, goal={'order': 1}, request_id=uuid.uuid4().hex)
++        status, answer = post(base, '/actions/goals', body, headers={'X-SMPA-GUI-Token': 'anything'}, session=False)
++        assert status == 403 and 'read-only' in answer['detail']
++        assert fetch(base + API + '/actions/goals')['goals'] == []
++    finally:
++        stop(process)
++        stop(fixtures)
++
++
++def test_stopping_the_gui_cancels_active_goals_by_default():
++    """Ctrl+C on the GUI asks the server to cancel the goals the GUI still has running."""
++    environment, fixtures, process, base = run_lonely()
++    try:
++        _, body = submit(base, FIBONACCI, {'order': 200})
++        wait_for_state(base, body['goal']['goal_id'], ('executing',))
++        stop(process)
++        assert process.returncode == 0
++        wait_until(lambda: fibonacci_status(environment) == [5], timeout=40,
++                   message='the action server did not report the goal as cancelled')
++    finally:
++        if process.poll() is None:
++            stop(process)
++        stop(fixtures)
++
++
++def test_goals_survive_the_gui_when_asked_to_and_new_gateways_start_empty():
++    """With --keep-goals-on-exit the goal keeps executing on its server; a restarted GUI has no history."""
++    environment, fixtures, process, base = run_lonely(['--keep-goals-on-exit'])
++    try:
++        old_token = token(base)
++        _, body = submit(base, FIBONACCI, {'order': 200})
++        wait_for_state(base, body['goal']['goal_id'], ('executing',))
++        stop(process)
++        time.sleep(1.5)
++        assert fibonacci_status(environment) == [2], 'the goal must still be executing on the server'
++        process, base = start_server(environment)
++        assert fetch(base + API + '/actions/goals')['goals'] == []
++        stale = dict(FIBONACCI, goal={'order': 1}, request_id=uuid.uuid4().hex)
++        assert post(base, '/actions/goals', stale, headers={'X-SMPA-GUI-Token': old_token}, session=False)[0] == 403
++    finally:
++        if process.poll() is None:
++            stop(process)
++        stop(fixtures)
++
++
++def test_a_vanished_server_marks_the_goal_as_lost():
++    """If the action server process dies during a goal, the goal ends as lost instead of hanging forever."""
++    environment, fixtures, process, base = run_lonely()
++    try:
++        _, body = submit(base, FIBONACCI, {'order': 200})
++        wait_for_state(base, body['goal']['goal_id'], ('executing',))
++        fixtures.kill()
++        fixtures.wait()
++        lost = wait_for_state(base, body['goal']['goal_id'], ('lost',), timeout=40)
++        assert 'disappeared' in lost['error'] and lost['result'] is None and lost['finished_at'] is not None
++        assert fetch(base + API + '/health')['status'] == 'ok'
++    finally:
++        stop(process)
++        if fixtures.poll() is None:
++            stop(fixtures)
+diff --git a/gui/tests/test_browser.py b/gui/tests/test_browser.py
+index 654df38..fddc82f 100644
+--- a/gui/tests/test_browser.py
++++ b/gui/tests/test_browser.py
+@@ -35,16 +35,6 @@ def wait_for(condition, timeout=15.0, message='condition was not reached'):
+     raise AssertionError(message)
+ 
+ 
+-@pytest.fixture(scope='module')
+-def browser():
+-    """Start one headless Chromium for all browser tests."""
+-    ARTIFACTS.mkdir(exist_ok=True)
+-    with playwright.sync_playwright() as driver:
+-        browser = driver.chromium.launch()
+-        yield browser
+-        browser.close()
+-
+-
+ @pytest.fixture(scope='module')
+ def page(server, browser):
+     """Open the GUI in one page shared by the tests and fail on any page error.
+@@ -63,9 +53,9 @@ def page(server, browser):
+     assert errors == [], f'The page reported errors: {errors}'
+ 
+ 
+-def test_shell_has_three_tabs_and_four_ros_views(page):
+-    """The primary tabs are ROS 2, Sensors and SMPA; the image viewer is not a ROS 2 view any more."""
+-    assert page.locator('#primary-tabs button').all_inner_texts() == ['ROS 2', 'Sensors', 'SMPA']
++def test_shell_has_four_tabs_and_four_ros_views(page):
++    """The primary tabs are ROS 2, Sensors, Actions and SMPA; the image viewer is not a ROS 2 view."""
++    assert page.locator('#primary-tabs button').all_inner_texts() == ['ROS 2', 'Sensors', 'Actions', 'SMPA']
+     assert page.locator('.subtabs button').all_inner_texts() == ['Graph', 'Topics', 'Parameters', 'Actions']
+     page.wait_for_function("document.getElementById('connection').textContent.includes('domain')")
+ 
+diff --git a/gui/tests/test_browser_actions.py b/gui/tests/test_browser_actions.py
+new file mode 100644
+index 0000000..c1aa451
+--- /dev/null
++++ b/gui/tests/test_browser_actions.py
+@@ -0,0 +1,345 @@
++"""Drive the Actions tab in a headless browser against real fixture action servers.
++
++The tests work through one page in order, like a user. The count of goals
++known to the gateway is the measure of whether anything was sent: every step
++that must not send a goal asserts that the count did not change.
++"""
++from pathlib import Path
++import time
++
++import pytest
++
++from conftest import fetch, stop
++
++pytestmark = pytest.mark.browser
++ARTIFACTS = Path(__file__).resolve().parent / 'artifacts'
++API = '/api/v1'
++
++
++def goals(base):
++    """Return the goal records the gateway currently holds, newest first."""
++    return fetch(base + API + '/actions/goals')['goals']
++
++
++def wait_for(condition, timeout=20.0, message='condition was not reached'):
++    """Poll a condition until it holds or fail after the timeout."""
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if condition():
++            return
++        time.sleep(0.2)
++    raise AssertionError(message)
++
++
++@pytest.fixture(scope='module')
++def page(server, browser):
++    """Open the Actions tab in a fresh browser context and fail on any page error."""
++    errors = []
++    context = browser.new_context(viewport={'width': 1600, 'height': 1000})
++    page = context.new_page()
++    page.on('pageerror', lambda error: errors.append(str(error)))
++    page.goto(server + '/#actions')
++    page.wait_for_selector('tr[data-action="/fixture/fibonacci"]')
++    yield page
++    context.close()
++    assert errors == [], f'The page reported errors: {errors}'
++
++
++def choose(page, action):
++    """Select an action server in the list and wait for its editor."""
++    page.click(f'tr[data-action="{action}"]')
++    page.wait_for_function(f"document.getElementById('editor-action').textContent === '{action}'")
++    page.wait_for_selector('#goal-editor [data-path], #goal-editor .muted')
++
++
++def send(page, confirm=True):
++    """Click Send Goal, then confirm or decline in the dialog."""
++    page.click('#send-goal')
++    page.wait_for_selector('#confirm-dialog[open]')
++    page.click('#confirm-send' if confirm else '#decline-send')
++    page.wait_for_selector('#confirm-dialog:not([open])', state='attached')
++
++
++def set_order(page, value):
++    """Type a value into the Fibonacci goal's only field."""
++    page.fill('#goal-editor [data-path="order"]', str(value))
++
++
++def test_selecting_and_editing_never_sends(page, server):
++    """Opening the tab, selecting servers and editing values sends nothing."""
++    count = len(goals(server))
++    assert 'available' in page.inner_text('tr[data-action="/fixture/fibonacci"]')
++    assert 'example_interfaces/action/Fibonacci' in page.inner_text('tr[data-action="/fixture/fibonacci"]')
++    assert page.is_disabled('#send-goal') and page.is_disabled('#cancel-goal')
++    choose(page, '/fixture/fibonacci')
++    field = page.locator('#goal-editor [data-path="order"]')
++    assert field.get_attribute('type') == 'number' and field.input_value() == '0'
++    assert 'int32' in page.inner_text('#goal-editor')
++    assert 'robot will move' in page.inner_text('#physical-warning')
++    set_order(page, 3)
++    choose(page, '/fixture/lookup_transform')
++    choose(page, '/fixture/fibonacci')
++    assert field.input_value() == '3', 'the draft of an action is kept while switching'
++    time.sleep(1)
++    assert len(goals(server)) == count
++
++
++def test_invalid_values_are_caught_before_the_dialog(page, server):
++    """A value that does not fit the field type is reported and no dialog opens."""
++    count = len(goals(server))
++    set_order(page, 2.5)
++    page.click('#send-goal')
++    assert 'whole number' in page.inner_text('#goal-errors')
++    assert page.locator('#confirm-dialog[open]').count() == 0
++    assert 'invalid' in page.locator('#goal-editor [data-path="order"]').get_attribute('class')
++    set_order(page, 99999999999)
++    page.click('#send-goal')
++    assert 'between' in page.inner_text('#goal-errors') and page.locator('#confirm-dialog[open]').count() == 0
++    assert len(goals(server)) == count
++
++
++def test_declining_the_dialog_sends_nothing_and_confirming_sends_once(page, server):
++    """The dialog names the action, server and values with a warning; only confirming sends, exactly once."""
++    count = len(goals(server))
++    set_order(page, 5)
++    page.click('#send-goal')
++    page.wait_for_selector('#confirm-dialog[open]')
++    dialog = page.inner_text('#confirm-dialog')
++    assert '/fixture/fibonacci' in dialog and '/fixture_action_server' in dialog and '"order": 5' in dialog
++    assert 'robot' in dialog and 'may start moving' in dialog
++    page.screenshot(path=str(ARTIFACTS / 'actions-confirm.png'))
++    page.click('#decline-send')
++    time.sleep(0.7)
++    assert len(goals(server)) == count
++    page.click('#send-goal')
++    page.wait_for_selector('#confirm-dialog[open]')
++    page.keyboard.press('Escape')
++    time.sleep(0.7)
++    assert len(goals(server)) == count, 'closing the dialog with Escape must not send'
++
++    send(page)
++    page.wait_for_selector('#goal-state[data-state="succeeded"]', timeout=20000)
++    assert len(goals(server)) == count + 1
++    record = goals(server)[0]
++    assert page.inner_text('#goal-uuid') == record['goal_id']
++    assert '"sequence"' in page.inner_text('#goal-result') and '5' in page.inner_text('#goal-result')
++    feedback = page.inner_text('#goal-feedback')
++    assert '#4' in feedback and '#1' in feedback and 'Feedback (4 received' in page.inner_text('#goal-monitor')
++    assert page.locator(f'tr[data-goal="{record["goal_id"]}"][data-state="succeeded"]').count() == 1
++    monitor = page.inner_text('#goal-monitor')
++    assert 'Sent' in monitor and 'Accepted' in monitor and 'Finished' in monitor and 'not requested' in monitor
++    page.screenshot(path=str(ARTIFACTS / 'actions.png'))
++
++
++def test_live_feedback_and_cancellation(page, server):
++    """Feedback appears while the goal runs, and Cancel Goal stops it."""
++    set_order(page, 60)
++    send(page)
++    page.wait_for_selector('#goal-state[data-state="executing"]', timeout=15000)
++    assert 'Waiting for the result' in page.inner_text('#goal-result')
++    first = page.inner_text('#goal-feedback')
++    page.wait_for_function("document.getElementById('goal-feedback').children.length >= 4")
++    assert page.inner_text('#goal-feedback') != first
++    assert page.is_enabled('#cancel-goal')
++    page.click('#cancel-goal')
++    page.wait_for_selector('#goal-state[data-state="canceled"]', timeout=15000)
++    assert 'server answer: accepted' in page.inner_text('#goal-cancel')
++    assert page.is_disabled('#cancel-goal')
++    assert goals(server)[0]['state'] == 'canceled'
++
++
++def test_rejected_goal_is_shown(page, server):
++    """A goal the server rejects is shown as rejected with an explanation."""
++    set_order(page, -1)
++    send(page)
++    page.wait_for_selector('#goal-state[data-state="rejected"]', timeout=15000)
++    assert 'rejected the goal' in page.inner_text('#goal-error')
++    assert page.is_disabled('#cancel-goal')
++
++
++def test_concurrent_goals_are_listed_and_selectable(page, server):
++    """Two goals run at the same time; each can be selected and shows its own feedback."""
++    set_order(page, 24)
++    send(page)
++    set_order(page, 26)
++    send(page)
++    wait_for(lambda: [goal['state'] for goal in goals(server)[:2]] == ['executing', 'executing'],
++             message='the two goals did not execute concurrently')
++    newest, older = goals(server)[0], goals(server)[1]
++    page.wait_for_function("document.querySelectorAll('#goal-history tr[data-state=\"executing\"]').length === 2")
++    page.click(f'tr[data-goal="{older["goal_id"]}"]')
++    assert page.inner_text('#goal-uuid') == older['goal_id'] and '"order": 24' in page.inner_text('#goal-values')
++    page.click(f'tr[data-goal="{newest["goal_id"]}"]')
++    assert '"order": 26' in page.inner_text('#goal-values')
++    page.click('#cancel-goal')
++    page.wait_for_selector('#goal-state[data-state="canceled"]', timeout=15000)
++    assert goals(server)[1]['state'] in ('executing', 'succeeded'), 'cancelling one goal must not affect the other'
++    wait_for(lambda: goals(server)[1]['state'] == 'succeeded')
++
++
++def test_nested_form_json_mode_and_saved_configurations(page, server):
++    """Nested goals get a generated form; JSON editing and saved configurations work and never send."""
++    count = len(goals(server))
++    choose(page, '/fixture/lookup_transform')
++    assert page.locator('#goal-editor [data-path="target_frame"]').get_attribute('type') == 'text'
++    assert page.locator('#goal-editor [data-path="advanced"]').get_attribute('type') == 'checkbox'
++    assert page.locator('#goal-editor [data-path="source_time.sec"]').get_attribute('type') == 'number'
++    page.fill('#goal-editor [data-path="target_frame"]', 'map')
++    page.fill('#goal-editor [data-path="timeout.sec"]', '4')
++    page.check('#goal-editor [data-path="advanced"]')
++    page.click('#mode-json')
++    text = page.input_value('#goal-json')
++    assert '"target_frame": "map"' in text and '"advanced": true' in text and '"sec": 4' in text
++    page.fill('#goal-json', '{"target_frame": "odom", "source_frame": "base", "timeout": {"sec": 2}}')
++    page.click('#mode-form')
++    assert page.input_value('#goal-editor [data-path="target_frame"]') == 'odom'
++    assert page.input_value('#goal-editor [data-path="timeout.sec"]') == '2'
++    assert page.input_value('#goal-editor [data-path="timeout.nanosec"]') == '0', 'omitted fields take their defaults'
++    page.click('#mode-json')
++    page.fill('#goal-json', '{"target_frame": ')
++    page.click('#mode-form')
++    assert 'not valid JSON' in page.inner_text('#goal-errors') and page.is_visible('#goal-json')
++    page.click('#send-goal')
++    assert 'not valid JSON' in page.inner_text('#goal-errors') and page.locator('#confirm-dialog[open]').count() == 0
++    page.fill('#goal-json', '{"target_frame": "odom", "source_frame": "base", "wrong": 1}')
++    page.click('#send-goal')
++    assert 'not a field' in page.inner_text('#goal-errors')
++    page.fill('#goal-json', '{"target_frame": "odom", "source_frame": "base", "timeout": {"sec": 2}}')
++    page.click('#mode-form')
++
++    page.fill('#config-name', 'odom lookup')
++    page.click('#config-save')
++    page.click('#reset-defaults')
++    assert page.input_value('#goal-editor [data-path="target_frame"]') == ''
++    page.select_option('#config-select', 'odom lookup')
++    page.click('#config-load')
++    assert page.input_value('#goal-editor [data-path="target_frame"]') == 'odom'
++    assert 'Nothing was sent' in page.inner_text('#action-notice')
++    time.sleep(0.7)
++    assert len(goals(server)) == count
++
++    send(page)
++    page.wait_for_selector('#goal-state[data-state="succeeded"]', timeout=15000)
++    result = page.inner_text('#goal-result')
++    assert '"frame_id": "odom"' in result and '"child_frame_id": "base"' in result
++    page.screenshot(path=str(ARTIFACTS / 'actions-nested.png'))
++
++
++def test_generated_form_handles_arrays_and_nested_messages(page):
++    """The form component adds and removes array elements and edits nested messages inside arrays."""
++    result = page.evaluate("""async () => {
++      const {createEditor, defaultFor, validate} = await import('/tabs/actions/form.js');
++      const integer = {kind: 'integer', type: 'int32', minimum: -2147483648, maximum: 2147483647};
++      const point = {kind: 'message', type: 'pkg/msg/Point', fields: [{name: 'x', schema: {kind: 'float', type: 'double', limit: null}},
++                                                                     {name: 'name', schema: {kind: 'string', type: 'string', max_length: null}}]};
++      const schema = {kind: 'message', type: 'pkg/msg/Goal', fields: [
++        {name: 'numbers', schema: {kind: 'array', item: integer, fixed_size: null, max_size: 2}},
++        {name: 'fixed', schema: {kind: 'array', item: integer, fixed_size: 3, max_size: null}},
++        {name: 'points', schema: {kind: 'array', item: point, fixed_size: null, max_size: null}}]};
++      const editor = createEditor(schema, defaultFor(schema), () => {});
++      document.body.append(editor.element);
++      const type = (path, text) => { const input = editor.element.querySelector(`[data-path="${path}"]`); input.value = text; input.dispatchEvent(new Event('input')); };
++      editor.element.querySelector('[data-add="numbers"]').click();
++      editor.element.querySelector('[data-add="numbers"]').click();
++      const addAfterMaximum = editor.element.querySelector('[data-add="numbers"]') !== null;
++      type('numbers[1]', '7');
++      type('fixed[2]', 'abc');
++      editor.element.querySelector('[data-add="points"]').click();
++      editor.element.querySelector('[data-add="points"]').click();
++      type('points[1].x', '2.5'); type('points[1].name', 'goal');
++      editor.element.querySelector('[data-path="points"] .goal-array-item button').click();
++      const value = editor.get();
++      const fixedHasAdd = editor.element.querySelector('[data-add="fixed"]') !== null;
++      const errors = validate(schema, value);
++      editor.showErrors(errors);
++      const marked = editor.element.querySelector('[data-path="fixed[2]"]').classList.contains('invalid');
++      editor.element.remove();
++      return {value, addAfterMaximum, fixedHasAdd, errors, marked};
++    }""")
++    assert result['value'] == {'numbers': [0, 7], 'fixed': [0, 0, ''], 'points': [{'x': 2.5, 'name': 'goal'}]}
++    assert result['addAfterMaximum'] is False and result['fixedHasAdd'] is False
++    assert [error['path'] for error in result['errors']] == ['fixed[2]'] and result['marked'] is True
++
++
++def test_reloading_and_navigating_never_resends(page, server):
++    """Reloads, back/forward navigation and restoring a configuration show the history but send nothing."""
++    count = len(goals(server))
++    newest = goals(server)[0]['goal_id']
++    for _ in range(3):
++        page.reload()
++        page.wait_for_selector(f'tr[data-goal="{newest}"]')
++    page.goto(page.url.split('#')[0] + '#ros/actions')
++    page.wait_for_selector('tr[data-action="/fixture/fibonacci"]')
++    page.go_back()
++    page.wait_for_selector(f'tr[data-goal="{newest}"]')
++    page.go_forward()
++    page.go_back()
++    page.wait_for_selector('#goal-history tr[data-goal]')
++    assert page.locator('#goal-history tr[data-goal]').count() == count, 'the history comes back from the gateway'
++    choose(page, '/fixture/lookup_transform')
++    assert 'odom lookup' in page.inner_text('#config-select'), 'saved configurations survive a reload'
++    page.select_option('#config-select', 'odom lookup')
++    page.click('#config-load')
++    page.click(f'tr[data-goal="{newest}"]')
++    page.click('#reuse-goal')
++    assert 'Nothing was sent' in page.inner_text('#action-notice')
++    time.sleep(1.2)
++    assert len(goals(server)) == count
++
++
++def test_connection_failures_never_resend(page, server):
++    """A failed submission is reported as unknown and not retried; reconnecting after an outage sends nothing."""
++    choose(page, '/fixture/fibonacci')
++    set_order(page, 2)
++    count = len(goals(server))
++    attempts = []
++    page.route('**/api/v1/actions/goals', lambda route: (attempts.append(route.request.method), route.abort())
++               if route.request.method == 'POST' else route.continue_())
++    send(page)
++    page.wait_for_function("document.getElementById('action-notice').textContent.includes('not known whether')")
++    time.sleep(2.5)
++    assert attempts == ['POST'], 'a failed submission must not be retried automatically'
++    assert len(goals(server)) == count
++    page.unroute('**/api/v1/actions/goals')
++
++    page.route('**/api/v1/**', lambda route: route.abort())
++    page.wait_for_selector('#actions-offline', state='visible', timeout=10000)
++    assert 'nothing is resent' in page.inner_text('#actions-offline')
++    page.unroute('**/api/v1/**')
++    page.wait_for_selector('#actions-offline', state='hidden', timeout=10000)
++    time.sleep(1.5)
++    assert len(goals(server)) == count
++
++    send(page)
++    wait_for(lambda: len(goals(server)) == count + 1)
++    page.click('#send-goal')
++    page.wait_for_selector('#confirm-dialog[open]')
++    page.dblclick('#confirm-send')
++    time.sleep(1.5)
++    assert len(goals(server)) == count + 2, 'a double click on the confirmation sends one goal'
++
++
++def test_passive_inspector_remains_and_links_to_the_actions_tab(page):
++    """The read-only ROS 2 action inspector still lists actions and points to the Actions tab."""
++    page.goto(page.url.split('#')[0] + '#ros/actions')
++    page.wait_for_selector('tr[data-action="/fixture/lookup_transform"]')
++    assert page.locator('#send-goal').count() == 0
++    page.click('a[href="#actions"]')
++    page.wait_for_selector('#send-goal')
++
++
++def test_read_only_mode_disables_sending_in_the_page(browser):
++    """With --read-only the page explains that sending is disabled and keeps the Send button off."""
++    from test_actions import run_lonely
++    environment, fixtures, process, base = run_lonely(['--read-only'])
++    try:
++        page = browser.new_page()
++        page.goto(base + '/#actions')
++        page.click('tr[data-action="/fixture/fibonacci"]')
++        page.wait_for_selector('#goal-editor [data-path="order"]')
++        page.wait_for_selector('#read-only-notice', state='visible')
++        assert page.is_disabled('#send-goal') and 'read-only' in page.inner_text('#send-reason')
++        page.close()
++    finally:
++        stop(process)
++        stop(fixtures)
+diff --git a/gui/tests/test_frontend_logic.py b/gui/tests/test_frontend_logic.py
+index 82b4018..3323f31 100644
+--- a/gui/tests/test_frontend_logic.py
++++ b/gui/tests/test_frontend_logic.py
+@@ -84,3 +84,51 @@ def test_sensor_conversions():
+     assert result['rpy'] == pytest.approx([0, 0, 90])
+     assert result['centre'] == pytest.approx([256, 256]) and result['north'][1] < 256
+     assert result['steps'] == pytest.approx([2, 1, 0.2])
++
++
++def test_goal_form_defaults_merging_and_validation():
++    """The goal editor's pure logic fills defaults, keeps given values and reports the same rules as the gateway."""
++    script = """import {defaultFor, validate, withDefaults} from './tabs/actions/form.js';
++      const integer = {kind: 'integer', type: 'int8', minimum: -128, maximum: 127};
++      const big = {kind: 'integer', type: 'uint64', minimum: 0, maximum: 18446744073709551615};
++      const schema = {kind: 'message', type: 'pkg/msg/Goal', fields: [
++        {name: 'flag', schema: {kind: 'boolean', type: 'boolean'}}, {name: 'count', schema: integer},
++        {name: 'big', schema: big}, {name: 'ratio', schema: {kind: 'float', type: 'double', limit: null}},
++        {name: 'label', schema: {kind: 'string', type: 'string', max_length: 2}},
++        {name: 'pair', schema: {kind: 'array', item: integer, fixed_size: 2, max_size: null}},
++        {name: 'list', schema: {kind: 'array', item: {kind: 'message', type: 'pkg/msg/P', fields: [{name: 'x', schema: integer}]}, fixed_size: null, max_size: 1}}]};
++      const base = defaultFor(schema);
++      const paths = (value) => validate(schema, value).map((error) => error.path);
++      console.log(JSON.stringify({base, merged: withDefaults(schema, {count: 5, list: [{}]}, base),
++        good: paths({...base, count: -128, pair: [1, 2], list: [{x: 3}], label: 'ab'}),
++        bad: paths({flag: 'yes', count: 200, big: 9007199254740993, ratio: '1', label: 'abc', pair: [1], list: [{x: 1.5}, {x: 1}], extra: 1}),
++        notObject: paths([1])}));"""
++    result = run_module(script)
++    assert result['base'] == dict(flag=False, count=0, big=0, ratio=0, label='', pair=[0, 0], list=[])
++    assert result['merged'] == dict(flag=False, count=5, big=0, ratio=0, label='', pair=[0, 0], list=[{'x': 0}])
++    assert result['good'] == []
++    assert result['bad'] == ['flag', 'count', 'big', 'ratio', 'label', 'pair', 'list', 'list[0].x', 'extra']
++    assert result['notObject'] == ['']
++
++
++def test_saved_configurations_store():
++    """Configurations are stored per action type, survive re-reading, and tolerate broken storage."""
++    script = """import {configurationNames, deleteConfiguration, loadConfiguration, saveConfiguration} from './tabs/actions/store.js';
++      const data = new Map();
++      const storage = {getItem: (key) => (data.has(key) ? data.get(key) : null), setItem: (key, value) => data.set(key, value)};
++      saveConfiguration('a/action/T', 'home', {order: 3}, storage);
++      saveConfiguration('a/action/T', 'away', {order: 9}, storage);
++      saveConfiguration('b/action/U', 'home', {x: 1}, storage);
++      const names = configurationNames('a/action/T', storage);
++      const loaded = loadConfiguration('a/action/T', 'home', storage);
++      deleteConfiguration('a/action/T', 'home', storage);
++      const after = configurationNames('a/action/T', storage);
++      const other = loadConfiguration('b/action/U', 'home', storage);
++      data.set('smpa-gui.goal-configurations.v1', 'not json');
++      const broken = configurationNames('a/action/T', storage);
++      const refusing = {getItem: () => null, setItem: () => { throw new Error('full'); }};
++      console.log(JSON.stringify({names, loaded, after, other, broken, refused: saveConfiguration('t', 'n', {}, refusing),
++        missing: loadConfiguration('a/action/T', 'nothing', storage)}));"""
++    result = run_module(script)
++    assert result == dict(names=['away', 'home'], loaded={'order': 3}, after=['away'], other={'x': 1}, broken=[],
++                          refused=False, missing=None)
+diff --git a/gui/tests/test_ros_integration.py b/gui/tests/test_ros_integration.py
+index 2f77d75..1eb4c05 100644
+--- a/gui/tests/test_ros_integration.py
++++ b/gui/tests/test_ros_integration.py
+@@ -93,7 +93,7 @@ def test_health_reports_ros_environment(server, ros_environment):
+     health = get(server, '/health')
+     assert health['status'] == 'ok' and health['ros']['ok'] and health['ros']['node'] == '/smpa_gui'
+     assert health['ros']['domain_id'] == int(ros_environment['ROS_DOMAIN_ID'])
+-    assert health['contract_version'] == '1.0'
++    assert health['contract_version'] == '1.1'
+ 
+ 
+ def test_graph_contains_fixture_nodes_topics_and_connections(server):
+@@ -212,7 +212,7 @@ def test_unresponsive_and_unknown_nodes_are_states_not_errors(server):
+     """A node that never spins is 'not_responding'; a node without services is 'unavailable'."""
+     started = time.monotonic()
+     silent = get(server, '/ros/nodes/parameters', node='/fixture_silent', timeout=1)
+-    assert silent == dict(contract_version='1.0', node='/fixture_silent', state='not_responding', parameters=[])
++    assert silent == dict(contract_version='1.1', node='/fixture_silent', state='not_responding', parameters=[])
+     assert time.monotonic() - started < 4
+     assert get(server, '/ros/nodes/parameters', node='/no_such_node')['state'] == 'unavailable'
+     assert get(server, '/ros/nodes/parameters', node='/smpa_gui')['state'] == 'unavailable'
+@@ -391,10 +391,12 @@ def test_foreign_browser_origins_cannot_open_streams(server):
+         assert next_data(socket)[0]['message']['data'].startswith('fixture message')
+ 
+ 
+-def test_no_write_operations_exist(server):
+-    """Every documented route is read-only: the application defines only GET and WebSocket routes."""
++def test_only_the_action_goal_routes_can_change_anything(server):
++    """Every route is read-only except submitting a goal and requesting its cancellation."""
+     routes = fetch(server + '/api/openapi.json')['paths']
+-    assert routes and all(set(methods) == {'get'} for methods in routes.values())
++    writable = {path: sorted(methods) for path, methods in routes.items() if set(methods) != {'get'}}
++    assert writable == {'/api/v1/actions/goals': ['get', 'post'],
++                        '/api/v1/actions/goals/{goal_id}/cancel': ['post']}
+ 
+ 
+ def test_gateway_node_offers_nothing_to_the_ros_graph(server):
+diff --git a/gui/tests/test_units.py b/gui/tests/test_units.py
+index 80ad144..07ec62a 100644
+--- a/gui/tests/test_units.py
++++ b/gui/tests/test_units.py
+@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
+ 
+ import pytest
+ 
+-from backend import ros_graph, ros_names, ros_topics, sensors
++from backend import ros_graph, ros_interfaces, ros_names, ros_topics, sensors
+ 
+ 
+ def header(frame='frame'):
+@@ -215,3 +215,63 @@ def test_registry_covers_the_required_types_and_filters_topics():
+         dict(name='/chatter', types=['std_msgs/msg/String'], hidden=False, publisher_count=1)])
+     assert sensors.sensor_topics(graph) == [dict(topic='/scan', type='sensor_msgs/msg/LaserScan',
+                                                  viewer='laserscan', label='Laser scan', publisher_count=0)]
++
++
++def check(schema, value):
++    """Return the validation errors for a value as (path, message) pairs."""
++    errors = []
++    ros_interfaces.check(schema, value, '', errors)
++    return [(error['path'], error['message']) for error in errors]
++
++
++def test_schema_validation_rules():
++    """Each field kind accepts fitting values and names the field and rule for others."""
++    integer = dict(kind='integer', type='uint8', minimum=0, maximum=255)
++    number = dict(kind='float', type='float', limit=3.4028234663852886e38)
++    text = dict(kind='string', type='string', max_length=3)
++    schema = dict(kind='message', type='pkg/msg/Thing', fields=[
++        dict(name='flag', schema=dict(kind='boolean', type='boolean')), dict(name='count', schema=integer),
++        dict(name='ratio', schema=number), dict(name='label', schema=text),
++        dict(name='triple', schema=dict(kind='array', item=number, fixed_size=3, max_size=None)),
++        dict(name='few', schema=dict(kind='array', item=integer, fixed_size=None, max_size=2)),
++        dict(name='inner', schema=dict(kind='message', type='pkg/msg/Inner', fields=[dict(name='count', schema=integer)]))])
++    good = dict(flag=True, count=255, ratio=1, label='abc', triple=[1, 2.5, 3], few=[1], inner=dict(count=0))
++    assert check(schema, good) == [] and check(schema, {}) == []
++    assert check(schema, dict(flag=1)) == [('flag', 'must be true or false')]
++    assert check(schema, dict(count=256))[0][0] == 'count' and 'between 0 and 255' in check(schema, dict(count=256))[0][1]
++    assert check(schema, dict(count=1.0)) == [('count', 'must be a whole number (uint8)')]
++    assert check(schema, dict(count=False)) == [('count', 'must be a whole number (uint8)')]
++    assert check(schema, dict(ratio=float('inf')))[0][0] == 'ratio' and check(schema, dict(ratio=1e39))[0][0] == 'ratio'
++    assert check(schema, dict(ratio='1')) == [('ratio', 'must be a number (float)')]
++    assert check(schema, dict(label='abcd')) == [('label', 'must have at most 3 characters')]
++    assert check(schema, dict(triple=[1, 2])) == [('triple', 'must have exactly 3 elements')]
++    assert check(schema, dict(few=[1, 2, 3])) == [('few', 'must have at most 2 elements')]
++    assert check(schema, dict(few=[1, 'x'])) == [('few[1]', 'must be a whole number (uint8)')]
++    assert check(schema, dict(inner=dict(count=-1, extra=1))) == [
++        ('inner.count', 'must be between 0 and 255 (uint8)'), ('inner.extra', 'is not a field of pkg/msg/Inner')]
++    assert check(schema, [1]) == [('', 'must be an object with the fields of pkg/msg/Thing')]
++
++
++def test_schema_and_messages_from_installed_interfaces():
++    """Schemas, defaults and messages are derived from real ROS definitions, including arrays of messages."""
++    sensor_msgs = pytest.importorskip('sensor_msgs.msg', reason='ROS 2 message packages are required')
++    schema = ros_interfaces.describe(sensor_msgs.CameraInfo)
++    fields = {field['name']: field['schema'] for field in schema['fields']}
++    assert schema['type'] == 'sensor_msgs/msg/CameraInfo'
++    assert fields['k'] == dict(kind='array', item=dict(kind='float', type='double', limit=None), fixed_size=9, max_size=None)
++    assert fields['d']['fixed_size'] is None and fields['width']['type'] == 'uint32'
++    assert fields['roi']['type'] == 'sensor_msgs/msg/RegionOfInterest' and fields['header']['fields'][0]['name'] == 'stamp'
++    defaults = ros_interfaces.defaults(sensor_msgs.CameraInfo)
++    assert defaults['k'] == [0.0] * 9 and defaults['d'] == [] and defaults['header']['frame_id'] == ''
++    message = ros_interfaces.build(sensor_msgs.CameraInfo, dict(width=640, k=[1, 0, 2, 0, 1, 3, 0, 0, 1], d=[0.5],
++                                                                header=dict(frame_id='cam', stamp=dict(sec=7))))
++    assert message.width == 640 and list(message.k)[2] == 2.0 and message.header.stamp.sec == 7 and message.height == 0
++    cloud = ros_interfaces.build(sensor_msgs.PointCloud2, dict(fields=[dict(name='x', offset=0, datatype=7, count=1)],
++                                                               data=[1, 2, 255]))
++    assert cloud.fields[0].name == 'x' and bytes(cloud.data) == b'\x01\x02\xff'
++    assert ros_interfaces.to_json(cloud)['fields'][0]['datatype'] == 7
++    with pytest.raises(ros_interfaces.InvalidValue) as wrong:
++        ros_interfaces.build(sensor_msgs.CameraInfo, dict(k=[1, 2], width=-1, roi=dict(do_rectify='yes')))
++    assert sorted(error['path'] for error in wrong.value.errors) == ['k', 'roi.do_rectify', 'width']
++    with pytest.raises(Exception, match='not available'):
++        ros_interfaces.action_class('no_pkg/action/Nothing')
+-- 
+2.43.0
+
