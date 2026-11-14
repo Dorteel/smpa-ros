@@ -166,13 +166,28 @@ class SpeechServer(Node):
 
 
 def run(kind, args=None):
+    """Serve one speech action until interruption, then close its resources.
+
+    The kind selects Listen or Talk, and args supplies the existing ROS options.
+    Keep ROS signal handlers disabled so SIGINT does not destroy the context
+    while an active audio callback still needs to finalize its action result.
+    Instead, wait for executor work in intervals of at most 100 milliseconds.
+    Returning regularly from the native ROS wait lets Python deliver SIGINT as
+    KeyboardInterrupt even when the server is idle.
+
+    On interruption, stop the backend first so active capture or playback can
+    finish cooperatively. Join executor workers while the ROS context is still
+    valid, then destroy the action server and node and finally shut down ROS.
+    Startup errors propagate after the same cleanup of any created resources.
+    """
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     executor = MultiThreadedExecutor(num_threads=4)
     try:
         node = SpeechServer(kind)
         executor.add_node(node)
-        executor.spin()
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:

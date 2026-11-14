@@ -270,3 +270,138 @@ def test_transcript_storage_failure_aborts_and_preserves_audio(speech, monkeypat
     session, = (listener.world_model_dir / 'observations' / 'audio').iterdir()
     assert (session / 'recording.wav').exists()
     assert 'Status: incomplete' in (session / 'transcript.md').read_text()
+
+
+@pytest.mark.parametrize('kind', ['listen', 'talk'])
+@pytest.mark.parametrize('state', ['idle', 'active', 'canceled'])
+def test_speech_subprocess_sigint(tmp_path, assigned_test_run, kind, state):
+    """Stop an actual speech-server subprocess through its process group.
+
+    Substitute only the audio backend so this test never opens a microphone or
+    speaker. Run the production entry function and executor in a fresh session,
+    using the assigned temporary run and unique action endpoint. Exercise an
+    idle server, an accepted blocking request, or a request explicitly canceled
+    before shutdown. Require explicit cancellation to return CANCELED as usual.
+
+    Once the child is ready, send SIGINT as Runner does and require a zero exit
+    within three seconds, a stopped backend, a closed ROS context and a released
+    audio lease. On failure dump the child's threads before terminating only that
+    test process group. Always destroy the parent ROS client and context.
+    """
+    import json
+    import os
+    from pathlib import Path
+    import signal
+    import subprocess
+    import sys
+    from rclpy.executors import SingleThreadedExecutor
+
+    ready = tmp_path / 'ready'
+    active = tmp_path / 'active'
+    finished = tmp_path / 'finished'
+    endpoint = '/shutdown_' + assigned_test_run.run_id.replace('-', '_') + '/' + kind
+    script = '''
+import faulthandler, json, runpy, signal, sys
+from pathlib import Path
+import rclpy
+from speech import actions
+faulthandler.register(signal.SIGUSR1, all_threads=True)
+FakeBackend = runpy.run_path(sys.argv[1])['FakeBackend']
+backend = FakeBackend()
+backend.block = True
+original_operation = backend.operation
+def operation(cancel):
+    """Mark that a real action callback reached the blocking fake audio backend."""
+    Path(sys.argv[3]).write_text('active')
+    return original_operation(cancel)
+backend.operation = operation
+original_server = actions.SpeechServer
+server = None
+def create_server(kind):
+    """Create the production action server with only its audio device substituted."""
+    global server
+    server = original_server(kind, backend=backend)
+    Path(sys.argv[2]).write_text('ready')
+    return server
+actions.SpeechServer = create_server
+actions.run(sys.argv[5], args=sys.argv[6:])
+Path(sys.argv[4]).write_text(json.dumps({'stopped': backend.stopped.is_set(),
+                                      'lease_closed': server.lease is None,
+                                      'context_closed': not rclpy.ok()}))
+'''
+    command = [sys.executable, '-c', script, str(Path(__file__).resolve()),
+               str(ready), str(active), str(finished), kind, '--ros-args',
+               '-p', f'world_model_dir:={assigned_test_run.directory}',
+               '-p', f'run_id:={assigned_test_run.run_id}',
+               '-p', f'audio_lock:={tmp_path / "audio.lock"}',
+               '-r', f'/speech/{kind}:={endpoint}']
+    process = None
+    node = client = executor = None
+    rclpy.init(args=[])
+    try:
+        with (tmp_path / 'child.log').open('w+') as output:
+            process = subprocess.Popen(command, stdout=output, stderr=output, start_new_session=True)
+            deadline = monotonic() + 15
+            while not ready.exists() and process.poll() is None and monotonic() < deadline:
+                sleep(0.01)
+            assert ready.exists(), (tmp_path / 'child.log').read_text()
+            # Let the idle executor enter its native wait before sending a signal.
+            sleep(0.2)
+            if state != 'idle':
+                node = rclpy.create_node('shutdown_test_client')
+                executor = SingleThreadedExecutor()
+                executor.add_node(node)
+                action_type = Listen if kind == 'listen' else Talk
+                client = ActionClient(node, action_type, endpoint)
+                assert client.wait_for_server(timeout_sec=5)
+                goal = (Listen.Goal(language='en', max_duration=1.0) if kind == 'listen'
+                        else Talk.Goal(text='test without audio playback'))
+                future = client.send_goal_async(goal)
+                executor.spin_until_future_complete(future, timeout_sec=5)
+                assert future.done() and future.result().accepted
+                handle = future.result()
+                deadline = monotonic() + 5
+                while not active.exists() and monotonic() < deadline:
+                    sleep(0.01)
+                assert active.exists(), 'Audio callback did not begin'
+                if state == 'canceled':
+                    future = handle.cancel_goal_async()
+                    executor.spin_until_future_complete(future, timeout_sec=5)
+                    assert future.done() and future.result().goals_canceling
+                    future = handle.get_result_async()
+                    executor.spin_until_future_complete(future, timeout_sec=5)
+                    assert future.done() and future.result().status == GoalStatus.STATUS_CANCELED
+            started = monotonic()
+            os.killpg(process.pid, signal.SIGINT)
+            try:
+                code = process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.kill(process.pid, signal.SIGUSR1)
+                sleep(0.1)
+                pytest.fail('SIGINT did not stop speech within 3 seconds:\n' +
+                            (tmp_path / 'child.log').read_text())
+            latency = monotonic() - started
+            print(f'{kind}/{state}: SIGINT shutdown {latency:.3f}s, exit={code}')
+            assert code == 0, (tmp_path / 'child.log').read_text()
+            assert json.loads(finished.read_text()) == dict(
+                stopped=True, lease_closed=True, context_closed=True)
+            log = (tmp_path / 'child.log').read_text()
+            assert 'Traceback' not in log and 'InvalidHandle' not in log
+            assert 'cannot use Destroyable' not in log
+            assert 'exception was never retrieved' not in log
+            assert 'unhandled exception' not in log and 'failed to publish' not in log.lower()
+    finally:
+        if process is not None and process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=3)
+        if executor is not None:
+            executor.shutdown()
+        if client is not None:
+            client.destroy()
+        if node is not None:
+            node.destroy_node()
+        rclpy.shutdown()
