@@ -20,10 +20,11 @@ case "$mode" in
     --all) selector='integration or not integration' ;;
     *) echo 'Usage: ./test.sh [--unit|--integration|--all|--rlhf]' >&2; exit 2 ;;
 esac
-colcon_command=(colcon)
-if [[ "$mode" != --unit ]]; then
-    colcon_command=("$PWD/.venv/bin/python" "$(command -v colcon)")
+test_python=$(command -v python3)
+if [[ -x "$PWD/.venv/bin/python" || "$mode" != --unit ]]; then
+    test_python="$PWD/.venv/bin/python"
 fi
+colcon_command=("$test_python" "$(command -v colcon)")
 
 ros_setup="/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 if [[ ! -f "$ros_setup" ]]; then
@@ -46,16 +47,27 @@ test_status=0
     --event-handlers console_direct+ \
     --python-testing pytest \
     --install-base "$work_dir/install" --return-code-on-test-failure \
-    --pytest-args test -m "$selector" || test_status=$?
+    --pytest-args test -m "$selector" -ra || test_status=$?
 colcon test-result --test-result-base "$work_dir/build" --verbose
 if (( test_status != 0 )); then
     exit "$test_status"
 fi
 
+# Colcon accepts pytest's no-tests exit code. Require actual test execution before
+# reporting success, including when collection was skipped for missing dependencies.
+"$test_python" - "$work_dir/build/smpa_ros/pytest.xml" <<'PY'
+import sys
+from xml.etree import ElementTree
+
+cases = ElementTree.parse(sys.argv[1]).getroot().iter('testcase')
+if not any(case.find('skipped') is None for case in cases):
+    raise SystemExit('No ROS tests executed; inspect the collection and skip reasons above.')
+PY
+
 # Run outside the source tree to verify that prompts/configs were installed.
 export SMPA_TEST_PIPELINE_CONFIG="$PWD/config.yaml"
 cd "$work_dir"
-python3 - <<'PY'
+"$test_python" - <<'PY'
 import os
 from importlib.resources import files
 from importlib.metadata import distribution
