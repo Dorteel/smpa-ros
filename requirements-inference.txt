@@ -1,0 +1,11 @@
+# ROS inference environment; the RLHF gym retains its separate pinned stack.
+# Keep existing compatible installations, including Transformers 5.x.
+torch>=2.6
+torchvision
+transformers>=4.57,<6
+# ROS Jazzy's Ubuntu NumPy extensions use the NumPy 1.x ABI.
+numpy>=1.26,<2
+num2words
+pillow>=10.0.1
+pyyaml
+huggingface_hub

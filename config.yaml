@@ -1,6 +1,6 @@
 camera_topic: /tiago/camera/color/image_raw
 model:
-  path: /home/dorteel/ros2_ws/src/smpa-ros/models/vlm/qwen3_vl_2b
+  path: models/vlm/qwen3_vl_2b
   model_id: Qwen/Qwen3-VL-2B-Instruct
   backend: transformers
   model: qwen3_vl_2b

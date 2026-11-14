@@ -54,7 +54,7 @@ PYDEPS
 # Explicitly use the same constraints even if the invoking shell overrides pip config.
 export PIP_CONSTRAINT="$repo/.venv/smpa-constraints.txt"
 # Speech pins come from the existing declaration; vision requirements are the
-# existing README inference dependencies. pip retains already satisfied versions.
+# declared inference dependencies. pip retains already satisfied versions.
 # On a fresh CPU-only machine, avoid installing CUDA runtime wheels. Preserve
 # any existing torch installation, including CUDA builds used by other workflows.
 if ! .venv/bin/python -c 'import importlib.util; raise SystemExit(importlib.util.find_spec("torch") is None)'; then
@@ -63,8 +63,8 @@ if ! .venv/bin/python -c 'import importlib.util; raise SystemExit(importlib.util
             fail 'CPU PyTorch installation failed; check access to download.pytorch.org and rerun.'
     fi
 fi
-inference_requirements=(torch torchvision 'transformers>=4.57,<5' num2words pillow pyyaml huggingface_hub)
-.venv/bin/python -m pip install -r "$PIP_CONSTRAINT" -r requirements-speech.txt \
+mapfile -t inference_requirements < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' requirements-inference.txt)
+.venv/bin/python -m pip install -r "$PIP_CONSTRAINT" -r speech/requirements-speech.txt \
     "${inference_requirements[@]}" || \
     fail 'Python dependency installation failed. Resolve the pip error above and rerun ./install.sh; do not bypass the virtual-environment constraints.'
 # Validate SMPA's dependency graph, not unrelated packages visible through ROS.
@@ -77,7 +77,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 requirements = list(sys.argv[1:]) + ['colcon-core', 'rclpy']
-for filename in ('.venv/smpa-constraints.txt', 'requirements-speech.txt'):
+for filename in ('.venv/smpa-constraints.txt', 'speech/requirements-speech.txt'):
     requirements.extend(line.split('#', 1)[0].strip()
                         for line in Path(filename).read_text().splitlines()
                         if line.split('#', 1)[0].strip())
@@ -130,55 +130,60 @@ print('SMPA dependencies, required APIs, and ROS/colcon version constraints veri
 print('Optional global diagnostic: .venv/bin/python -m pip check '
       '(also reports unrelated system-package conflicts).')
 PYVERIFY
-.venv/bin/python - "$@" <<'PY'
-import json
+.venv/bin/python - "$@" <<'PYMODELS'
 from pathlib import Path
-import subprocess
 import sys
 import yaml
-from scripts.download_models import MODELS
+from scripts.download_models import MODELS, run
+from smpa_ros.model import unify_model, local_model_info, resolve_vision_model
 
 root = Path.cwd()
-pipeline = yaml.safe_load((root / 'config.yaml').read_text())
-registry = yaml.safe_load((root / 'models/model_library.yaml').read_text())['models']
-modeling = pipeline['modeling']
-text = ({'backend': 'api'} if modeling.get('backend') == 'api'
-        else registry[modeling['model']])
-if modeling.get('backend', text['backend']) != text['backend']:
-    sys.exit('modeling.backend must match the selected registry backend or be api')
-vision_backend = pipeline.get('vision', {}).get('backend', 'transformers')
-required = set()
-if vision_backend == 'transformers':
-    vision = yaml.safe_load((root / 'models' / (pipeline['model'] + '.yaml')).read_text())
-    required.add(vision['model_id'])
-elif vision_backend != 'api':
-    sys.exit('vision.backend must be transformers or api')
-if text['backend'] == 'transformers':
-    required.add(text['model_id'])
-elif text['backend'] == 'ollama':
-    print(f"Ollama text model: {text['model_id']}; no text weights will be downloaded.", flush=True)
-elif text['backend'] != 'api':
-    sys.exit(f"Unsupported existing modeling backend: {text['backend']}")
+pipeline = unify_model(yaml.safe_load((root / 'config.yaml').read_text()))
+selected = pipeline['model']
+backend = selected['backend']
 known = {model[2]: model for model in MODELS}
-if required - known.keys():
-    sys.exit(f'Configured models are not supported by the existing downloader: {required - known.keys()}')
-if text['backend'] == 'transformers':
-    model = known[text['model_id']]
-    if Path(text['path']) != Path(model[0]) / model[1]:
-        sys.exit('The configured text model path does not match the downloader layout.')
-selected = list(known) if '--all-models' in sys.argv[1:] else sorted(required)
-if not selected:
-    print('No local weights required by the selected backends; skipping downloads.')
-    sys.exit(0)
-command = [sys.executable, str(root / 'scripts/download_models.py')]
-for model_id in selected:
-    command.extend(['--model', model_id])
-subprocess.run(command, check=True)
-report = json.loads((root / 'models/download_report.json').read_text())
-completed = {r['repo_id'] for r in report['models'] if r['status'] == 'completed'}
-if set(selected) - completed:
-    sys.exit('Some requested models are incomplete; inspect models/download_report.json and rerun.')
-PY
+required = set()
+if backend == 'transformers':
+    definition = dict(selected)
+    if not definition.get('model_id') and not definition.get('path'):
+        definition = dict(yaml.safe_load(
+            (root / 'models' / (selected['model'] + '.yaml')).read_text()), **selected)
+    model_id = definition.get('model_id')
+    destination = definition.get('path')
+    if destination:
+        destination = Path(destination).expanduser()
+        if not destination.is_absolute():
+            destination = (root if destination.parts[0] == 'models' else root / 'models') / destination
+        destination = destination.resolve()
+    model = known.get(model_id)
+    expected = root / 'models' / model[0] / model[1] if model else None
+    if destination is not None and destination != expected:
+        info = local_model_info(destination, vision=True, model_id=model_id, model_root=root / 'models')
+        if info['status'] != 'complete':
+            sys.exit(f"Configured model path {destination} is {info['status']}: {info['reason']}. "
+                     'Provision that explicit path before installation, or select the downloader layout; '
+                     'the installer will not replace an explicit model selection.')
+        print(f'Using existing explicit local model: {destination}', flush=True)
+    elif model:
+        required.add(model_id)
+    else:
+        sys.exit(f'Configured model {model_id!r} is not supported by the downloader; '
+                 'provide a complete explicit local model path.')
+elif backend != 'api':
+    sys.exit(f'Unsupported shared cognitive backend: {backend}; select transformers or api.')
+selected_ids = set(known) if '--all-models' in sys.argv[1:] else required
+if selected_ids:
+    records = run(root=root / 'models', models=[model for model in MODELS if model[2] in selected_ids])
+    incomplete = [model_id for model_id in sorted(selected_ids)
+                  if records.get(model_id, {}).get('status') != 'completed']
+    if incomplete:
+        sys.exit(f'Requested models are incomplete: {incomplete}; inspect models/download_report.json and rerun.')
+else:
+    print('No model downloads required by the shared selection.')
+if backend == 'transformers':
+    resolved = resolve_vision_model(pipeline, root / 'models', root / 'models')
+    print(f"Shared Sense/Model/Plan model verified: {resolved['path']}")
+PYMODELS
 # An older copy may have generated the existing package without Look. Reconfigure
 # only when switching source directories; keep all build products at workspace level.
 cmake_options=()
@@ -188,25 +193,19 @@ if [[ -f $cache ]] && ! grep -Fxq "CMAKE_HOME_DIRECTORY:INTERNAL=$simulation_sou
 fi
 # Explicit paths include both nested interface packages; no recursive discovery.
 cd "$workspace"
-colcon --log-base "$workspace/log" build \
+"$repo/.venv/bin/python" "$(command -v colcon)" --log-base "$workspace/log" build \
     --build-base "$workspace/build" --install-base "$workspace/install" \
     --paths "$repo" "$repo/smpa_ros_interfaces" "$simulation_source" \
     --packages-select simulation_actions smpa_ros_interfaces smpa_ros "${cmake_options[@]}"
 # Report external readiness separately from successful environment/build setup.
 source "$workspace/install/local_setup.bash"
 cd "$repo"
-"$repo/.venv/bin/python" - <<'PY'
+"$repo/.venv/bin/python" - <<'PYREADY'
 from pathlib import Path
 import yaml
-pipeline = yaml.safe_load(Path('config.yaml').read_text())
-registry = yaml.safe_load(Path('models/model_library.yaml').read_text())['models']
-backend = (pipeline['modeling'].get('backend')
-           or registry[pipeline['modeling']['model']]['backend'])
+from smpa_ros.model import unify_model
+pipeline = unify_model(yaml.safe_load(Path('config.yaml').read_text()))
 print('Environment, selected downloads, and workspace build prepared.')
-if backend == 'ollama':
-    print('WARNING: Ollama is supported for text generation, but the existing full SMPA loop rejects '
-          'Ollama at schema-constrained Plan. A full run requires a configured Transformers model '
-          'and Outlines. Provision the Ollama server/model separately for text-only use.')
 try:
     import simulation_actions.action as actions
     from rclpy.type_support import check_for_type_support
@@ -219,7 +218,7 @@ except Exception as error:
                      'Check workspace overlays and SIMULATION_ACTIONS_SOURCE, then rerun ./install.sh.')
 print(f'Generated Webots actions verified: {actions.__file__}')
 import torch
-vision = pipeline.get('vision', {})
+vision = pipeline['model']
 if vision.get('backend') == 'api':
     print('API inference requires credentials in the environment or repository .env and endpoint access; no live API request was made.')
 elif vision.get('device', 'auto') == 'cuda' and not torch.cuda.is_available():
@@ -228,4 +227,4 @@ elif vision.get('device', 'auto') == 'cuda' and not torch.cuda.is_available():
 elif vision.get('device', 'auto') == 'cpu' or not torch.cuda.is_available():
     print('Vision will use CPU; auto precision is float32. Allow sufficient RAM and inference time.')
 print('Start the simulation camera and Look action servers before ./run_smpa.sh; live endpoints were not checked.')
-PY
+PYREADY
