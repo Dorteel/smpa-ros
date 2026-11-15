@@ -3,7 +3,9 @@
 ## Principles
 
 1. **Detachable.** The GUI is one process with one ROS 2 node (`/smpa_gui`). It imports
-   no SMPA module, reads no SMPA file, and changes no SMPA configuration.
+   no SMPA module and changes no SMPA configuration or file. Since version 3 the SMPA tab
+   reads SMPA's recorded run directories, read-only, through one adapter module
+   (`smpa_runs.py`); the interface it relies on is listed in SMPA_CONTRACTS.md.
 2. **Observational, with one narrow exception.** The gateway creates subscriptions and
    parameter-service clients for inspection. It has no application publishers and no
    service servers and writes no parameters. Since version 2 it can also send and cancel
@@ -39,6 +41,7 @@ All rclpy calls happen on the ROS thread. Web handlers pass small functions to
 | `ros_parameters.py` | Read another node's parameters with bounded waiting |
 | `sensors.py` | Sensor registry and one encoder per sensor type |
 | `ros_interfaces.py` | Action class lookup; schema of any message type from its definition; validation of JSON values; message construction |
+| `smpa_runs.py` | Read-only adapter for SMPA's memory directory: sessions, activity, normalized observations, confined file access |
 | `action_goals.py` | The only module that acts on ROS: action clients, goal records, cancel, tidy timer, shutdown policy |
 | `app.py` | Routes, the generic stream loop, static files |
 | `__main__.py` | Command-line entry point |
@@ -71,7 +74,8 @@ browser never causes a queue. Silence is explained with status messages.
 | `tabs/actions/index.js` | Actions tab: server list, editor, confirmation dialog, monitor, history |
 | `tabs/actions/form.js` | Schema-driven goal form and client-side validation |
 | `tabs/actions/store.js` | Saved goal configurations in browser storage |
-| `tabs/smpa/index.js` | Empty module registry |
+| `tabs/smpa/index.js` | SMPA shell: session selector, activity, banners, section registry (Sense, Model, Plan, Act) |
+| `tabs/smpa/sense.js` | Sense section: See, Hear, Read panels and observation timeline |
 | `vendor/cytoscape.min.js` | Cytoscape.js 3.35.0 (MIT), unmodified |
 
 A tab, a ROS 2 subview and an SMPA module share one contract: an object with `id`,
@@ -119,12 +123,26 @@ To support a new sensor type:
 
 Nothing else changes. Types without a registry entry stay inspectable in ROS 2 → Topics.
 
-## Adding an SMPA module later
+## SMPA tab
 
-Add a module object to `MODULES` in `frontend/tabs/smpa/index.js`, and backend routes
-under `/api/v1/smpa/…` in a new backend module. How such a module obtains SMPA state
-(ROS interfaces, run files, or the conversation server) is deliberately undecided and
-needs an agreed interface with the SMPA core.
+```
+SMPA memory/runs/*  ──read only──►  smpa_runs.py  ──►  /api/v1/smpa/*  ──►  tabs/smpa/
+ROS graph (names under /run_<uuid>) ──────────────┘ (activity)
+ROS camera topic, Listen status topic ──► existing sensor / echo streams ──► LIVE areas
+```
+
+- **Recorded versus live.** Recorded observations come only from SMPA's files and are
+  labelled RECORDED BY SMPA. Live data comes only from ROS streams and is labelled LIVE;
+  the GUI never stores it.
+- **Normalization.** The adapter turns SMPA's several file layouts into one observation
+  shape (API.md). Every time stamp carries its source; fields SMPA did not record are null.
+- **Refresh.** The page polls the session list every 3 s and a running session's
+  observations every 2 s; a per-session `revision` (file names, sizes, times) avoids
+  redrawing unchanged data. Ended sessions are rechecked every 15 s.
+- **Safety.** Files are opened read-only, no locks are taken (SMPA's conversation server
+  locks its transcript), file downloads are confined to recorded media inside a session.
+- **Sections.** A section is a module with `mount(container, session)`, `unmount()` and an
+  optional `update(session)`. Model, Plan and Act will be added the same way.
 
 ## Deviations from GUI_ARCHITECTURE_REPORT.md
 
@@ -133,6 +151,8 @@ needs an agreed interface with the SMPA core.
 - Actions are derived from the graph snapshot, so there is no separate `ros_actions.py`.
 - NumPy is used (it is part of every ROS 2 Python installation) but is not installed by the GUI.
 - `install_gui.sh` was added so that `run_gui.sh` never installs anything.
+- Version 3 reads SMPA's run directories for the SMPA tab; the report had left the SMPA
+  data source undecided.
 - Version 2 adds action execution, which the report had excluded from version 1.
   Goal monitoring uses polling of gateway-held records instead of a WebSocket, so that
   a broken connection can never be mistaken for, or cause, a resend.

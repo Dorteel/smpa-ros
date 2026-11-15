@@ -93,7 +93,7 @@ def test_health_reports_ros_environment(server, ros_environment):
     health = get(server, '/health')
     assert health['status'] == 'ok' and health['ros']['ok'] and health['ros']['node'] == '/smpa_gui'
     assert health['ros']['domain_id'] == int(ros_environment['ROS_DOMAIN_ID'])
-    assert health['contract_version'] == '1.1'
+    assert health['contract_version'] == '1.2'
 
 
 def test_graph_contains_fixture_nodes_topics_and_connections(server):
@@ -212,7 +212,7 @@ def test_unresponsive_and_unknown_nodes_are_states_not_errors(server):
     """A node that never spins is 'not_responding'; a node without services is 'unavailable'."""
     started = time.monotonic()
     silent = get(server, '/ros/nodes/parameters', node='/fixture_silent', timeout=1)
-    assert silent == dict(contract_version='1.1', node='/fixture_silent', state='not_responding', parameters=[])
+    assert silent == dict(contract_version='1.2', node='/fixture_silent', state='not_responding', parameters=[])
     assert time.monotonic() - started < 4
     assert get(server, '/ros/nodes/parameters', node='/no_such_node')['state'] == 'unavailable'
     assert get(server, '/ros/nodes/parameters', node='/smpa_gui')['state'] == 'unavailable'

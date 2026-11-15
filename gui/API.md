@@ -1,8 +1,9 @@
-# Gateway API, contract version 1.1
+# Gateway API, contract version 1.2
 
 Base URL: `http://127.0.0.1:8765/api/v1`. All routes are read-only (HTTP `GET` or
 WebSocket) except the two `POST` routes under [Action execution](#action-execution).
-Version 1.1 added the `/actions/...` routes; nothing from 1.0 changed. Every JSON response contains `contract_version`. ROS names are passed as
+Version 1.1 added the `/actions/...` routes and 1.2 the read-only `/smpa/...` routes;
+nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
 URL-encoded query parameters because they contain slashes. A machine-readable
 description of the HTTP routes is served at `/api/openapi.json`.
 
@@ -15,7 +16,7 @@ Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
 ### `GET /health`
 
 ```json
-{"contract_version": "1.1", "status": "ok",
+{"contract_version": "1.2", "status": "ok",
  "ros": {"ok": true, "node": "/smpa_gui", "domain_id": 0, "rmw": "rmw_fastrtps_cpp", "distro": "jazzy"},
  "active_subscriptions": [{"topic": "/scan", "type": "sensor_msgs/msg/LaserScan", "viewers": 1}]}
 ```
@@ -25,7 +26,7 @@ Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
 ### `GET /ros/graph`
 
 ```json
-{"contract_version": "1.1", "stamp": 1794679890.5,
+{"contract_version": "1.2", "stamp": 1794679890.5,
  "nodes":   [{"id": "node:/talker", "name": "talker", "namespace": "/", "full_name": "/talker",
               "hidden": false, "is_gateway": false}],
  "topics":  [{"id": "topic:/chatter", "name": "/chatter", "types": ["std_msgs/msg/String"],
@@ -62,7 +63,7 @@ The result is cached for one second.
 ### `GET /ros/nodes/parameters?node=<full node name>&timeout=<seconds, 0.2–10, default 2>`
 
 ```json
-{"contract_version": "1.1", "node": "/talker", "state": "ok",
+{"contract_version": "1.2", "node": "/talker", "state": "ok",
  "parameters": [{"name": "use_sim_time", "type": "bool", "value": false,
                  "description": "", "read_only": false}]}
 ```
@@ -254,3 +255,80 @@ exist for goals sent by this gateway process since it started (at most 200).
 | `rejected` | The server refused the goal |
 | `failed` | Sending or waiting failed inside the gateway (`error` explains) |
 | `lost` | The action server disappeared while the goal was active; outcome unknown |
+
+## SMPA sessions (read-only)
+
+These routes read SMPA's memory directory (`--memory-root`, `SMPA_GUI_MEMORY_ROOT`, or
+`memory/` beside `gui/`). They never write. When no memory directory is configured,
+`/smpa/status` says so and the other routes answer `404` with an explanation. The data
+sources behind each field are listed in [SMPA_CONTRACTS.md](SMPA_CONTRACTS.md).
+
+### `GET /smpa/status`
+
+`{"configured": true, "memory_root": "/…/smpa-ros/memory", "demonstration": false}`.
+`demonstration` is true when the directory carries the GUI marker `.smpa-gui-demo`
+(written only by `tests/fixtures/smpa_memory.py --demo`).
+
+### `GET /smpa/sessions`, `GET /smpa/sessions/{session_id}`
+
+`{"memory_root", "demonstration", "sessions": [<session>, ...]}` newest first, or `{"session": <session>}`.
+
+```json
+{"session_id": "11111111-1111-4111-8111-111111111111", "name": "fixture_all_senses",
+ "directory": "2026-11-15_100000_000000+0100_fixture_all_senses_1111…", "path": "runs/…",
+ "kind": "robot", "status": "completed", "activity": "ended",
+ "started_at": "2026-11-15T10:00:00+01:00", "completed_at": "…", "completed_cycles": 1,
+ "modalities": {"vision": true, "hear": true, "read": true},
+ "camera_topic": "/tiago/camera/color/image_raw",
+ "read_session": {"path": "/…/runs/…_conversation_2222…", "session_id": "2222…"},
+ "ros": {"visible": false, "names": [], "nodes": [], "listen_status_topics": []},
+ "metadata_error": null}
+```
+
+| Field | Values |
+|---|---|
+| `kind` | `robot`, `conversation`, `legacy_archive` (the `memory/legacy` folder, id `legacy-archive`), `unknown` (metadata missing or unreadable; `metadata_error` explains) |
+| `status` | As recorded by SMPA: `running`, `completed`, `interrupted`, `failed`, or `null` |
+| `activity` | `active` (running, ROS names under `/run_<uuid>` visible), `running_not_visible` (running, none visible), `running_unverified` (running, liveness cannot be checked: conversation sessions, or no ROS graph), `ended`, `unknown` |
+| `modalities` | Per Sense modality `true`, `false`, or `null` when the setting is malformed |
+| `ros.listen_status_topics` | Status topics of this run's Listen action(s), for the live Hear state |
+
+### `GET /smpa/sessions/{session_id}/observations?modality=`
+
+`{"session_id", "revision", "observations": [<observation>, ...], "truncated", "warnings"}`
+in chronological order (oldest first), at most the newest 2000. `modality` filters to
+`vision`, `hear`, `read` or `sense`. `revision` changes whenever a file of the session
+changes; clients can skip redrawing when it is unchanged.
+
+```json
+{"id": "9f2c…", "session_id": "1111…", "modality": "vision", "kind": "scene_description",
+ "recorded": true, "timestamp": "2026-11-15T09:00:05.250000+00:00", "t": 1794733205.25,
+ "timestamp_source": "file name (UTC)", "status": "generated",
+ "text": "{\"scene\": \"A red test card fills the view.\"}", "text_truncated": false,
+ "image": "/api/v1/smpa/sessions/1111…/files?path=observations/vision/…png", "audio": null,
+ "source": "observations/vision/2026-11-15_09-00-05_250000Z_sense_output.md",
+ "sense_record": "state/cycle_000001/sense.json", "cycle": null, "epistemic_status": null,
+ "provenance": {"camera": {"topic": "…", "received_at": "…", "frame_id": "…"}, "image_size": [64, 48]}}
+```
+
+| `modality` | `kind` | Content |
+|---|---|---|
+| `vision` | `scene_description` | Description text; `image` when its frame was saved |
+| `vision` | `camera_frame` | Frame without description (`status` `evidence_without_description`) or refinement's frozen image (`frozen_for_refinement`) |
+| `vision` | `focused_observation` | Answer text; `provenance.target`, `question`, `image_sha256`, `model_identifier` |
+| `hear` | `audio_transcript` | Transcript text; `audio` recording; `provenance` holds the transcript fields and `duration_s` |
+| `read` | `user_message` | Message text; `epistemic_status`; `provenance.role`, `message_index`, `conversation_session_id` |
+| `sense` | `sense_record` | One Sense invocation: `status`, `cycle`, error text, `provenance.source_observations`, `read_cursor` |
+
+- `recorded` is always `true` here: everything comes from SMPA's files. Live data is only
+  available through the sensor and echo streams.
+- `timestamp_source` says where the time came from: `file name (UTC)`, `file name (local
+  time; run's start offset applied)`, `PNG smpa.camera received_at`, `transcript
+  Timestamp`, `Sense record started_at`, or `file modification time`.
+- `sense_record` is set only where SMPA recorded the link.
+
+### `GET /smpa/sessions/{session_id}/files?path=<relative path>`
+
+One recorded file of the session (`.png`, `.wav`, `.md`, `.json`, `.txt`) with its media
+type; byte ranges are supported. Paths outside the session directory, through links
+leading outside, or with other suffixes give `404`.

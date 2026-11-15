@@ -1,4 +1,4 @@
-# Verification results (GUI version 2, 2026-11-14)
+# Verification results (GUI version 3, 2026-11-15)
 
 ## Where the verification ran
 
@@ -17,7 +17,7 @@ workstation**:
 The official ROS 2 apt repository was not reachable from that container, so the
 Debian-packaged Jazzy that the workstation uses was not available.
 
-## Automated tests: 90 passed
+## Automated tests: 120 passed
 
 | Suite | Tests | What it exercises |
 |---|---|---|
@@ -27,8 +27,15 @@ Debian-packaged Jazzy that the workstation uses was not available.
 | `tests/test_actions.py` | 25 | Action execution over HTTP against real fixture action servers |
 | `tests/test_browser.py` | 10 | Version 1 frontend in headless Chromium |
 | `tests/test_browser_actions.py` | 12 | Actions tab in headless Chromium |
+| `tests/test_smpa_runs.py` | 9 | SMPA adapter against fixture run directories in SMPA's formats |
+| `tests/test_smpa_integration.py` | 11 | SMPA routes of a real server, with a real ROS stand-in for an active session |
+| `tests/test_browser_smpa.py` | 10 | SMPA tab (Sense workspace) in headless Chromium |
 
-All version 1 tests still pass. Two of them were changed on purpose: the tab list now
+All earlier tests still pass. Version 3 changed three of them on purpose: the SMPA-tab
+check in `test_browser.py` now expects the session selector instead of the empty
+placeholder; the contract version checks expect 1.2; and the Actions test for
+`--keep-goals-on-exit` now retries its `ros2 topic echo --once` check, which was
+occasionally too early after the GUI exited. Version 2 changed two: the tab list now
 includes Actions, and the "only GET routes" test now asserts that the two goal routes
 are the only non-GET routes.
 
@@ -109,8 +116,48 @@ this was not investigated further.
 | Server loss | Killing the action server during a goal marks it `lost` |
 | Saved configurations | Save, reset, load and persistence across reloads, without sending |
 
+### SMPA tab (Sense workspace) verified by tests
+
+The fixture memory directory (`tests/fixtures/smpa_memory.py`) holds nine sessions written
+in SMPA's formats, each modelled on a real run: an all-senses robot run (vision PNG with
+`smpa.camera` metadata, description, audio recording and transcript, two Read messages, a
+failed second Sense with its frame retained), the conversation session it read, an October
+run with the older `vision/` layout and local-time names, a scene-refinement run (frozen
+image, focused answer), a running session with a ROS stand-in (`active_run_node.py`), a
+running session without ROS presence, an empty session, damaged metadata, and the
+`memory/legacy` archive.
+
+| Requirement | Evidence |
+|---|---|
+| Four sections, only Sense functional | Model, Plan, Act show placeholders |
+| Session selector, existing and active sessions | All nine sessions listed newest first; the active stand-in is recognised from its run-scoped ROS names; a running session without them is "not visible"; a conversation session is "running (unverified)"; without a ROS graph a running robot run is "unverified" |
+| See | Recorded frames (decoded PNG) and descriptions, frame without description, focused answer, frozen image; live camera in a separate LIVE frame, labelled "not part of the session" when the session has ended |
+| Hear | Recordings served as WAV (byte ranges work) with transcript, model, language and duration; live Listen state follows the stand-in's status topic between listening and idle |
+| Read | User messages with epistemic status and message number; robot run links to the conversation it read; no input elements |
+| Timeline | Seven entries of the robot run in correct order (newest-first and oldest-first), modality filters, provenance details with Sense record, time-stamp source and transcript fields |
+| Recorded versus live | Every recorded item is labelled RECORDED and comes from files; live areas use the existing streams; leaving the session or tab closes them (checked with the gateway's subscription list) |
+| Empty, inactive, disconnected | Empty session explains "nothing recorded"; ended and stale sessions explained; damaged metadata shown; unconfigured memory directory explained; lost connection shows a banner and keeps the data |
+| Read-only | Fingerprint (content, size, modification time) of the whole memory directory unchanged after reading every session and file, directly and through the server; SMPA routes are GET only |
+| File confinement | Traversal, absolute paths, non-media files, missing files and links leading outside the session are refused |
+| Demonstration labelling | A directory generated with `--demo` shows the DEMONSTRATION DATA banner |
+| Reload | The address restores section and session |
+
+**Check against real SMPA data.** I copied part of the workstation's `memory/` (five robot
+runs of different generations and the `memory/legacy` archive) into the test container
+and ran the adapter on it. It recognised every layout, read all descriptions, both audio
+recordings with transcripts, the refinement run's frozen image and focused answer (linked
+to its Sense record), applied the run offsets to local-time names, and the output was
+valid JSON. That copy is not part of the repository. Its file modification times are
+those of the copy, not the originals.
+
 ## Not verified
 
+- **The SMPA tab was not run against a live SMPA session**: no running `run_smpa.sh`, no
+  real Listen action, no running conversation GUI. Liveness and live Hear were tested with
+  a stand-in that publishes the same ROS names and status topic. The real data check
+  above used a copy of finished runs only.
+- No real conversation session existed on the workstation, so Read was checked with
+  fixture data in the documented format only.
 - **No action from the target system was exercised**: not `/look_left` or any other
   `simulation_actions` action, no SMPA speech action, no real robot. The interface
   discovery is generic, but those types were not installed in the test environment.
@@ -139,7 +186,7 @@ this was not investigated further.
 ```bash
 cd <gui worktree>/gui
 ./install_gui.sh --dev
-./test_gui.sh                       # expect 68 passed (63 if Node.js is absent)
+./test_gui.sh                       # expect 88 passed (83 if Node.js is absent)
 ./run_gui.sh                        # open http://127.0.0.1:8765, stop with Ctrl+C
 
 # Try the Actions tab against a harmless action server first, for example:

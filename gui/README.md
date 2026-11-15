@@ -10,10 +10,10 @@ goals, and only when a user on this computer explicitly confirms each goal.
 | **ROS 2** | Graph (rqt_graph-like), Topics (types, endpoints, QoS, live messages), Parameters (read-only), Actions (read-only) |
 | **Sensors** | Live viewers for nine `sensor_msgs` types in freely arranged panels |
 | **Actions** | Discover action servers, edit a goal in a generated form or as JSON, send and cancel goals, watch feedback, result and history |
-| **SMPA** | Empty workspace reserved for future SMPA modules |
+| **SMPA** | Session selector and four sections. **Sense** is functional: See, Hear and Read panels and a unified observation timeline from SMPA's recorded sessions, plus live camera and Listen state. Model, Plan and Act are placeholders |
 
 Further documentation: [ARCHITECTURE.md](ARCHITECTURE.md), [API.md](API.md),
-[VERIFICATION.md](VERIFICATION.md).
+[SMPA_CONTRACTS.md](SMPA_CONTRACTS.md), [VERIFICATION.md](VERIFICATION.md).
 
 ## Requirements
 
@@ -55,6 +55,7 @@ process, and other ROS processes may start and stop while it runs.
 | `SMPA_GUI_HOST`, `SMPA_GUI_PORT` | Listening address | `127.0.0.1`, `8765` |
 | `SMPA_GUI_READ_ONLY=1` | Same as `--read-only` | off |
 | `SMPA_GUI_KEEP_GOALS_ON_EXIT=1` | Same as `--keep-goals-on-exit` | off |
+| `SMPA_GUI_MEMORY_ROOT` or `--memory-root` | SMPA's `memory/` directory for the SMPA tab (read-only) | `memory/` beside `gui/`, if it contains `runs/` |
 | `SMPA_GUI_ROS_SETUP` | ROS 2 `setup.bash` to source | `/opt/ros/$ROS_DISTRO/setup.bash` |
 | `SMPA_GUI_OVERLAY` | Workspace `install/setup.bash` with custom message types, or `none` | the enclosing colcon workspace, if the checkout lies under a `src/` directory |
 | `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, discovery settings | Standard ROS 2 settings; must match the system you want to observe | inherited |
@@ -124,6 +125,44 @@ Safeguards:
 | GUI server restarted | The history starts empty and earlier goals cannot be monitored or cancelled from the GUI any more (use `ros2 action` tools). Pages still open from before must be reloaded before they can send again. |
 | Action server disappears during a goal | The goal is marked `lost`: its outcome is unknown. |
 
+## SMPA tab: Sense workspace
+
+The SMPA tab reads SMPA's recorded sessions from its memory directory. When the GUI runs
+from `smpa-ros/gui`, this is found automatically; from a separate worktree, point to it:
+
+```bash
+SMPA_GUI_MEMORY_ROOT=~/ros2_ws/src/smpa-ros/memory ./run_gui.sh
+```
+
+- **Session selector**: every run under `memory/runs/` (robot and conversation sessions)
+  and the `memory/legacy/` archive, newest first, with its activity:
+  *Active* (running and its ROS nodes are visible), *Running? not visible* (metadata says
+  running but no ROS nodes: possibly stopped without finalizing), *Running (unverified)*
+  (conversation sessions: SMPA offers no liveness signal yet), *Ended*, *Unknown*.
+- **See**: the session's camera topic live (red **LIVE** frame), and the frames,
+  descriptions and focused answers SMPA recorded (**RECORDED BY SMPA**). For an ended
+  session the live picture is explicitly "the camera now, not part of the session".
+- **Hear**: whether the session's Listen action is executing right now (live, active
+  sessions only), and every recording with its player and transcript.
+- **Read**: the user messages SMPA's Sense stage observed, with their epistemic status
+  ("unverified user statement") and message number; a robot run links to the
+  conversation session it read. There is no text input: messages are entered in SMPA's
+  conversation GUI.
+- **Timeline**: all observations and Sense invocations (including failed ones) in time
+  order, filterable by modality; click a row for its source file, Sense record, the
+  source of its time stamp and every recorded provenance field.
+
+Nothing is written to the memory directory. Demonstration data in SMPA's formats can be
+generated and is clearly labelled:
+
+```bash
+.venv/bin/python tests/fixtures/smpa_memory.py --output /tmp/smpa-demo --demo
+SMPA_GUI_MEMORY_ROOT=/tmp/smpa-demo ./run_gui.sh
+```
+
+What SMPA would need to provide for exact liveness and simpler integration is described in
+[SMPA_CONTRACTS.md](SMPA_CONTRACTS.md).
+
 ## Tests
 
 ```bash
@@ -178,6 +217,27 @@ Actions
 - An action with several types is used with its first type.
 - While a goal is active the gateway appears on the ROS graph as a client of that
   action; the client is removed when its last goal has finished.
+
+SMPA tab
+
+- Only Sense is implemented; Model, Plan and Act are placeholders.
+- The adapter follows SMPA's current file formats (see SMPA_CONTRACTS.md §1). If Codex
+  changes them, the adapter must follow; damaged or unknown files are shown as such,
+  not hidden.
+- Liveness of robot runs is inferred from ROS names under `/run_<uuid>`; a run in another
+  ROS domain or on another machine looks "not visible". Conversation sessions cannot be
+  checked at all (contract C1).
+- Older evidence files carry local time without an offset; the run's start offset is
+  applied. Focused answers and frozen images have no recorded time and show file
+  modification times, labelled as such (contract C3). Copying a memory directory changes
+  those times.
+- Evidence in older runs is linked to its Sense record only where SMPA recorded the link
+  (`source_observations`, `focused_observations[].source_record`).
+- A session shows at most its newest 2000 entries; descriptions over 20 000 characters
+  are shortened.
+- The live camera is the session's configured `camera_topic`; recorded frames are what
+  SMPA saved. The GUI does not record anything itself.
+- Read is read-only; text input and session control are deliberately absent (C4, C5).
 
 Sensors
 

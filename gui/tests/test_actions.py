@@ -343,8 +343,8 @@ def test_goals_survive_the_gui_when_asked_to_and_new_gateways_start_empty():
         _, body = submit(base, FIBONACCI, {'order': 200})
         wait_for_state(base, body['goal']['goal_id'], ('executing',))
         stop(process)
-        time.sleep(1.5)
-        assert fibonacci_status(environment) == [2], 'the goal must still be executing on the server'
+        wait_until(lambda: fibonacci_status(environment) == [2], timeout=30,
+                   message='the goal must still be executing on the server')
         process, base = start_server(environment)
         assert fetch(base + API + '/actions/goals')['goals'] == []
         stale = dict(FIBONACCI, goal={'order': 1}, request_id=uuid.uuid4().hex)

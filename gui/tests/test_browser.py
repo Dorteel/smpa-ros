@@ -231,7 +231,7 @@ def test_leaving_the_sensors_tab_unsubscribes_and_returning_restores_panels(page
     panels = page.locator('.panel').count()
     assert panels == 8 and len(subscriptions(server)) == 8
     page.click('#primary-tabs button[data-tab="smpa"]')
-    assert 'No SMPA modules are installed yet.' in page.inner_text('#smpa-empty')
+    page.wait_for_selector('#session-select')
     page.screenshot(path=str(ARTIFACTS / 'smpa.png'))
     wait_for(lambda: subscriptions(server) == set(), message='leaving the Sensors tab left subscriptions behind')
     page.click('#primary-tabs button[data-tab="sensors"]')

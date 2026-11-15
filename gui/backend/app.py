@@ -24,12 +24,12 @@ import time
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel, Field
 
-from backend import CONTRACT_VERSION, ros_graph, ros_interfaces, ros_parameters, ros_topics, sensors
+from backend import CONTRACT_VERSION, ros_graph, ros_interfaces, ros_parameters, ros_topics, sensors, smpa_runs
 from backend.action_goals import GoalManager, GoalRefused
 from backend.gateway import Gateway, GatewayError
 
@@ -79,7 +79,7 @@ class GoalSubmission(BaseModel):
     request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
 
 
-def create_app(gateway=None, *, allow_actions=True, cancel_on_exit=True):
+def create_app(gateway=None, *, allow_actions=True, cancel_on_exit=True, memory_root=None):
     """Build the web application around one gateway.
 
     The gateway joins ROS when the application starts and leaves when it
@@ -87,7 +87,8 @@ def create_app(gateway=None, *, allow_actions=True, cancel_on_exit=True):
     processes. A gateway may be supplied by tests; otherwise one is created.
     ``allow_actions`` false makes the whole application read-only.
     ``cancel_on_exit`` decides whether goals that are still active when the
-    application stops are asked to cancel.
+    application stops are asked to cancel. ``memory_root`` is SMPA's memory
+    directory, read (never written) by the SMPA tab; None disables that tab's data.
     """
     gateway = gateway or Gateway()
     session_token = secrets.token_urlsafe(32)
@@ -482,6 +483,60 @@ def create_app(gateway=None, *, allow_actions=True, cancel_on_exit=True):
             raise HTTPException(status_code=error.status, detail=str(error)) from error
         except GatewayError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+
+    root = Path(memory_root).resolve() if memory_root else None
+
+    def smpa_root():
+        """Return the configured memory root or answer 404 explaining how to configure it."""
+        if root is None or not (root / 'runs').is_dir():
+            raise HTTPException(status_code=404, detail='No SMPA memory directory is configured '
+                                '(start the GUI with --memory-root or SMPA_GUI_MEMORY_ROOT)')
+        return root
+
+    def ros_names():
+        """Return discovered ROS names for liveness checks, or None when ROS is unavailable."""
+        try:
+            return smpa_runs.graph_names(ros_graph.snapshot(gateway))
+        except GatewayError:
+            return None
+
+    @app.get('/api/v1/smpa/status')
+    def get_smpa_status():
+        """Say whether SMPA's memory directory is configured and whether it holds demonstration data."""
+        configured = root is not None and (root / 'runs').is_dir()
+        return envelope(configured=configured, memory_root=str(root) if root else None,
+                        demonstration=bool(configured and (root / smpa_runs.DEMO_MARKER).is_file()))
+
+    @app.get('/api/v1/smpa/sessions')
+    def get_smpa_sessions():
+        """List SMPA sessions newest first with lifecycle, modalities and activity."""
+        directory = smpa_root()
+        return envelope(memory_root=str(directory), demonstration=(directory / smpa_runs.DEMO_MARKER).is_file(),
+                        sessions=smpa_runs.list_sessions(directory, ros_names()))
+
+    @app.get('/api/v1/smpa/sessions/{session_id}')
+    def get_smpa_session(session_id: str):
+        """Describe one SMPA session."""
+        found = [item for item in smpa_runs.list_sessions(smpa_root(), ros_names()) if item['session_id'] == session_id]
+        if not found:
+            raise HTTPException(status_code=404, detail='Unknown SMPA session')
+        return envelope(session=found[0])
+
+    @app.get('/api/v1/smpa/sessions/{session_id}/observations')
+    def get_smpa_observations(session_id: str, modality: str = Query('', pattern='^(|vision|hear|read|sense)$')):
+        """Return the recorded observations of a session in chronological order."""
+        result = smpa_runs.session_observations(smpa_root(), session_id, modality or None)
+        if result is None:
+            raise HTTPException(status_code=404, detail='Unknown SMPA session')
+        return envelope(**result)
+
+    @app.get('/api/v1/smpa/sessions/{session_id}/files')
+    def get_smpa_file(session_id: str, path: str = Query(..., max_length=1024)):
+        """Serve one recorded file (image, audio, text) of a session, read-only."""
+        found = smpa_runs.recorded_file(smpa_root(), session_id, path)
+        if found is None:
+            raise HTTPException(status_code=404, detail='No such recorded file in this session')
+        return FileResponse(found[0], media_type=found[1], headers={'Cache-Control': 'no-store'})
 
     app.mount('/', StaticFiles(directory=FRONTEND, html=True), name='frontend')
     return app

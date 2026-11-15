@@ -6,6 +6,8 @@
 #   SMPA_GUI_OVERLAY    workspace install/setup.bash providing custom message types,
 #                       or "none" (default: the enclosing colcon workspace, if any)
 #   SMPA_GUI_HOST, SMPA_GUI_PORT  listening address (default 127.0.0.1:8765)
+#   SMPA_GUI_MEMORY_ROOT  SMPA memory directory shown in the SMPA tab, read-only
+#                         (default: memory/ beside gui/, if it exists)
 set -eo pipefail
 gui=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 fail() { echo "Error: $*" >&2; exit 1; }

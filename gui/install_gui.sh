@@ -13,8 +13,8 @@ if ! python3 -c 'import rclpy' 2>/dev/null; then
     [[ -f "$ros_setup" ]] || fail "ROS 2 setup not found: $ros_setup. Set SMPA_GUI_ROS_SETUP to your setup.bash."
     source "$ros_setup"
 fi
-python3 -c 'import rclpy, rosidl_runtime_py, numpy, PIL' \
-    || fail 'The ROS 2 Python environment must provide rclpy, rosidl_runtime_py, NumPy and Pillow.'
+python3 -c 'import rclpy, rosidl_runtime_py, numpy, PIL, yaml' \
+    || fail 'The ROS 2 Python environment must provide rclpy, rosidl_runtime_py, NumPy, Pillow and PyYAML.'
 
 requirements=requirements.txt
 [[ "${1:-}" == --dev ]] && requirements=requirements-dev.txt

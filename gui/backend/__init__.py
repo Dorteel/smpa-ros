@@ -6,10 +6,10 @@ Concepts:
     only way of acting on ROS is sending and cancelling action goals, and only
     when a local user explicitly asks for it. It never publishes application
     data, calls application services, or sets parameters. It imports nothing
-    from SMPA.
+    from SMPA; the SMPA tab reads SMPA's recorded run directories read-only.
 
     The contract version names the JSON shapes documented in ``gui/API.md``.
     Every HTTP response and every stream message follows that document.
 """
 
-CONTRACT_VERSION = '1.1'
+CONTRACT_VERSION = '1.2'
