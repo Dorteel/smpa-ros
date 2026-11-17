@@ -17,7 +17,13 @@ class Backend(Protocol):
 GENERATION_KEYS = ('temperature', 'max_output_tokens', 'reasoning_effort', 'seed', 'response_format')
 
 def generation_capabilities(backend, *, vision=False, provider=None, model_id=None):
-    """Supported controls, using explicit declarations for configured API models."""
+    """Describe generation controls supported by the selected backend and model.
+
+    Act exposes no generation. Local engines retain their existing common
+    controls; API engines expose only confirmed provider declarations for the
+    selected modality and model. Return fresh lists of parameters, response
+    formats and reasoning efforts without contacting a server.
+    """
     if backend == 'act':
         return dict(parameters=[], response_formats=[], reasoning_efforts=[])
     parameters = ['temperature', 'max_output_tokens', 'seed']
@@ -107,7 +113,13 @@ def validate_generation(settings, *, backend=None, capabilities=None):
             raise ValueError('reasoning_effort is unsupported for the selected model/provider')
 
 def generation_arguments(settings):
-    """Keep the existing backend token argument while exposing canonical config keys."""
+    """Convert validated canonical controls to the existing backend call arguments.
+
+    Validate the supplied settings, omit unavailable optional values, and map
+    max_output_tokens to max_new_tokens. Forward an output schema only for
+    json_schema responses. Return a new argument dictionary without changing
+    the caller’s configuration or weakening output validation.
+    """
     validate_generation(settings)
     result = {key: value for key, value in settings.items()
               if value is not None and key not in ('max_output_tokens', 'output_schema')}

@@ -1,6 +1,7 @@
 # Local RLHF Training Gym
 
-This independent Python application coexists with SMPA ROS. It does not change
+This independent Python application is owned by `smpa_llm` and coexists with SMPA ROS.
+The root `rlhf_gym` imports and app path remain compatibility entry points. It does not change
 robot control flow, ROS services, model registry, or the existing default test mode.
 
 The human workflow is direct:
@@ -17,17 +18,17 @@ local base + optional adapter → conversation → human feedback
                            reload adapter → conversation
 ```
 
-- `rlhf_gym/inference.py` loads local Transformers models, applies PEFT adapters,
+- `smpa_llm/smpa_llm/training/rlhf/inference.py` loads local Transformers models, applies PEFT adapters,
   renders chat templates and generates responses. Original weights are never saved
   over. CPU uses float32; CUDA supports explicitly selected precision and QLoRA.
-- `rlhf_gym/vault.py` writes exclusive, atomic Markdown records with YAML
+- `smpa_llm/smpa_llm/training/rlhf/vault.py` writes exclusive, atomic Markdown records with YAML
   frontmatter. Conversations are immutable headers plus ordered message events.
   Feedback snapshots the exact original prompt, generation settings and adapter.
-- `rlhf_gym/training.py` validates explicit approval and snapshots selected dataset
+- `smpa_llm/smpa_llm/training/rlhf/training.py` validates explicit approval and snapshots selected dataset
   rows. A subprocess runs TRL, freeing the dashboard to display progress and stop
   requests. A Linux advisory lock permits one training worker per vault. No trainer
   starts merely because feedback reaches a threshold.
-- `rlhf_gym/app.py` provides Conversation Gym, Training, Models, Experiments and
+- `smpa_llm/smpa_llm/training/rlhf/app.py` provides Conversation Gym, Training, Models, Experiments and
   Metrics. Streamlit browser memory holds only the loaded model and current UI
   selections. Durable history always comes from the vault.
 

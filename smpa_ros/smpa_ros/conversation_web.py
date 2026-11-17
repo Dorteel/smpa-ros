@@ -408,7 +408,15 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
 
 
 def main(args=None):
-    """Load existing configuration, lock one run, and finalize it on shutdown."""
+    """Run the independent conversational server using its selected configuration.
+
+    Resolve package inference defaults or legacy YAML without changing saved
+    run formats. Legacy weight roots remain beside their configuration; package
+    defaults use the current working directory unless explicitly overridden.
+    Require matching effective configuration on resumption, discover local
+    agents, and retain transcript locking, RDF modelling and server shutdown.
+    Always preserve the existing conversation workflow and persistence contract.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, default=Path.cwd() / 'config.yaml')
     parser.add_argument('--model-root', type=Path, help='Model storage root (default: models beside config)')

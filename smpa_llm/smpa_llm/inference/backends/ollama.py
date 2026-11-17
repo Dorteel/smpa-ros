@@ -9,12 +9,23 @@ class OllamaBackend:
 
     def __init__(self, model: str, url: str = 'http://localhost:11434',
                  timeout: float = 120):
+        """Remember the selected model and existing Ollama generation endpoint.
+
+        Normalize the supplied server URL and retain its request timeout. Construction
+        does not contact the server, provision weights or start an inference process.
+        """
         self.model = model
         self.url = url.rstrip('/') + '/api/generate'
         self.timeout = timeout
 
     def generate(self, prompt: str, *, max_new_tokens: int = 128, temperature=None,
                  seed=None, reasoning_effort=None, response_format=None, schema=None) -> str:
+        """Request one validated robot response from the existing Ollama server.
+
+        Validate controls and schema selection, then send the unchanged nonstreaming
+        payload with its output budget. Reject server errors and truncated output.
+        Return text only after enforcing the requested JSON contract when supplied.
+        """
         response_format = response_format or ('json_schema' if schema is not None else 'text')
         if schema is not None and response_format != 'json_schema':
             raise ValueError('A schema requires response_format=json_schema')
@@ -73,5 +84,10 @@ class OllamaBackend:
         return result['response']
 
     def generate_conversation(self, prompt: str | list[dict], *, max_new_tokens: int = 128) -> dict:
-        """Preserve an explicitly returned Ollama thinking field, if available."""
+        """Return one conversational result through the retained Ollama endpoint.
+
+        Delegate role-preserving messages and the supplied token budget to the
+        existing conversational completion path. Preserve explicit thinking metadata
+        when present; do not infer it from visible text or flatten message roles.
+        """
         return self._complete(prompt, max_new_tokens=max_new_tokens, conversation=True)

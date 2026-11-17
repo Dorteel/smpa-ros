@@ -5,7 +5,14 @@ import yaml
 from smpa_llm.inference.backends.base import generation_capabilities, validate_generation
 
 def local_model_info(directory, *, vision=False, model_id=None, model_root=None):
-    """Inspect local inference files without loading weights or querying the Hub."""
+    """Inspect local inference assets without loading weights or querying the Hub.
+
+    Resolve the selected directory and optional storage-root manifest. Check
+    supported architecture, tokenizer, processor when needed, and all weight
+    shards. Reuse size-only manifest validation when a report is available.
+    Return identity, status and a diagnostic reason; missing dependencies or
+    incomplete assets are reported without repairing or downloading files.
+    """
     directory = Path(directory).expanduser().resolve()
     root = Path(model_root).resolve() if model_root is not None else directory.parent.parent
     result = dict(path=str(directory), model_id=model_id or str(directory),
@@ -59,7 +66,14 @@ def local_model_info(directory, *, vision=False, model_id=None, model_root=None)
     return result
 
 def resolve_vision_model(config, registry, model_root, *, model_config=None):
-    """Resolve explicit paths or legacy YAML/report selections; never use Hub IDs as paths."""
+    """Resolve a local vision selection while preserving legacy YAML and report paths.
+
+    Prefer a frozen run path, then an explicit configured path. Otherwise read
+    the selected model definition and resolve its local destination or download
+    report. Interpret relative paths against the supplied storage root, never
+    a Hub identifier. Validate local assets and return the selected identity
+    and absolute path, or raise ValueError when the model is unavailable.
+    """
     vision = dict(config['model'] if isinstance(config.get('model'), dict) else config.get('vision', {}))
     frozen = config.get('_run', {}).get('stage_models', {}).get('sense', {})
     if frozen.get('path'):

@@ -116,3 +116,27 @@ def test_configuration_legacy_and_external_override_contract(tmp_path):
     import pytest
     with pytest.raises(ValueError, match='only model and provider'):
         load_configuration(path)
+
+
+def test_installed_model_management_and_lazy_package_import(tmp_path):
+    """Verify registry compatibility and a weight-free shared-package import.
+
+    Compare the authoritative installed registry with its legacy resource copy.
+    Require cognitive selection exports to reference the shared implementation.
+    Finally import the shared package in a fresh interpreter outside the checkout
+    and ensure neither Torch nor training was imported as a side effect.
+    """
+    from smpa_llm.models import loading
+    from smpa_ros import model
+    import subprocess
+    import sys
+    shared = Path(get_package_share_directory('smpa_llm')) / 'models'
+    legacy = Path(get_package_share_directory('smpa_ros')) / 'models'
+    for name in ('model_library.yaml', 'smolvlm2.yaml', 'qwen3_vl.yaml', 'gemma3.yaml'):
+        assert (shared / name).read_bytes() == (legacy / name).read_bytes()
+    assert model.load_backend is loading.load_backend
+    assert model.local_model_info is loading.local_model_info
+    subprocess.run([sys.executable, '-c',
+                    "import sys, smpa_llm; assert 'torch' not in sys.modules; "
+                    "assert not any(name.startswith('smpa_llm.training') for name in sys.modules)"],
+                   cwd=tmp_path, check=True)

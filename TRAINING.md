@@ -68,3 +68,18 @@ better helpfulness; humans must compare responses and retain held-out examples.
 Tests construct a tiny random GPT-2 locally and perform real optimizer steps for
 both SFT and DPO, including continuation and adapter reload. This verifies plumbing,
 not language capability, Qwen fine-tuning quality, or GPU memory fit.
+
+## Package ownership
+
+The implementation lives in `smpa_llm/smpa_llm/training/rlhf/`; the separate
+pinned environment profile is `smpa_llm/requirements-rlhf.txt`. The root
+requirements path and `run_rlhf.sh` remain compatible. Run from the repository:
+
+```bash
+./run_rlhf.sh
+./test.sh --rlhf
+```
+
+The launcher supplies the source package path to the independent interpreter.
+Approved workers execute `smpa_llm.training.rlhf.training` in that same environment.
+Normal ROS inference never starts a trainer or imports training dependencies.

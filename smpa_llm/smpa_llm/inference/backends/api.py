@@ -17,6 +17,13 @@ class APIBackend:
     """Reuse the existing generation interfaces through the official OpenAI SDK."""
 
     def __init__(self, config_path, *, modality='text', provider='openai'):
+        """Prepare one compatible API client from the selected configuration.
+
+        Resolve package-owned defaults or legacy provider settings, then validate the
+        model, endpoint and timeout. Obtain credentials from the named environment
+        variable or existing external dotenv file. Construct the existing SDK client
+        without inference or retries; reject invalid settings and missing credentials.
+        """
         from dotenv import load_dotenv
         from openai import OpenAI
 
@@ -212,11 +219,23 @@ class APIBackend:
     def generate(self, prompt: str, *, max_new_tokens: int = 128, schema: dict | None = None,
                  reasoning_effort: str | None = None, temperature=None, seed=None,
                  response_format=None) -> str:
+        """Return one robot text response through the retained API client.
+
+        Forward the caller’s budget, schema and generation controls to the existing
+        completion method. Preserve its string result, strict validation, truncation
+        rejection and sanitized error handling without starting another client.
+        """
         return self._complete(prompt, max_new_tokens, schema, reasoning_effort,
                               temperature, seed, response_format)
 
     def describe(self, image, prompt: str, *, max_new_tokens: int = 128, schema=None,
                  reasoning_effort=None, temperature=None, seed=None, response_format=None) -> str:
+        """Encode an image and request its description from the retained API client.
+
+        Convert the supplied image to RGB PNG and include its base64 data beside the
+        text prompt. Forward the unchanged budget, schema and generation controls.
+        Return the completion method’s validated text or propagate its safe error.
+        """
         buffer = BytesIO()
         image.convert('RGB').save(buffer, format='PNG')
         encoded = base64.b64encode(buffer.getvalue()).decode('ascii')

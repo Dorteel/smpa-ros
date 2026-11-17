@@ -24,7 +24,7 @@ flowchart LR
 - **Plan** selects an enabled action under a JSON schema, using the world model
   and goal. The default action set is `look_left` / `look_right`.
 - **Act** validates and dispatches the selected action, then records its outcome.
-  The explicit stage order is in [smpa_ros/smpa.py](smpa_ros/smpa.py);
+  The explicit stage order is in [smpa_ros/smpa_ros/smpa.py](smpa_ros/smpa_ros/smpa.py);
   [runner.py](runner.py) supplies the runtime and persistence wiring.
 
 The independent conversational application follows **Sense → Model → Act**:
@@ -74,7 +74,7 @@ packages, provisions the shared model selected in [config.yaml](config.yaml),
 and builds SMPA plus the external `simulation_actions` interfaces into
 `~/ros2_ws/install`. It does **not** install or start Webots. Re-run it after
 source or installed-asset changes. Explicit model paths must already be complete
-or match the downloader layout; model definitions are in [models/](models/).
+or match the downloader layout; model definitions are owned by [smpa_llm/models/](smpa_llm/models/).
 
 The [external simulation repository](https://github.com/Dorteel/webots_ros2_simulation)
 requires its own installation and launch procedure (the inspected integration
@@ -82,6 +82,33 @@ used Webots R2025a with the full camera/head profile). Keep its simulation
 stepping and use the same ROS domain as SMPA. Other camera/action servers must
 provide the same interfaces. The launcher currently checks the Webots `Look`
 interface even for nonphysical experiments.
+
+## Package configuration
+
+`smpa_ros` owns cognitive settings and ROS adapters; `smpa_llm` owns inference,
+model provisioning and independent training. Their primary defaults are
+[smpa_ros/config.yaml](smpa_ros/config.yaml) and
+[smpa_llm/config.yaml](smpa_llm/config.yaml), installed in their ROS share
+resources. The cognitive file explicitly selects the shared inference defaults;
+explicit top-level overrides replace entire sections, matching legacy behavior.
+The interface package contains contracts only and has no configuration file.
+
+The complete root [config.yaml](config.yaml) remains a **legacy compatibility
+configuration**, used by `run_smpa.sh` and the existing configurator. It is read
+as a complete configuration instead of the package preset; existing model
+selections and commands remain unchanged. Inspect the existing ROS launch
+command, which selects package defaults unless overridden:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ../../install/setup.bash
+ros2 launch smpa_ros llm.launch.py --show-args
+```
+
+Keep writable experiment overrides outside installed share directories and pass
+`config:=/absolute/path/to/config.yaml`. Credentials remain in environment
+variables or an external `.env`. See the
+[migration and dependency map](docs/architecture/llm-reorganization.md).
 
 ## Quick Start
 
@@ -127,6 +154,7 @@ error, not a successful empty transcript. See the focused
 
 ```bash
 .venv/bin/python scripts/download_models.py --model qwen3-4b
+source ../../install/setup.bash
 .venv/bin/python -m smpa_ros.conversation_web --config "$PWD/config.yaml"
 ```
 
@@ -178,16 +206,20 @@ it shows ROS communication, not Python calls inside Runner or file-backed Read.
 ## Repository Structure
 
 ```text
-runner.py, smpa_ros/smpa.py   Runtime and explicit robot stage sequence
-sense/{hear,read,vision}/    Sensory acquisition and evidence handling
-smpa_ros/                   Model, Plan, Act, conversation, RDF and backends
-speech/                     Listen/Talk ROS actions and audio backends
-smpa_ros_interfaces/        Custom ROS services and actions
-launch/, config/, models/   Launch descriptions, profiles and model registry
-memory.py, memory/          Run persistence and local execution records
-gui/                        Independent ROS GUI with Actions and Sense workspaces
-rlhf_gym/, tests_rlhf/       Separate feedback/training laboratory
-test/, test.sh              Robot, conversation and auxiliary-tool tests
+smpa_ros/                   Cognitive ROS package: metadata, config and launch/
+  smpa_ros/                 Model, Plan, Act, conversation, RDF and sensory service
+  runner.py, memory.py      Orchestration and provenance; legacy imports retained
+  sense/, speech/           Hear/Read/Vision and speech ROS adapters
+smpa_llm/                   Shared inference ROS package; no inference server
+  config.yaml, models/      Inference defaults and pinned model definitions
+  smpa_llm/inference/       Engines, speech, segmentation and VisualJEV inference
+  smpa_llm/models/          Local asset checks, selection and explicit provisioning
+  smpa_llm/training/rlhf/    Independent feedback, SFT and DPO laboratory
+smpa_ros_interfaces/        Existing ROS services and actions; no implementation
+gui/                        Unchanged independent browser frontend/backend adapter
+models/, memory/            Existing local weight paths and run records
+config/                     Existing experiment profiles
+test/, tests_rlhf/, test.sh Package, robot, conversation and training verification
 ```
 
 ## Current Capabilities
@@ -211,6 +243,13 @@ test/, test.sh              Robot, conversation and auxiliary-tool tests
   model/dependency requirements and tests; neither replaces Model/Plan or runs
   automatically in the standard loop. See the model registry and
   [VisualJEV dependency declaration](requirements-visual-jev.txt).
+
+Model provisioning also has an installed command:
+`ros2 run smpa_llm download_models --list` (read-only inventory).
+The existing `.venv/bin/python scripts/download_models.py ...` command remains
+available. Weights and checkpoints have not moved. Source compatibility links and
+legacy backend imports point to single implementations; source Python commands
+for cognition require the built ROS overlay to be sourced.
 
 Advanced references: [ROS GUI guide](gui/README.md),
 [RLHF architecture](ARCHITECTURE.md), [training guide](TRAINING.md), and

@@ -102,7 +102,8 @@ class Runner:
     def configure(self, args=None):
         """Resolve the existing pipeline plus explicit sequential modality switches.
 
-        Preserve stage controls and model defaults. Optional Hear/Vision overrides
+        Read package defaults through ROS resources or retain a complete legacy
+        configuration. Preserve stage controls and model defaults. Hear/Vision overrides
         and an explicitly selected Read conversation are frozen into this run's
         configuration; no message receipt changes stage ordering or resumes a
         physical experiment. Reject incomplete modality configuration at startup.

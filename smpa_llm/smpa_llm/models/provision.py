@@ -69,7 +69,12 @@ CRITICAL = 2 * GIB
 
 
 def disk_usage(directory):
-    """Allocated local bytes, counting hard-linked files only once."""
+    """Measure allocated disk bytes beneath the supplied model directory.
+
+    Walk local files and count each device/inode pair once so hard-linked
+    cached weights do not inflate usage. Return allocated bytes from filesystem
+    block counts without modifying files or loading model contents.
+    """
     seen = set()
     total = 0
     for path in directory.rglob('*'):
@@ -83,11 +88,22 @@ def disk_usage(directory):
 
 
 def digest(path):
+    """Return the SHA-256 digest of one file without changing it.
+
+    Open the supplied path in binary mode and stream its contents through the
+    standard hash implementation. File-access errors propagate to provisioning.
+    """
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def verified(directory, manifest):
+    """Check that a nonempty manifest matches its local files.
+
+    Require every named file and its declared size. Check SHA-256 only when the
+    manifest supplies a digest, allowing runtime inspection to request size-only
+    validation. Return false for a mismatch without repairing or downloading files.
+    """
     return bool(manifest) and all(
         (directory / name).is_file()
         and (directory / name).stat().st_size == details['size']
@@ -97,6 +113,11 @@ def verified(directory, manifest):
 
 
 def save_report(path, records):
+    """Publish the current download records as one replacement report.
+
+    Serialize the supplied records into a temporary sibling JSON file, then
+    replace the report atomically. Existing model files are never modified.
+    """
     temporary = path.with_suffix('.json.tmp')
     with temporary.open('w', encoding='utf-8') as stream:
         json.dump({'models': list(records.values())}, stream, indent=2)
@@ -231,6 +252,13 @@ def download(model, root, results):
 
 def attempt(model, root, timeout):
     # A process deadline also bounds native transfer code and Hub internal retries.
+    """Run one existing download worker with a bounded deadline.
+
+    Spawn the provisioning worker, preserve revision progress from its messages,
+    and return its terminal status. Report worker exit, low disk space or timeout
+    as a failed or skipped attempt. Always terminate any remaining worker and
+    close the result queue; partial model files remain available for resumption.
+    """
     context = multiprocessing.get_context('spawn')
     results = context.Queue()
     process = context.Process(target=download, args=(model, root, results))
@@ -265,6 +293,12 @@ def attempt(model, root, timeout):
 
 
 def record_attempt(model, result, root, records, report):
+    """Persist one model attempt and return its provenance record.
+
+    Combine the model identity, destination, result, revision and manifest with
+    local disk usage. Update the caller’s records and atomically save the report.
+    The existing serialized record fields and model files remain unchanged.
+    """
     category, folder, repo = model
     directory = root / category / folder
     record = {
@@ -392,6 +426,11 @@ def main():
         parser.error('retries must be nonnegative and timeout must be positive')
     # Also save the current attempt when a terminal sends SIGTERM.
     def interrupt(*_):
+        """Translate the terminal termination signal into cooperative interruption.
+
+        Raise KeyboardInterrupt so the existing provisioning loop records the
+        interrupted attempt and preserves partial files for a later restart.
+        """
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupt)

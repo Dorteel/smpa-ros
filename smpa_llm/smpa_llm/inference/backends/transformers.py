@@ -55,7 +55,14 @@ def validate_generated_output(text, continuation, max_new_tokens, response_forma
 
 
 def generation_options(model, tokenizer, temperature, schema):
-    """Prepare independent sampling and schema masks for a single request."""
+    """Prepare request-local sampling controls and an optional strict schema mask.
+
+    Use the supplied model and tokenizer without loading weights. Translate
+    temperature to existing sampling options. For a schema, validate it and
+    create a fresh Outlines logits processor over these same objects so mask
+    state cannot leak between requests. Reject unavailable constrained decoding
+    rather than falling back to unconstrained generation. Return call options.
+    """
     options = {}
     if temperature is not None:
         options['do_sample'] = temperature > 0
@@ -87,6 +94,12 @@ class TransformersBackend:
 
     def __init__(self, model_path: str, *, enable_thinking: bool | None = None):
         # Optional dependencies are loaded only when this backend is selected.
+        """Load one local causal model and tokenizer for subsequent requests.
+
+        Import optional inference dependencies only when selected. Load local files
+        without downloading, retain the requested thinking preference, and put the
+        model in evaluation mode. Later requests reuse these same objects.
+        """
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -217,6 +230,13 @@ class TransformersVLM:
     """CPU or single-GPU image inference from an already downloaded checkpoint."""
 
     def __init__(self, model_id: str, dtype: str = 'auto', *, device: str = 'auto') -> None:
+        """Load one local VLM and processor on the requested device and precision.
+
+        Validate explicit device and dtype choices before loading. Resolve automatic
+        settings using the existing CUDA checks, report the selection, and load only
+        local weights. Retain the evaluated full model and processor tokenizer for
+        both vision and text requests; do not create another language model.
+        """
         import torch
         from transformers import AutoModelForImageTextToText, AutoProcessor
 
