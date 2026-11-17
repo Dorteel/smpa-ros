@@ -3,6 +3,7 @@ set -eo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 mode="${1:---unit}"
 if [[ "$mode" == --rlhf ]]; then
+    export PYTHONPATH="$PWD/smpa_llm:$PWD${PYTHONPATH:+:$PYTHONPATH}"
     export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
     export TOKENIZERS_PARALLELISM=false WANDB_DISABLED=true
     rlhf_test_dir="$(mktemp -d)"

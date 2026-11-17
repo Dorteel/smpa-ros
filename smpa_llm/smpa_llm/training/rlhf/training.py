@@ -14,7 +14,7 @@ import subprocess
 import sys
 import traceback
 
-from rlhf_gym import vault
+from smpa_llm.training.rlhf import vault
 from transformers import TrainerCallback
 
 DEFAULTS = {'algorithm': 'SFT', 'learning_rate': 0.0001, 'epochs': 1.0, 'batch_size': 1,
@@ -73,7 +73,7 @@ def approve_run(root, configuration, selected_ids, *, approved=False, replay=Fal
     eligible = {entry['id']: entry['row'] for entry in vault.examples(root, config['algorithm'], config['model'], replay)}
     if not selected_ids or len(set(selected_ids)) != len(selected_ids) or any(key not in eligible for key in selected_ids):
         raise ValueError('Select unique eligible examples for this method and model')
-    from rlhf_gym.inference import model_information, hardware
+    from smpa_llm.training.rlhf.inference import model_information, hardware
     return vault.append(root, 'training', artifacts=model_information(config['model'], config['adapter']),
                         hardware=hardware(), title=f"{config['algorithm']} training", algorithm=config['algorithm'],
                         configuration=config, example_ids=list(selected_ids),
@@ -88,6 +88,9 @@ def start_worker(root, run):
     per-run launch lock rejects duplicate starts; the global worker lock prevents
     competing jobs. Save stdout and stderr beside artifacts for failure diagnosis.
     The returned process identifier is informational; status is recovered from events.
+    Launch the same training interpreter against the shared package module. In a
+    checkout its package root is the working directory, so the separate training
+    environment does not require a cognitive installation.
     """
     persisted = next((item for item in vault.records(root, 'training') if item['id'] == run['id']), None)
     if not persisted or persisted.get('approved') is not True:
@@ -101,8 +104,8 @@ def start_worker(root, run):
             raise ValueError('This approved run has already been launched; approve a new run to retry')
         (directory / 'launched').touch(exist_ok=False)
         with (directory / 'worker.log').open('a') as output:
-            process = subprocess.Popen([sys.executable, '-m', 'rlhf_gym.training', '--vault', str(root), '--run', run['id']],
-                                       cwd=Path(__file__).resolve().parent.parent, stdout=output, stderr=subprocess.STDOUT,
+            process = subprocess.Popen([sys.executable, '-m', 'smpa_llm.training.rlhf.training', '--vault', str(root), '--run', run['id']],
+                                       cwd=Path(__file__).resolve().parents[3], stdout=output, stderr=subprocess.STDOUT,
                                        start_new_session=True)
             # Publish queued state before releasing the launch lock, which the worker
             # also acquires before checking whether it has already started.
@@ -171,7 +174,7 @@ def _train(root, run):
     from peft import LoraConfig, get_peft_model
     from transformers import TrainerCallback, set_seed
     from trl import SFTConfig, SFTTrainer, DPOConfig, DPOTrainer
-    from rlhf_gym.inference import load_model
+    from smpa_llm.training.rlhf.inference import load_model
     config = run['configuration']
     set_seed(config['seed'])
     torch.set_num_threads(min(4, os.cpu_count() or 1))

@@ -1,6 +1,1 @@
-# Optional ROS evaluator dependencies; do not install into the RLHF environment.
-# Reuse supported core inference versions rather than upstream benchmark pins.
--r requirements-inference.txt
-peft==0.21.0
-accelerate==1.15.0
-safetensors>=0.8.0
+smpa_llm/requirements-visual-jev.txt
