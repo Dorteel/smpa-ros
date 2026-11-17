@@ -135,12 +135,31 @@ for responding and belief modelling. The application creates its own session;
 `--resume /absolute/path/to/conversation/run` resumes one. Its model selection is
 independent of the robot's shared VLM.
 
+**ROS browser GUI** — the consolidated `gui/` includes ROS graph and sensor
+inspection, Actions v2, and the read-only SMPA Sense workspace v3. Install its
+separate environment and launch from the repository root:
+
+```bash
+./gui/install_gui.sh --dev
+./gui/run_gui.sh --read-only --memory-root "$PWD/memory"
+```
+
+Open `http://127.0.0.1:8765`. The GUI runs independently of the cognitive loop
+and can inspect ROS without SMPA running. Recorded Sense evidence comes from
+the selected memory directory; live sensors require publishers in the same ROS
+domain. The launcher discovers the enclosing workspace overlay for custom types.
+`--read-only` disables action execution; omit it to enable explicit, confirmed
+action requests. The Sense workspace does not submit conversation messages or
+start robot runs. See the [GUI guide](gui/README.md), [API](gui/API.md), and
+[SMPA data contracts](gui/SMPA_CONTRACTS.md).
+
 **Tests and ROS inspection:**
 
 ```bash
 ./test.sh --unit
 ./test.sh --integration
 ./test.sh --rlhf
+./gui/test_gui.sh --browser
 source /opt/ros/jazzy/setup.bash
 source ../../install/setup.bash
 rqt_graph
@@ -150,6 +169,9 @@ Unit tests build an isolated ROS overlay and check installed assets/entry points
 Integration tests need the intended local models and optional dependencies;
 the all-senses test uses controlled camera/audio fixtures and Observe-only
 execution. RLHF tests require the separate `.venv-rlhf` environment.
+GUI tests use isolated ROS fixture nodes and action servers. Logic tests skip
+without Node.js; browser tests skip without Playwright and require its Chromium
+browser to be installed when Playwright is available.
 `rqt_graph` needs its Qt display and a running system in the same ROS domain;
 it shows ROS communication, not Python calls inside Runner or file-backed Read.
 
@@ -163,7 +185,7 @@ speech/                     Listen/Talk ROS actions and audio backends
 smpa_ros_interfaces/        Custom ROS services and actions
 launch/, config/, models/   Launch descriptions, profiles and model registry
 memory.py, memory/          Run persistence and local execution records
-gui/                        Independent observational ROS browser GUI (v1 on main)
+gui/                        Independent ROS GUI with Actions and Sense workspaces
 rlhf_gym/, tests_rlhf/       Separate feedback/training laboratory
 test/, test.sh              Robot, conversation and auxiliary-tool tests
 ```
@@ -181,13 +203,16 @@ test/, test.sh              Robot, conversation and auxiliary-tool tests
 - Role-preserving conversations, resumption, validated atomic RDF belief updates,
   statement attribution, and browser graph inspection. Conversational claims
   remain attributed statements, not verified physical facts.
+- A self-contained ROS browser GUI with sensor streams, guarded action execution,
+  and recorded Vision/Hear/Read observation browsing. Its HTTP/WebSocket gateway
+  is separate from cognition and exposes documented interfaces for other frontends.
 - Independent text-guided segmentation and **VisualJEV** forced-choice visual
   evaluation with probability outputs and a ROS service. They have their own
   model/dependency requirements and tests; neither replaces Model/Plan or runs
   automatically in the standard loop. See the model registry and
   [VisualJEV dependency declaration](requirements-visual-jev.txt).
 
-Advanced references: [observational GUI guide](gui/README.md),
+Advanced references: [ROS GUI guide](gui/README.md),
 [RLHF architecture](ARCHITECTURE.md), [training guide](TRAINING.md), and
 [RLHF limitations](TODO.md). The previous
 [detailed README](https://github.com/Dorteel/smpa-ros/blob/7f6b3c07c37516a0192f913d8ae4d83aa107e055/README.md)
@@ -205,10 +230,12 @@ separate environment and verification boundaries. Optional browser, GPU and
 provider-specific inference checks depend on available tooling and hardware;
 fixture tests do not establish physical robot safety or model reasoning quality.
 
-**GUI integration:** `main` includes the observational GUI v1. Actions v2 and the
-read-only Sense workspace v3 have been integrated on the separate local
-`integration/gui-v3-sense` worktree branch, not merged into `main`. Their browser
-verification remains incomplete. The four-quadrant SMPA dashboard is unfinished.
+**GUI verification and remaining work:** GUI v1, Actions v2 and Sense v3 are
+consolidated on `main`. Browser verification remains incomplete because
+Playwright was unavailable during consolidation; five Node.js logic tests were
+also skipped. One ROS CLI discovery check failed initially and passed on the
+unchanged full rerun. The four-quadrant SMPA dashboard remains unfinished;
+Model, Plan and Act sections in the SMPA tab are placeholders.
 
 **Planned or incomplete:** an RDF Sense Graph and central I-Graph, causal planning,
 richer action representations, and Physical/Mental mode integration. Existing
