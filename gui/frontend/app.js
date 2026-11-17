@@ -10,9 +10,10 @@
 import {getJSON, h, poll} from './api.js';
 import ros from './tabs/ros/index.js';
 import sensors from './tabs/sensors/index.js';
+import actions from './tabs/actions/index.js';
 import smpa from './tabs/smpa/index.js';
 
-const TABS = [ros, sensors, smpa];
+const TABS = [ros, sensors, actions, smpa];
 const workspace = document.getElementById('workspace');
 const tabBar = document.getElementById('primary-tabs');
 const connection = document.getElementById('connection');

@@ -3,8 +3,13 @@
 Concepts:
     A fixture is a small, predictable ROS participant: a talker and listener
     pair, a node with declared parameters, a node that exists but never
-    answers (it is not spun), an action server with a client, and one
-    publisher per supported sensor type. All names start with ``fixture`` so
+    answers (it is not spun), two action servers with a client, and one
+    publisher per supported sensor type.
+
+    The Fibonacci action server behaves like a slow robot action: it sends
+    feedback five times per second, can be cancelled, and has special orders
+    that make it reject a goal, abort, or refuse cancellation. The lookup
+    action server has a goal with nested messages and answers at once. All names start with ``fixture`` so
     tests can tell them from anything else on the ROS graph.
 """
 import array
@@ -14,7 +19,8 @@ import struct
 import sys
 
 import rclpy
-from rclpy.action import ActionClient, ActionServer
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 
@@ -22,6 +28,7 @@ from example_interfaces.action import Fibonacci
 from sensor_msgs.msg import (CameraInfo, CompressedImage, Image, Imu, JointState, LaserScan, NavSatFix,
                              PointCloud2, PointField, Range)
 from std_msgs.msg import String
+from tf2_msgs.action import LookupTransform
 
 IMAGE_WIDTH, IMAGE_HEIGHT = 64, 48
 CLOUD_POINTS = 5000
@@ -107,8 +114,13 @@ class Fixtures:
         self.parameters.declare_parameter('fixture_flags', [True, False])
         self.silent.declare_parameter('never_readable', 1)
 
-        self.action_server = ActionServer(self.action_server_node, Fibonacci, '/fixture/fibonacci',
-                                          self.execute)
+        group = ReentrantCallbackGroup()
+        self.action_server = ActionServer(
+            self.action_server_node, Fibonacci, '/fixture/fibonacci', self.execute, callback_group=group,
+            goal_callback=lambda goal: GoalResponse.REJECT if goal.order < 0 else GoalResponse.ACCEPT,
+            cancel_callback=lambda handle: CancelResponse.REJECT if handle.request.order == 7 else CancelResponse.ACCEPT)
+        self.lookup_server = ActionServer(self.action_server_node, LookupTransform, '/fixture/lookup_transform',
+                                          self.lookup, callback_group=group)
         self.action_client = ActionClient(self.action_client_node, Fibonacci, '/fixture/fibonacci')
 
         create = self.sensors.create_publisher
@@ -127,9 +139,40 @@ class Fixtures:
         self.sensors.create_timer(0.1, self.publish_sensors)
 
     def execute(self, goal_handle):
-        """Answer a Fibonacci goal immediately; the tests only need the server to exist."""
+        """Compute a Fibonacci sequence slowly, one number and one feedback message every 0.2 seconds.
+
+        A negative order was already rejected before this runs. Order 13
+        aborts after the first feedback. A cancel request ends the goal as
+        cancelled with the numbers computed so far (order 7 refuses cancel
+        requests and therefore always completes). Otherwise the goal
+        succeeds with ``order + 1`` numbers.
+        """
+        import time
+        sequence = [0, 1]
+        for index in range(1, goal_handle.request.order):
+            if goal_handle.is_cancel_requested:
+                goal_handle.canceled()
+                return Fibonacci.Result(sequence=sequence)
+            sequence.append(sequence[index] + sequence[index - 1])
+            goal_handle.publish_feedback(Fibonacci.Feedback(sequence=sequence))
+            if goal_handle.request.order == 13:
+                goal_handle.abort()
+                return Fibonacci.Result(sequence=sequence)
+            time.sleep(0.2)
         goal_handle.succeed()
-        return Fibonacci.Result(sequence=[0, 1])
+        return Fibonacci.Result(sequence=sequence[:goal_handle.request.order + 1])
+
+    def lookup(self, goal_handle):
+        """Answer a lookup goal at once, echoing goal values so tests can see they arrived intact."""
+        goal = goal_handle.request
+        result = LookupTransform.Result()
+        result.transform.header.frame_id = goal.target_frame
+        result.transform.child_frame_id = goal.source_frame
+        result.transform.header.stamp = goal.source_time
+        result.transform.transform.translation.x = float(goal.timeout.sec)
+        result.transform.transform.translation.y = 1.0 if goal.advanced else 0.0
+        goal_handle.succeed()
+        return result
 
     def publish_chatter(self):
         """Publish a numbered text message ten times per second."""
@@ -228,7 +271,7 @@ def main():
     """
     rclpy.init()
     fixtures = Fixtures()
-    executor = MultiThreadedExecutor(num_threads=2)
+    executor = MultiThreadedExecutor(num_threads=8)
     for node in fixtures.spun:
         executor.add_node(node)
     print('FIXTURES READY', flush=True)

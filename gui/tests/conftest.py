@@ -77,9 +77,36 @@ def stop(process):
         process.wait()
 
 
+SMPA_MEMORY = None
+
+
+def build_memory(directory, demo=False):
+    """Write the fixture SMPA memory directory with the GUI's interpreter and return its path.
+
+    The builder needs Pillow from the ROS environment, which the interpreter
+    running browser tests may not be able to load, so it runs as a subprocess.
+    """
+    command = [PYTHON, str(GUI / 'tests' / 'fixtures' / 'smpa_memory.py'), '--output', str(directory)]
+    subprocess.run(command + (['--demo'] if demo else []), check=True, capture_output=True)
+    return Path(directory)
+
+
+def smpa_memory():
+    """Build the fixture SMPA memory directory once per test session and return its path."""
+    global SMPA_MEMORY
+    if SMPA_MEMORY is None:
+        import tempfile
+        SMPA_MEMORY = str(build_memory(Path(tempfile.mkdtemp(prefix='smpa-memory-')) / 'memory'))
+    return SMPA_MEMORY
+
+
 def isolated_environment():
-    """Build an environment with a random ROS domain restricted to this computer."""
+    """Build an environment with a random ROS domain restricted to this computer.
+
+    The GUI started in this environment reads the fixture SMPA memory directory.
+    """
     environment = dict(os.environ)
+    environment['SMPA_GUI_MEMORY_ROOT'] = smpa_memory()
     environment['ROS_DOMAIN_ID'] = str(random.randint(110, 200))
     environment['ROS_AUTOMATIC_DISCOVERY_RANGE'] = 'LOCALHOST'
     environment['PYTHONUNBUFFERED'] = '1'
@@ -145,3 +172,17 @@ def lonely_server():
     yield base, environment, process
     if process.poll() is None:
         stop(process)
+
+
+@pytest.fixture(scope='session')
+def browser():
+    """Start one headless Chromium for all browser tests, or skip them without Playwright."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        pytest.skip('Playwright is not installed')
+    (GUI / 'tests' / 'artifacts').mkdir(exist_ok=True)
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        yield browser
+        browser.close()

@@ -36,16 +36,6 @@ def wait_for(condition, timeout=15.0, message='condition was not reached'):
 
 
 @pytest.fixture(scope='module')
-def browser():
-    """Start one headless Chromium for all browser tests."""
-    ARTIFACTS.mkdir(exist_ok=True)
-    with playwright.sync_playwright() as driver:
-        browser = driver.chromium.launch()
-        yield browser
-        browser.close()
-
-
-@pytest.fixture(scope='module')
 def page(server, browser):
     """Open the GUI in one page shared by the tests and fail on any page error.
 
@@ -63,9 +53,9 @@ def page(server, browser):
     assert errors == [], f'The page reported errors: {errors}'
 
 
-def test_shell_has_three_tabs_and_four_ros_views(page):
-    """The primary tabs are ROS 2, Sensors and SMPA; the image viewer is not a ROS 2 view any more."""
-    assert page.locator('#primary-tabs button').all_inner_texts() == ['ROS 2', 'Sensors', 'SMPA']
+def test_shell_has_four_tabs_and_four_ros_views(page):
+    """The primary tabs are ROS 2, Sensors, Actions and SMPA; the image viewer is not a ROS 2 view."""
+    assert page.locator('#primary-tabs button').all_inner_texts() == ['ROS 2', 'Sensors', 'Actions', 'SMPA']
     assert page.locator('.subtabs button').all_inner_texts() == ['Graph', 'Topics', 'Parameters', 'Actions']
     page.wait_for_function("document.getElementById('connection').textContent.includes('domain')")
 
@@ -241,7 +231,7 @@ def test_leaving_the_sensors_tab_unsubscribes_and_returning_restores_panels(page
     panels = page.locator('.panel').count()
     assert panels == 8 and len(subscriptions(server)) == 8
     page.click('#primary-tabs button[data-tab="smpa"]')
-    assert 'No SMPA modules are installed yet.' in page.inner_text('#smpa-empty')
+    page.wait_for_selector('#session-select')
     page.screenshot(path=str(ARTIFACTS / 'smpa.png'))
     wait_for(lambda: subscriptions(server) == set(), message='leaving the Sensors tab left subscriptions behind')
     page.click('#primary-tabs button[data-tab="sensors"]')

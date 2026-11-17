@@ -93,7 +93,7 @@ def test_health_reports_ros_environment(server, ros_environment):
     health = get(server, '/health')
     assert health['status'] == 'ok' and health['ros']['ok'] and health['ros']['node'] == '/smpa_gui'
     assert health['ros']['domain_id'] == int(ros_environment['ROS_DOMAIN_ID'])
-    assert health['contract_version'] == '1.0'
+    assert health['contract_version'] == '1.2'
 
 
 def test_graph_contains_fixture_nodes_topics_and_connections(server):
@@ -212,7 +212,7 @@ def test_unresponsive_and_unknown_nodes_are_states_not_errors(server):
     """A node that never spins is 'not_responding'; a node without services is 'unavailable'."""
     started = time.monotonic()
     silent = get(server, '/ros/nodes/parameters', node='/fixture_silent', timeout=1)
-    assert silent == dict(contract_version='1.0', node='/fixture_silent', state='not_responding', parameters=[])
+    assert silent == dict(contract_version='1.2', node='/fixture_silent', state='not_responding', parameters=[])
     assert time.monotonic() - started < 4
     assert get(server, '/ros/nodes/parameters', node='/no_such_node')['state'] == 'unavailable'
     assert get(server, '/ros/nodes/parameters', node='/smpa_gui')['state'] == 'unavailable'
@@ -391,10 +391,12 @@ def test_foreign_browser_origins_cannot_open_streams(server):
         assert next_data(socket)[0]['message']['data'].startswith('fixture message')
 
 
-def test_no_write_operations_exist(server):
-    """Every documented route is read-only: the application defines only GET and WebSocket routes."""
+def test_only_the_action_goal_routes_can_change_anything(server):
+    """Every route is read-only except submitting a goal and requesting its cancellation."""
     routes = fetch(server + '/api/openapi.json')['paths']
-    assert routes and all(set(methods) == {'get'} for methods in routes.values())
+    writable = {path: sorted(methods) for path, methods in routes.items() if set(methods) != {'get'}}
+    assert writable == {'/api/v1/actions/goals': ['get', 'post'],
+                        '/api/v1/actions/goals/{goal_id}/cancel': ['post']}
 
 
 def test_gateway_node_offers_nothing_to_the_ros_graph(server):

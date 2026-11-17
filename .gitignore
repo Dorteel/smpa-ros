@@ -242,3 +242,6 @@ __marimo__/
 # Local human-feedback laboratory
 .venv-rlhf/
 RLHF-Vault/
+
+# Keep imported patch artifacts out of future commits.
+/Claude outputs/*.patch

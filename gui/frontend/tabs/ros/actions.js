@@ -3,7 +3,7 @@
  *
  * Concepts: an action server is a node that can execute goals of an action;
  * an action client is a node that can send them. This view only lists them.
- * It never sends, cancels or monitors goals.
+ * It never sends, cancels or monitors goals; the separate Actions tab does.
  */
 import {getJSON, h, poll} from '../../api.js';
 
@@ -27,7 +27,8 @@ export default {
     const body = h('tbody', {id: 'action-list'});
     const count = h('span', {class: 'count'}, '');
     container.append(h('div', {class: 'column', style: 'flex:1'},
-      h('div', {class: 'toolbar'}, h('span', {}, 'Discovered actions (read-only)'), count),
+      h('div', {class: 'toolbar'}, h('span', {}, 'Discovered actions (read-only view; goals are sent from the '),
+        h('a', {href: '#actions'}, 'Actions tab'), h('span', {}, ')'), count),
       h('div', {class: 'detail', style: 'padding:0'}, h('table', {},
         h('thead', {}, h('tr', {}, h('th', {}, 'Action'), h('th', {}, 'Type'), h('th', {}, 'Servers'), h('th', {}, 'Clients'))), body))));
     stop = poll(async () => {

@@ -1,7 +1,8 @@
 /**
  * The only place where the frontend talks to the gateway.
  *
- * Concepts: a snapshot is one JSON answer fetched over HTTP. A stream is a
+ * Concepts: a snapshot is one JSON answer fetched over HTTP. A command is a
+ * single POST made because the user clicked something. A stream is a
  * WebSocket on which the gateway sends "data" and "status" messages; a data
  * message may be followed by one binary block (a JPEG or packed points).
  * Views never open sockets or build URLs themselves, so a different
@@ -46,6 +47,22 @@ export async function getJSON(path, parameters = {}) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || `Gateway answered ${response.status}`);
   return body;
+}
+
+/**
+ * Send one JSON POST request and return {ok, status, body}.
+ *
+ * Used only for deliberate user actions (sending or cancelling an action
+ * goal). The request is made exactly once: it is never retried here, because
+ * repeating it could repeat a physical action. A response outside the 2xx
+ * range is returned, not thrown, so the caller can show the gateway's
+ * explanation. A network failure throws; the caller must then tell the user
+ * that the outcome is unknown.
+ */
+export async function postJSON(path, body, token) {
+  const response = await fetch(BASE + path, {method: 'POST', cache: 'no-store',
+    headers: {'Content-Type': 'application/json', 'X-SMPA-GUI-Token': token || ''}, body: JSON.stringify(body)});
+  return {ok: response.ok, status: response.status, body: await response.json().catch(() => ({}))};
 }
 
 /**

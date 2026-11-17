@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from backend import ros_graph, ros_names, ros_topics, sensors
+from backend import ros_graph, ros_interfaces, ros_names, ros_topics, sensors
 
 
 def header(frame='frame'):
@@ -215,3 +215,63 @@ def test_registry_covers_the_required_types_and_filters_topics():
         dict(name='/chatter', types=['std_msgs/msg/String'], hidden=False, publisher_count=1)])
     assert sensors.sensor_topics(graph) == [dict(topic='/scan', type='sensor_msgs/msg/LaserScan',
                                                  viewer='laserscan', label='Laser scan', publisher_count=0)]
+
+
+def check(schema, value):
+    """Return the validation errors for a value as (path, message) pairs."""
+    errors = []
+    ros_interfaces.check(schema, value, '', errors)
+    return [(error['path'], error['message']) for error in errors]
+
+
+def test_schema_validation_rules():
+    """Each field kind accepts fitting values and names the field and rule for others."""
+    integer = dict(kind='integer', type='uint8', minimum=0, maximum=255)
+    number = dict(kind='float', type='float', limit=3.4028234663852886e38)
+    text = dict(kind='string', type='string', max_length=3)
+    schema = dict(kind='message', type='pkg/msg/Thing', fields=[
+        dict(name='flag', schema=dict(kind='boolean', type='boolean')), dict(name='count', schema=integer),
+        dict(name='ratio', schema=number), dict(name='label', schema=text),
+        dict(name='triple', schema=dict(kind='array', item=number, fixed_size=3, max_size=None)),
+        dict(name='few', schema=dict(kind='array', item=integer, fixed_size=None, max_size=2)),
+        dict(name='inner', schema=dict(kind='message', type='pkg/msg/Inner', fields=[dict(name='count', schema=integer)]))])
+    good = dict(flag=True, count=255, ratio=1, label='abc', triple=[1, 2.5, 3], few=[1], inner=dict(count=0))
+    assert check(schema, good) == [] and check(schema, {}) == []
+    assert check(schema, dict(flag=1)) == [('flag', 'must be true or false')]
+    assert check(schema, dict(count=256))[0][0] == 'count' and 'between 0 and 255' in check(schema, dict(count=256))[0][1]
+    assert check(schema, dict(count=1.0)) == [('count', 'must be a whole number (uint8)')]
+    assert check(schema, dict(count=False)) == [('count', 'must be a whole number (uint8)')]
+    assert check(schema, dict(ratio=float('inf')))[0][0] == 'ratio' and check(schema, dict(ratio=1e39))[0][0] == 'ratio'
+    assert check(schema, dict(ratio='1')) == [('ratio', 'must be a number (float)')]
+    assert check(schema, dict(label='abcd')) == [('label', 'must have at most 3 characters')]
+    assert check(schema, dict(triple=[1, 2])) == [('triple', 'must have exactly 3 elements')]
+    assert check(schema, dict(few=[1, 2, 3])) == [('few', 'must have at most 2 elements')]
+    assert check(schema, dict(few=[1, 'x'])) == [('few[1]', 'must be a whole number (uint8)')]
+    assert check(schema, dict(inner=dict(count=-1, extra=1))) == [
+        ('inner.count', 'must be between 0 and 255 (uint8)'), ('inner.extra', 'is not a field of pkg/msg/Inner')]
+    assert check(schema, [1]) == [('', 'must be an object with the fields of pkg/msg/Thing')]
+
+
+def test_schema_and_messages_from_installed_interfaces():
+    """Schemas, defaults and messages are derived from real ROS definitions, including arrays of messages."""
+    sensor_msgs = pytest.importorskip('sensor_msgs.msg', reason='ROS 2 message packages are required')
+    schema = ros_interfaces.describe(sensor_msgs.CameraInfo)
+    fields = {field['name']: field['schema'] for field in schema['fields']}
+    assert schema['type'] == 'sensor_msgs/msg/CameraInfo'
+    assert fields['k'] == dict(kind='array', item=dict(kind='float', type='double', limit=None), fixed_size=9, max_size=None)
+    assert fields['d']['fixed_size'] is None and fields['width']['type'] == 'uint32'
+    assert fields['roi']['type'] == 'sensor_msgs/msg/RegionOfInterest' and fields['header']['fields'][0]['name'] == 'stamp'
+    defaults = ros_interfaces.defaults(sensor_msgs.CameraInfo)
+    assert defaults['k'] == [0.0] * 9 and defaults['d'] == [] and defaults['header']['frame_id'] == ''
+    message = ros_interfaces.build(sensor_msgs.CameraInfo, dict(width=640, k=[1, 0, 2, 0, 1, 3, 0, 0, 1], d=[0.5],
+                                                                header=dict(frame_id='cam', stamp=dict(sec=7))))
+    assert message.width == 640 and list(message.k)[2] == 2.0 and message.header.stamp.sec == 7 and message.height == 0
+    cloud = ros_interfaces.build(sensor_msgs.PointCloud2, dict(fields=[dict(name='x', offset=0, datatype=7, count=1)],
+                                                               data=[1, 2, 255]))
+    assert cloud.fields[0].name == 'x' and bytes(cloud.data) == b'\x01\x02\xff'
+    assert ros_interfaces.to_json(cloud)['fields'][0]['datatype'] == 7
+    with pytest.raises(ros_interfaces.InvalidValue) as wrong:
+        ros_interfaces.build(sensor_msgs.CameraInfo, dict(k=[1, 2], width=-1, roi=dict(do_rectify='yes')))
+    assert sorted(error['path'] for error in wrong.value.errors) == ['k', 'roi.do_rectify', 'width']
+    with pytest.raises(Exception, match='not available'):
+        ros_interfaces.action_class('no_pkg/action/Nothing')
