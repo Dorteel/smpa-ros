@@ -48,19 +48,8 @@ class SegmentationService(Node):
         if not directory.is_dir():
             raise FileNotFoundError(f'CLIPSeg directory is missing: {directory}. '
                                     'See README.md for the explicit download command.')
-        import torch
-        from transformers import CLIPSegForImageSegmentation, CLIPSegProcessor
-
-        self.torch = torch
-        if device == 'cuda' and not torch.cuda.is_available():
-            raise RuntimeError('CUDA was requested but is unavailable; choose device:=cpu or fix CUDA')
-        if device == 'auto':
-            device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.processor = CLIPSegProcessor.from_pretrained(str(directory), local_files_only=True)
-        self.model = CLIPSegForImageSegmentation.from_pretrained(
-            str(directory), local_files_only=True, dtype=torch.float32,
-        ).to(device)
-        self.model.eval()
+        from smpa_llm.inference.segmentation import load_model
+        self.torch, self.processor, self.model, device = load_model(directory, device)
         self.service = self.create_service(SegmentImage, '/segment_image', self.segment)
         self.get_logger().info(f'CLIPSeg loaded once from {directory} on {device} (float32); '
                                f'threshold={self.threshold}; /segment_image ready')
@@ -86,21 +75,8 @@ class SegmentationService(Node):
             if not request.prompt.strip():
                 raise ValueError('prompt must not be empty')
             image = image_to_pil(request.image)
-            size = self.model.config.vision_config.image_size
-            inputs = self.processor(text=[request.prompt], images=image, padding=True,
-                                    return_tensors='pt', do_center_crop=False,
-                                    size={'height': size, 'width': size}).to(self.model.device)
-            with self.torch.inference_mode():
-                logits = self.model(**inputs).logits
-                if logits.ndim != 3 or logits.shape[0] != 1:
-                    raise ValueError('CLIPSeg must return one two-dimensional score map')
-                scores = logits.float().sigmoid().unsqueeze(1)
-                scores = self.torch.nn.functional.interpolate(
-                    scores, size=(image.height, image.width), mode='bilinear', align_corners=False,
-                )[0, 0].cpu().contiguous()
-                if not self.torch.isfinite(scores).all().item():
-                    raise ValueError('CLIPSeg returned nonfinite scores')
-                binary = (scores >= self.threshold).to(self.torch.uint8) * 255
+            from smpa_llm.inference.segmentation import segment
+            scores, binary = segment(self.torch, self.processor, self.model, image, self.threshold, prompt=request.prompt)
             response.soft_mask = Image(header=deepcopy(request.image.header), height=image.height,
                 width=image.width, encoding='32FC1', is_bigendian=0, step=image.width * 4,
                 data=scores.numpy().astype('<f4', copy=False).tobytes())

@@ -1,5 +1,5 @@
-"""Declare the shared-inference package without loading models or training tools.
+"""Shared inference, model management and independent offline training.
 
-This first migration step installs only the package boundary and configuration.
-Inference, provisioning and RLHF implementations remain at their existing paths.
+Importing the package loads no weights and starts no process. Callers select
+submodules explicitly; training dependencies remain in their separate profile.
 """
