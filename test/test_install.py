@@ -180,9 +180,10 @@ def test_dependency_declarations_and_shell_programs(tmp_path, monkeypatch):
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / '.venv').mkdir()
-    (tmp_path / 'setup.py').write_text((ROOT / 'setup.py').read_text())
+    (tmp_path / 'smpa_ros').mkdir()
+    (tmp_path / 'smpa_ros/setup.py').write_text((ROOT / 'smpa_ros/setup.py').read_text())
     exec(installer_block('PYDEPS'), {})
-    setup = ast.parse((tmp_path / 'setup.py').read_text())
+    setup = ast.parse((tmp_path / 'smpa_ros/setup.py').read_text())
     call = next(node.value for node in setup.body if isinstance(node, ast.Expr))
     declared = ast.literal_eval(next(item.value for item in call.keywords if item.arg == 'install_requires'))
     assert (tmp_path / '.venv/smpa-constraints.txt').read_text().splitlines() == declared

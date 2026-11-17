@@ -38,17 +38,18 @@ source "$ros_setup"
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
 export ROS_LOG_DIR="$work_dir/ros_logs"
-"${colcon_command[@]}" --log-base "$work_dir/log" build --paths "$PWD" "$PWD/smpa_ros_interfaces" \
-    --packages-select smpa_ros_interfaces smpa_ros --build-base "$work_dir/build" \
+"${colcon_command[@]}" --log-base "$work_dir/log" build --paths "$PWD/smpa_ros" "$PWD/smpa_llm" "$PWD/smpa_ros_interfaces" \
+    --packages-select smpa_ros_interfaces smpa_llm smpa_ros --build-base "$work_dir/build" \
     --install-base "$work_dir/install"
 source "$work_dir/install/setup.bash"
+# Repository test fixtures include the provisioning script as a namespace module.
 test_status=0
-"${colcon_command[@]}" --log-base "$work_dir/log" test --paths "$PWD" "$PWD/smpa_ros_interfaces" \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" "${colcon_command[@]}" --log-base "$work_dir/log" test --paths "$PWD/smpa_ros" "$PWD/smpa_llm" "$PWD/smpa_ros_interfaces" \
     --packages-select smpa_ros --build-base "$work_dir/build" \
     --event-handlers console_direct+ \
     --python-testing pytest \
     --install-base "$work_dir/install" --return-code-on-test-failure \
-    --pytest-args test -m "$selector" -ra || test_status=$?
+    --pytest-args -c "$PWD/smpa_ros/setup.cfg" "$PWD/test" -m "$selector" -ra || test_status=$?
 colcon test-result --test-result-base "$work_dir/build" --verbose
 if (( test_status != 0 )); then
     exit "$test_status"
@@ -114,6 +115,14 @@ assert files('smpa_ros').joinpath('prompts/sense/describe_scene.txt').read_text(
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
 pipeline = yaml.safe_load((registry.parent / 'config.yaml').read_text())
 assert pipeline == yaml.safe_load(Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).read_text())
+llm_share = Path(get_package_share_directory('smpa_llm'))
+llm_config = yaml.safe_load((llm_share / 'config.yaml').read_text())
+assert llm_config == {key: pipeline[key] for key in ('model', 'openai', 'nebula')}
+import smpa_llm
+assert Path(smpa_llm.__file__).resolve().is_relative_to(llm_share.parents[1])
+assert distribution('smpa-llm').metadata['Name'] == 'smpa_llm'
+assert not distribution('smpa-llm').entry_points  # No new process in this migration step.
+assert (Path(get_package_share_directory('smpa_ros_interfaces')) / 'package.xml').is_file()
 assert type(pipeline['execution']['max_cycles']) is int and pipeline['execution']['max_cycles'] > 0
 for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):
     config = yaml.safe_load((registry / (name + '.yaml')).read_text())

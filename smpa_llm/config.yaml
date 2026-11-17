@@ -1,0 +1,65 @@
+# Primary configuration resource for the shared-inference package.
+# Defaults match the existing cognitive configuration. Step 1 does not change
+# runtime selection: smpa_ros/config.yaml remains the active pipeline input.
+model:
+  path: models/vlm/qwen3_vl_2b
+  model_id: Qwen/Qwen3-VL-2B-Instruct
+  backend: transformers
+  model: qwen3_vl_2b
+  device: auto
+  dtype: auto
+openai:
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  models:
+    text: gpt-4.1-mini
+    vision: gpt-4.1-mini
+  timeout: 180
+  generation_capabilities:
+    text:
+      parameters:
+      - temperature
+      - max_output_tokens
+      - seed
+      response_formats:
+      - text
+      - json_object
+      - json_schema
+      reasoning_efforts: []
+    vision:
+      parameters:
+      - temperature
+      - max_output_tokens
+      - seed
+      response_formats:
+      - text
+      - json_object
+      - json_schema
+      reasoning_efforts: []
+nebula:
+  base_url: https://nebula.cs.vu.nl/api/chat/completions
+  api_key_env: NEBULA_API_KEY
+  models:
+    text: SURF.gpt-oss-120b
+    vision: SURF.Qwen2.5-VL-32B-Instruct-AWQ
+  timeout: 180
+  generation_capabilities:
+    text:
+      parameters:
+      - temperature
+      - max_output_tokens
+      - reasoning_effort
+      response_formats:
+      - text
+      - json_schema
+      reasoning_efforts:
+      - low
+      - medium
+      - high
+    vision:
+      parameters:
+      - temperature
+      - max_output_tokens
+      response_formats:
+      - text
+      reasoning_efforts: []

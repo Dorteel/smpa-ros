@@ -405,7 +405,7 @@ def test_gui_canonical_load_edit_save_and_schema_preservation(tmp_path, monkeypa
     assert yaml.safe_load(saved) == config
     assert isinstance(config['model'], dict) and 'modeling' not in config and 'planning' not in config
     import shutil
-    shutil.copytree(repository / 'smpa_ros/prompts', tmp_path / 'smpa_ros/prompts')
+    shutil.copytree(repository / 'smpa_ros/smpa_ros/prompts', tmp_path / 'smpa_ros/prompts')
     (tmp_path / 'models').symlink_to(repository / 'models', target_is_directory=True)
     monkeypatch.setattr(gui, 'ROOT', tmp_path)
     assert gui.load_config() == config

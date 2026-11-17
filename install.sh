@@ -42,7 +42,7 @@ fi
 .venv/bin/python - <<'PYDEPS'
 import ast
 from pathlib import Path
-module = ast.parse(Path('setup.py').read_text())
+module = ast.parse(Path('smpa_ros/setup.py').read_text())
 setup_call = next(node.value for node in module.body
                   if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
                   and isinstance(node.value.func, ast.Name) and node.value.func.id == 'setup')
@@ -195,8 +195,8 @@ fi
 cd "$workspace"
 "$repo/.venv/bin/python" "$(command -v colcon)" --log-base "$workspace/log" build \
     --build-base "$workspace/build" --install-base "$workspace/install" \
-    --paths "$repo" "$repo/smpa_ros_interfaces" "$simulation_source" \
-    --packages-select simulation_actions smpa_ros_interfaces smpa_ros "${cmake_options[@]}"
+    --paths "$repo/smpa_ros" "$repo/smpa_llm" "$repo/smpa_ros_interfaces" "$simulation_source" \
+    --packages-select simulation_actions smpa_ros_interfaces smpa_llm smpa_ros "${cmake_options[@]}"
 # Report external readiness separately from successful environment/build setup.
 source "$workspace/install/local_setup.bash"
 cd "$repo"

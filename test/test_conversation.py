@@ -448,7 +448,7 @@ class ConversationTests(unittest.TestCase):
         """Exercise the production rendering script in a real optional browser."""
         from http.server import BaseHTTPRequestHandler, HTTPServer
         repository = Path(__file__).resolve().parents[1]
-        page = (repository / 'smpa_ros/conversation.html').read_text()
+        page = (repository / 'smpa_ros/smpa_ros/conversation.html').read_text()
         script = """<script>
         function reportCheck(value){
           const request=new XMLHttpRequest();request.open('POST','/check',false);
