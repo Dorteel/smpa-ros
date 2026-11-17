@@ -18,8 +18,8 @@ def load_prompt(value, *, prompt='default', configuration=None):
         input=value, previous_world_model='', goal='', available_actions=''))
     if configuration is None:
         from ament_index_python.packages import get_package_share_directory
-        defaults = yaml.safe_load(
-            (Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text(encoding='utf-8'))
+        from smpa_llm.configuration import load_configuration
+        defaults = load_configuration(Path(get_package_share_directory('smpa_ros')) / 'config.yaml')
         configuration = dict(defaults, **(configuration or {}))
     settings = stage_generation(configuration, 'sense')
     return prompt, settings

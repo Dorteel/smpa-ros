@@ -1,1 +1,115 @@
-../config.yaml
+# Cognitive defaults. Inference defaults are owned by smpa_llm.
+inference_config: package://smpa_llm/config.yaml
+camera_topic: /tiago/camera/color/image_raw
+prompt: describe_scene
+goal: '# Goal
+
+
+  Explore the environment to discover previously unobserved objects and relationships.
+
+  '
+execution:
+  max_cycles: 3
+  action_timeout: 30.0
+stage_settings:
+  sense:
+    temperature: 0.0
+    max_output_tokens: 4096
+    reasoning_effort: null
+    seed: null
+    response_format: json_schema
+    output_schema:
+      type: object
+  model:
+    temperature: 0.0
+    max_output_tokens: 4096
+    reasoning_effort: null
+    seed: null
+    response_format: text
+  plan:
+    temperature: 0.0
+    max_output_tokens: 4096
+    reasoning_effort: null
+    seed: null
+    response_format: json_schema
+    output_schema:
+      type: object
+      properties:
+        action:
+          type: string
+          enum:
+          - look_left
+          - look_right
+      required:
+      - action
+      additionalProperties: false
+  act:
+    temperature: null
+    max_output_tokens: null
+    reasoning_effort: null
+    seed: null
+    response_format: null
+stage_prompts:
+  sense:
+    name: describe_scene
+    text: 'Describe the scene.
+
+      '
+  model:
+    name: default
+    text: 'Create a structured world model from the provided observations. Use the
+      previous world model as context when available. Preserve supported information,
+      update facts when new evidence justifies it, and do not invent observations.
+
+      Return a complete Markdown snapshot with the title "# World Model" and sections
+      "## Entities", "## Properties", "## Relations", and "## Uncertain Information".
+      Preserve stable entity identifiers where possible. Distinguish observed facts
+      from inferences and mark uncertainty explicitly.
+
+
+      Previous world model:
+
+      {previous_world_model}
+
+
+      Observations:
+
+      {input}
+
+      '
+  plan:
+    name: default
+    text: 'Plan the next action to take, given the current world model, the goal,
+      and the available actions. Select exactly one action from the provided list.
+
+      Return a JSON object containing only the action property.
+
+
+      Goal:
+
+      {goal}
+
+
+      Available actions:
+
+      {available_actions}
+
+
+      World state:
+
+      {input}
+
+      '
+  act:
+    name: default
+    text: 'Translate this plan into a proposed command description. Flag missing robot
+      capabilities or parameters. Do not claim execution occurred.
+
+      Plan:
+
+      {input}
+
+      '
+conversation:
+  agent: local:qwen3-4b
+  modelling_agent: local:qwen3-4b

@@ -114,7 +114,8 @@ assert importlib.util.find_spec('smpa_ros.hello') is None
 assert 'hello' not in entries
 assert files('smpa_ros').joinpath('prompts/sense/describe_scene.txt').read_text().strip() == 'Describe the scene.'
 registry = Path(get_package_share_directory('smpa_ros')) / 'models'
-pipeline = yaml.safe_load((registry.parent / 'config.yaml').read_text())
+from smpa_llm.configuration import load_configuration
+pipeline = load_configuration(Path(get_package_share_directory('smpa_ros')) / 'config.yaml')
 assert pipeline == yaml.safe_load(Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).read_text())
 llm_share = Path(get_package_share_directory('smpa_llm'))
 llm_config = yaml.safe_load((llm_share / 'config.yaml').read_text())
@@ -122,7 +123,8 @@ assert llm_config == {key: pipeline[key] for key in ('model', 'openai', 'nebula'
 import smpa_llm
 assert Path(smpa_llm.__file__).resolve().is_relative_to(llm_share.parents[1])
 assert distribution('smpa-llm').metadata['Name'] == 'smpa_llm'
-assert not distribution('smpa-llm').entry_points  # No new process in this migration step.
+assert {entry.name for entry in distribution('smpa-llm').entry_points} == {'download_models'}
+assert callable(next(iter(distribution('smpa-llm').entry_points)).load())
 assert (Path(get_package_share_directory('smpa_ros_interfaces')) / 'package.xml').is_file()
 assert type(pipeline['execution']['max_cycles']) is int and pipeline['execution']['max_cycles'] > 0
 for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):

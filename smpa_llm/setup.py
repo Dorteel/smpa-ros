@@ -17,5 +17,6 @@ setup(
     maintainer_email='dorteel@gmail.com',
     description='Shared inference and offline training package boundary for SMPA.',
     license='MIT',
+    entry_points={'console_scripts': ['download_models = smpa_llm.models.provision:main']},
     zip_safe=True,
 )

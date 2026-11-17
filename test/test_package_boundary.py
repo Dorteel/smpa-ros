@@ -17,7 +17,10 @@ def test_functional_packages_install_primary_configuration():
     """
     cognitive = Path(get_package_share_directory('smpa_ros'))
     shared = Path(get_package_share_directory('smpa_llm'))
-    pipeline = yaml.safe_load((cognitive / 'config.yaml').read_text())
+    from smpa_llm.configuration import load_configuration
+    pipeline = load_configuration(cognitive / 'config.yaml')
+    cognitive_defaults = yaml.safe_load((cognitive / 'config.yaml').read_text())
+    assert not {'model', 'openai', 'nebula'} & cognitive_defaults.keys()
     inference = yaml.safe_load((shared / 'config.yaml').read_text())
     assert inference == {key: pipeline[key] for key in ('model', 'openai', 'nebula')}
     assert pipeline['stage_settings']['plan']['response_format'] == 'json_schema'
@@ -34,7 +37,7 @@ def test_shared_package_installs_without_an_inference_process():
     import smpa_llm
     assert Path(smpa_llm.__file__).is_file()
     installed = distribution('smpa-llm')
-    assert not installed.entry_points
+    assert {entry.name for entry in installed.entry_points} == {'download_models'}
     requirements = [Requirement(value) for value in installed.requires]
     assert {value.name for value in requirements} == {
         'setuptools', 'outlines', 'jsonschema', 'openai', 'python-dotenv'}
@@ -88,3 +91,28 @@ def test_inference_package_does_not_import_cognition():
             names = ([node.module or ''] if isinstance(node, ast.ImportFrom) else
                      [item.name for item in node.names] if isinstance(node, ast.Import) else [])
             assert not any(name == 'smpa_ros' or name.startswith('smpa_ros.') for name in names), path
+
+
+def test_configuration_legacy_and_external_override_contract(tmp_path):
+    """Resolve external defaults without changing legacy YAML or override meaning.
+
+    Legacy files remain complete configurations. Explicit section overrides
+    replace their section, relative defaults resolve beside the chosen file,
+    and loading changes neither file. Reject inference files containing
+    cognitive settings rather than assigning them an ambiguous owner.
+    """
+    from smpa_llm.configuration import load_configuration
+    defaults = tmp_path / 'inference.yaml'
+    defaults.write_text('model: {backend: transformers, device: auto}\n')
+    path = tmp_path / 'config.yaml'
+    legacy = 'model: {backend: ollama}\ncamera_topic: /camera\n'
+    path.write_text(legacy)
+    assert load_configuration(path) == yaml.safe_load(legacy)
+    selected = 'inference_config: inference.yaml\nmodel: {backend: api}\n'
+    path.write_text(selected)
+    assert load_configuration(path) == {'model': {'backend': 'api'}}
+    assert path.read_text() == selected
+    defaults.write_text('stage_settings: {}\n')
+    import pytest
+    with pytest.raises(ValueError, match='only model and provider'):
+        load_configuration(path)

@@ -416,12 +416,14 @@ def main(args=None):
     parser.add_argument('--resume', type=Path, help='Existing conversational run directory')
     parser.add_argument('--port', type=int, default=8000)
     options = parser.parse_args(args)
-    options.model_root = options.model_root or options.config.resolve().parent / 'models'
-    config = yaml.safe_load(options.config.read_text())
+    from smpa_llm.configuration import load_configuration
+    canonical = 'inference_config' in yaml.safe_load(options.config.read_text())
+    options.model_root = options.model_root or ((Path.cwd() if canonical else options.config.resolve().parent) / 'models')
+    config = load_configuration(options.config)
     # Resumed runs retain the original pipeline, so model provenance stays accurate.
     if options.resume:
         config = yaml.safe_load((options.resume / 'metadata.yaml').read_text())['configuration']['pipeline']
-        current = yaml.safe_load(options.config.read_text())
+        current = load_configuration(options.config)
         if config != current:
             parser.error('Resume requires the original pipeline configuration')
     validate_settings(config.get('modeling', {}))

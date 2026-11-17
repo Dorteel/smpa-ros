@@ -22,7 +22,8 @@ class APIBackend:
 
         config_path = Path(config_path).resolve()
         try:
-            config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+            from smpa_llm.configuration import load_configuration
+            config = load_configuration(config_path)
             # Retain compatibility with the original single-provider configuration.
             if 'base_url' not in config:
                 config = config[provider]

@@ -128,7 +128,8 @@ class Runner:
         parser.add_argument('--demo', choices=['true', 'false'], default='false')
         parser.add_argument('--timeout', type=float, default=120)
         options = parser.parse_args(remove_ros_args(args=args)[1:])
-        config = yaml.safe_load(options.config.read_text(encoding='utf-8'))
+        from smpa_llm.configuration import load_configuration
+        config = load_configuration(options.config)
         if options.hear is not None or options.vision is not None or options.read_session is not None:
             sensing = config.setdefault('sensing', {})
             for name in ('hear', 'vision'):

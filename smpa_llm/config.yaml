@@ -1,6 +1,4 @@
-# Primary configuration resource for the shared-inference package.
-# Defaults match the existing cognitive configuration. Step 1 does not change
-# runtime selection: smpa_ros/config.yaml remains the active pipeline input.
+# Shared model and provider defaults; no cognitive stage settings.
 model:
   path: models/vlm/qwen3_vl_2b
   model_id: Qwen/Qwen3-VL-2B-Instruct
