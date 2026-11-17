@@ -42,12 +42,15 @@ fi
 .venv/bin/python - <<'PYDEPS'
 import ast
 from pathlib import Path
-module = ast.parse(Path('smpa_ros/setup.py').read_text())
-setup_call = next(node.value for node in module.body
-                  if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                  and isinstance(node.value.func, ast.Name) and node.value.func.id == 'setup')
-requirements = ast.literal_eval(next(item.value for item in setup_call.keywords
+requirements = []
+for filename in ('smpa_ros/setup.py', 'smpa_llm/setup.py'):
+    module = ast.parse(Path(filename).read_text())
+    setup_call = next(node.value for node in module.body
+                      if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                      and isinstance(node.value.func, ast.Name) and node.value.func.id == 'setup')
+    declared = ast.literal_eval(next(item.value for item in setup_call.keywords
                                     if item.arg == 'install_requires'))
+    requirements.extend(value for value in declared if value not in requirements)
 Path('.venv/smpa-constraints.txt').write_text('\n'.join(requirements) + '\n')
 PYDEPS
 .venv/bin/python -m pip config --site set global.constraint "$repo/.venv/smpa-constraints.txt"
@@ -130,7 +133,8 @@ print('SMPA dependencies, required APIs, and ROS/colcon version constraints veri
 print('Optional global diagnostic: .venv/bin/python -m pip check '
       '(also reports unrelated system-package conflicts).')
 PYVERIFY
-.venv/bin/python - "$@" <<'PYMODELS'
+# Provisioning runs before colcon installation, using these checkout packages.
+PYTHONPATH="$repo/smpa_ros:$repo/smpa_llm:$repo${PYTHONPATH:+:$PYTHONPATH}" .venv/bin/python - "$@" <<'PYMODELS'
 from pathlib import Path
 import sys
 import yaml

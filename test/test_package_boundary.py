@@ -27,16 +27,17 @@ def test_functional_packages_install_primary_configuration():
 def test_shared_package_installs_without_an_inference_process():
     """Import the installed shared package and inspect its distribution metadata.
 
-    Its first migration step must expose a real Python package without loading
-    weights, registering a new executable, or requiring inference and training
-    dependencies. Existing execution remains owned by the cognitive package.
+    The shared implementation must import without loading weights or registering
+    an inference executable. Its declared dependencies remain separate from
+    training requirements. Existing execution stays with the cognitive package.
     """
     import smpa_llm
     assert Path(smpa_llm.__file__).is_file()
     installed = distribution('smpa-llm')
     assert not installed.entry_points
     requirements = [Requirement(value) for value in installed.requires]
-    assert len(requirements) == 1 and requirements[0].name == 'setuptools'
+    assert {value.name for value in requirements} == {
+        'setuptools', 'outlines', 'jsonschema', 'openai', 'python-dotenv'}
     assert str(requirements[0].specifier) == '<80,>=30.3'
     cognitive = Path(get_package_share_directory('smpa_ros'))
     metadata = ElementTree.parse(cognitive / 'package.xml').getroot()
@@ -56,3 +57,34 @@ def test_interface_package_remains_configuration_free():
                (Listen, Talk, DescribeScene, EvaluateVisualDecision, SegmentImage))
     interfaces = Path(get_package_share_directory('smpa_ros_interfaces'))
     assert not (interfaces / 'config.yaml').exists()
+
+
+def test_legacy_backend_imports_preserve_module_identity():
+    """Compare legacy and shared imports without constructing any backend.
+
+    Both paths must name one module so existing monkeypatches and injected
+    constructors affect the implementation used by cognition. This preserves
+    compatibility without copying engines or loading weights during import.
+    """
+    from importlib import import_module
+    for name in ('api', 'ollama', 'transformers', 'visual_jev'):
+        legacy = import_module('smpa_ros.backends.' + name)
+        shared = import_module('smpa_llm.inference.backends.' + name)
+        assert legacy is shared
+
+
+def test_inference_package_does_not_import_cognition():
+    """Inspect installed inference sources for reverse package dependencies.
+
+    Parse each Python module and reject direct cognitive imports. Planning
+    schemas and transcript persistence remain cognitive responsibilities;
+    generic engines receive their request contracts as arguments instead.
+    """
+    import ast
+    import smpa_llm.inference
+    root = Path(smpa_llm.inference.__file__).parent
+    for path in root.rglob('*.py'):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = ([node.module or ''] if isinstance(node, ast.ImportFrom) else
+                     [item.name for item in node.names] if isinstance(node, ast.Import) else [])
+            assert not any(name == 'smpa_ros' or name.startswith('smpa_ros.') for name in names), path

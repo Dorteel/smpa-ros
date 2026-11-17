@@ -180,12 +180,16 @@ def test_dependency_declarations_and_shell_programs(tmp_path, monkeypatch):
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / '.venv').mkdir()
-    (tmp_path / 'smpa_ros').mkdir()
-    (tmp_path / 'smpa_ros/setup.py').write_text((ROOT / 'smpa_ros/setup.py').read_text())
+    declared = []
+    for package in ('smpa_ros', 'smpa_llm'):
+        (tmp_path / package).mkdir()
+        (tmp_path / package / 'setup.py').write_text((ROOT / package / 'setup.py').read_text())
+        setup = ast.parse((tmp_path / package / 'setup.py').read_text())
+        call = next(node.value for node in setup.body if isinstance(node, ast.Expr) and
+                    isinstance(node.value, ast.Call) and getattr(node.value.func, 'id', None) == 'setup')
+        requirements = ast.literal_eval(next(item.value for item in call.keywords if item.arg == 'install_requires'))
+        declared.extend(value for value in requirements if value not in declared)
     exec(installer_block('PYDEPS'), {})
-    setup = ast.parse((tmp_path / 'smpa_ros/setup.py').read_text())
-    call = next(node.value for node in setup.body if isinstance(node, ast.Expr))
-    declared = ast.literal_eval(next(item.value for item in call.keywords if item.arg == 'install_requires'))
     assert (tmp_path / '.venv/smpa-constraints.txt').read_text().splitlines() == declared
     assert '-r speech/requirements-speech.txt' in INSTALLER
     assert "'speech/requirements-speech.txt')" in INSTALLER

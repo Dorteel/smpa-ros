@@ -1,1 +1,1 @@
-"""Optional inference backends; importing this package loads no models."""
+"""Compatibility namespace for inference implementations owned by smpa_llm."""
