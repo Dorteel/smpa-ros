@@ -276,8 +276,9 @@ def test_identical_weights_reused_from_other_cached_revision(downloader, tmp_pat
 def test_verifier_import_without_registry_rejects_cli_provisioning(tmp_path, monkeypatch):
     """Allow registry-free manifest checks without silently provisioning models.
 
-    Copy the downloader into an otherwise empty project, as runtime validation
-    does for arbitrary model roots. Verify a file by size, then confirm that CLI
+    Copy the downloader into an otherwise empty project. Verify a file by size,
+    then explicitly make its registry unavailable (installed resources may
+    otherwise supply it). Confirm that CLI
     provisioning fails before network access with an actionable missing-registry
     message. The normal registry-backed downloader tests remain unchanged.
     """
@@ -291,6 +292,7 @@ def test_verifier_import_without_registry_rejects_cli_provisioning(tmp_path, mon
     (tmp_path / 'weights').write_bytes(b'weights')
     assert verifier.verified(tmp_path, {'weights': {'size': 7}})
     assert not verifier.verified(tmp_path, {'weights': {'size': 8}})
+    monkeypatch.setattr(verifier, 'registry_path', tmp_path / 'missing_registry.yaml')
     monkeypatch.setattr(sys, 'argv', [str(script), '--model', 'Qwen/Qwen3-0.6B'])
     with pytest.raises(SystemExit) as error:
         verifier.main()

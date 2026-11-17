@@ -1,4 +1,1 @@
-name: gemma3
-model_id: google/gemma-3-4b-it
-parameters: 4B
-vram_gb: null
+../smpa_llm/models/gemma3.yaml

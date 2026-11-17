@@ -47,7 +47,7 @@ class VisualJevService(Node):
         self.declare_parameter('device', 'cuda')
         self.declare_parameter('max_pixels', 200704)
         if backend is None:
-            registry = Path(get_package_share_directory('smpa_ros')) / 'models/model_library.yaml'
+            registry = Path(get_package_share_directory('smpa_llm')) / 'models/model_library.yaml'
             entry = yaml.safe_load(registry.read_text())['models'][self.get_parameter('model').value]
             root = Path(self.get_parameter('model_root').value)
             self.get_logger().info(f"Loading Visual Jev on {self.get_parameter('device').value}")

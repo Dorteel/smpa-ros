@@ -1,4 +1,1 @@
-name: qwen3_vl
-model_id: Qwen/Qwen3-VL-4B-Instruct
-parameters: 4B
-vram_gb: null
+../smpa_llm/models/qwen3_vl.yaml

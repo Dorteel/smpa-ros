@@ -44,7 +44,7 @@ class SpeechServer(Node):
         self.cancel = Event()
         self.stopping = False
         if backend is None:
-            registry = Path(get_package_share_directory('smpa_ros')) / 'models/model_library.yaml'
+            registry = Path(get_package_share_directory('smpa_llm')) / 'models/model_library.yaml'
             model = yaml.safe_load(registry.read_text())['models'][self.get_parameter('model').value]
             path = Path(self.get_parameter('model_root').value) / model['path']
             device = self.get_parameter('audio_device').value

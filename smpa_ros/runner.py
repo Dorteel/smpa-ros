@@ -379,7 +379,7 @@ class Runner:
         """
         from ament_index_python.packages import get_package_share_directory
 
-        registry = Path(get_package_share_directory('smpa_ros')) / 'models'
+        registry = Path(get_package_share_directory('smpa_llm')) / 'models'
         selected = dict(self.config['model'])
         if selected['backend'] == 'transformers':
             selected = resolve_vision_model(self.config, registry, self.options.model_root)

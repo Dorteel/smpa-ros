@@ -1,4 +1,5 @@
 """Install the package identity and its primary ROS configuration resource."""
+from glob import glob
 from setuptools import find_packages, setup
 
 setup(
@@ -8,6 +9,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/smpa_llm']),
         ('share/smpa_llm', ['package.xml', 'config.yaml']),
+        ('share/smpa_llm/models', glob('models/*.yaml')),
     ],
     install_requires=['setuptools>=30.3,<80', 'outlines==1.3.3', 'jsonschema==4.26.0',
                       'openai==3.39.0', 'python-dotenv==1.2.4'],

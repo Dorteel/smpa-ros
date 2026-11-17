@@ -428,7 +428,7 @@ def main(args=None):
     registry = options.config.resolve().parent / 'models'
     if not (registry / 'model_library.yaml').is_file():
         from ament_index_python.packages import get_package_share_directory
-        registry = Path(get_package_share_directory('smpa_ros')) / 'models'
+        registry = Path(get_package_share_directory('smpa_llm')) / 'models'
     agents, default = discover_agents(config, options.config, options.model_root, registry)
     conversational = config.get('conversation', {})
     source = conversational.get('modelling_agent', 'local:qwen3-4b')

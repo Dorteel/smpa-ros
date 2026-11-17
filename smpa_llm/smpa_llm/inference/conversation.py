@@ -38,4 +38,3 @@ def validate_generation(values, supported):
     if values.get('do_sample') and values.get('temperature', 1) <= 0:
         raise ValueError('Sampling requires temperature greater than zero')
     return dict(values)
-
