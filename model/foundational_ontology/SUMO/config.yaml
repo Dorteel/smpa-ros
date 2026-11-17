@@ -1,0 +1,7 @@
+name: Suggested Upper Merged Ontology (SUMO OWL translation)
+version: 2010-05-09 translation
+source_url: https://raw.githubusercontent.com/abrahaj/SUMO.owl/b7e227b4f0d0b4395c5e1bcb26872c492b41823e/SUMO.owl
+source_revision: b7e227b4f0d0b4395c5e1bcb26872c492b41823e
+main: SUMO.owl
+document_iri: http://www.ontologyportal.org/SUMO.owl
+sha256: 58984a41694b14ecad0b58271b8f5517edf3e56c699ea4a1c4979071d09d318a

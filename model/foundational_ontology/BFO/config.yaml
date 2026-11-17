@@ -1,0 +1,6 @@
+name: Basic Formal Ontology
+version: 2020 Core
+source_url: https://raw.githubusercontent.com/BFO-ontology/BFO-2020/bd1fb61c5fa4e358fc9690f0d214b1ac63fae594/21838-2/owl/bfo-core.owl
+source_revision: bd1fb61c5fa4e358fc9690f0d214b1ac63fae594
+main: 21838-2/owl/bfo-core.owl
+sha256: b65c817a7a25501499d287981aea972f2ce33146dcfb855915a459f6a051718d

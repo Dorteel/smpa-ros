@@ -1,0 +1,6 @@
+name: DOLCEbasic
+version: 3.5 (beta)
+source_url: https://raw.githubusercontent.com/appliedontolab/DOLCE/cca21e82b38fe6956e9619516dad92116782a4a2/OWL/DOLCEbasic.owl
+source_revision: cca21e82b38fe6956e9619516dad92116782a4a2
+main: OWL/DOLCEbasic.owl
+sha256: 589fb7908935f389add4089c6c62d26db84911f61a4612a4dd7d59762126d041
