@@ -101,3 +101,24 @@ def test_model_requires_matching_inference_freeze(model_node_class):
                            wait=lambda future, timeout, operation: future)
     with pytest.raises(RuntimeError, match='not frozen for this experiment'):
         model_node_class.generate(node, 'prompt', run_id='run-a', response_format='text')
+
+
+def test_model_completes_refinement_after_all_questions_attempted(model_node_class, tmp_path):
+    """Mark refinement complete only after its answers have reached Model.
+
+    Provide an already attempted queue and a mocked world-model generation.
+    The real Model action persists its snapshot before finalizing the queue.
+    """
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    memory.begin_cycle()
+    memory.write_refinement({'status': 'running', 'questions': [{'attempted': True}]})
+    def generate(prompt, **settings):
+        """Return a fixed world model without invoking a model backend."""
+        return 'world'
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)),
+                           generate=generate, get_logger=lambda: Mock())
+    handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id'], observation='cup',
+                               source_record='', previous_snapshot=''), succeed=Mock(), abort=Mock())
+    model_node_class.execute(node, handle)
+    handle.succeed.assert_called_once()
+    assert json.loads((memory.directory / 'state/refinement.json').read_text())['status'] == 'completed'

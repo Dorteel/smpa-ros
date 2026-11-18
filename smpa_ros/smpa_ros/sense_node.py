@@ -3,6 +3,8 @@ from functools import partial
 import fcntl
 import hashlib
 import json
+import os
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -232,14 +234,70 @@ class SenseNode(Node):
                 observation logic handles the selected Vision, Hear and Read
                 modalities and returns the combined text without starting a stage.
                 """
+                if refinement_settings(pipeline)['enabled'] and (run / 'state/refinement.json').exists():
+                    from sense import modalities
+                    previous = []
+                    for path in (run / 'state').glob('cycle_*/sense*.json'):
+                        saved = json.loads(path.read_text())
+                        if saved.get('status') == 'generated' and saved.get('sequence', 0) < provenance['sequence']:
+                            previous.append(saved)
+                    if not previous:
+                        raise RuntimeError('Refinement has no initial Sense observation')
+                    initial = min(previous, key=lambda item: item.get('sequence', 0))['output']
+                    if modalities(config, service)['read']:
+                        from sense.read import observe as read
+                        cached = json.loads(initial)
+                        cached['read'] = read(run, config['sensing']['read']['session'])
+                        return json.dumps(cached, ensure_ascii=False)
+                    return initial
                 return observe(self, config, run, executor, timeout, service, self, capture=capture)[0]
             from smpa_ros.plan import refinement_settings
             with (directory / '.sense.lock').open('a') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 observation, _ = record_observation(directory, cycle, collect,
                     record_name=name, provenance=provenance, prompt_name=prompt, configuration=config)
-                if refinement_settings(pipeline)['enabled'] and not (directory / 'state/refinement.json').exists():
-                    self.identify_questions(observation, directory=directory, run_id=request.run_id, pipeline=pipeline)
+                if refinement_settings(pipeline)['enabled']:
+                    if not (directory / 'state/refinement.json').exists():
+                        self.identify_questions(observation, directory=directory, run_id=request.run_id, pipeline=pipeline)
+                    else:
+                        prior = []
+                        actions = []
+                        for path in (directory / 'state').glob('cycle_*/*.json'):
+                            if path == record_path:
+                                continue
+                            saved = json.loads(path.read_text())
+                            sequence = saved.get('sequence', 0)
+                            if type(sequence) is not int or sequence >= provenance['sequence']:
+                                continue
+                            if saved.get('stage') == 'sense' and saved.get('status') == 'generated':
+                                prior.append(sequence)
+                            elif saved.get('stage') == 'act' and saved.get('status') == 'succeeded' and saved.get('observation_record'):
+                                actions.append(saved)
+                        boundary = max(prior, default=0)
+                        focused = []
+                        for saved in sorted(actions, key=lambda item: item.get('sequence', 0)):
+                            if saved['sequence'] <= boundary:
+                                continue
+                            source = saved['observation_record']
+                            path = (directory / source).resolve()
+                            if Path(source).is_absolute() or not path.is_relative_to(directory):
+                                raise ValueError('Focused observation must belong to the active run')
+                            focused.append(dict(json.loads(path.read_text()), source_record=source))
+                        if focused:
+                            observation = json.dumps(dict(initial_observation=observation, focused_observations=focused), ensure_ascii=False)
+                            record = json.loads(record_path.read_text())
+                            record['output'] = observation
+                            record['source_observations'].extend(entry['source_record'] for entry in focused)
+                            with NamedTemporaryFile(mode='w', encoding='utf-8', dir=record_path.parent,
+                                                    prefix='.sense-update-', delete=False) as output:
+                                pending = Path(output.name)
+                                try:
+                                    json.dump(record, output, ensure_ascii=False, indent=2)
+                                    output.flush()
+                                    os.fsync(output.fileno())
+                                    pending.replace(record_path)
+                                finally:
+                                    pending.unlink(missing_ok=True)
             result.observation = observation
             result.record_path = str(record_path.relative_to(directory))
             goal_handle.succeed()

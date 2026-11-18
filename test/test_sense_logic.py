@@ -239,3 +239,39 @@ def test_identification_creates_persisted_refinement_queue(sense_module, tmp_pat
     assert all(not item['attempted'] for item in state['questions'])
     assert state['entities'][0]['id'] == 'cup' and len(state['image_sha256']) == 64
     assert calls[0].run_id == memory.metadata['run_id'] and json.loads(calls[0].json_schema)['required'] == ['entities']
+
+
+def test_refinement_reuses_initial_observation_and_incorporates_focused_answer(sense_module, monkeypatch, tmp_path):
+    """Reuse the first observation and carry new focused evidence into Sense.
+
+    Set up a persisted refinement queue, prior successful Sense record and Act
+    observation. The next Sense call must not poll the sensors again, and its
+    output and provenance must include the focused answer exactly once.
+    """
+    pipeline = {'enabled_actions': ['observe'], 'scene_refinement': {'enabled': True, 'properties': ['color']},
+        'sensing': {'vision': True}, 'stage_prompts': {'sense': {'name': 'chosen', 'text': 'Describe.'}}}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'pipeline': pipeline})
+    memory.begin_cycle()
+    memory.write_refinement({'status': 'running', 'questions': []})
+    cycle = memory.directory / 'state/cycle_000001'
+    initial = '{"vision":"cup"}'
+    (cycle / 'sense.json').write_text(json.dumps({'stage': 'sense', 'status': 'generated', 'sequence': 1,
+                                                  'invocation': 1, 'output': initial, 'source_observations': []}))
+    source = 'observations/vision/observe_000001_001.json'
+    (memory.directory / source).write_text(json.dumps({'target': 'cup', 'output': 'red'}))
+    (cycle / 'act.json').write_text(json.dumps({'stage': 'act', 'status': 'succeeded', 'sequence': 2,
+                                                'invocation': 1, 'observation_record': source}))
+    def unexpected(*args, **kwargs):
+        """Fail if refinement attempts to collect the original sensory inputs again."""
+        raise AssertionError('sensors must not be polled again')
+    monkeypatch.setattr(sense_module, 'observe', unexpected)
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0 if name == 'timeout' else str(tmp_path)),
+                           wait=Mock(), describe=Mock(), get_logger=lambda: Mock())
+    handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id']), succeed=Mock(), abort=Mock())
+    result = sense_module.SenseNode.execute(node, handle)
+    handle.succeed.assert_called_once()
+    output = json.loads(result.observation)
+    assert output['initial_observation'] == initial
+    assert output['focused_observations'][0]['source_record'] == source
+    record = json.loads((memory.directory / result.record_path).read_text())
+    assert record['source_observations'] == [source] and record['output'] == result.observation

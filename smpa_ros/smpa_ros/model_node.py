@@ -13,7 +13,7 @@ from rclpy.node import Node
 from rclpy.parameter_client import AsyncParameterClient
 import yaml
 
-from memory import locked_run, reserve_invocation
+from memory import MemoryManager, locked_run, reserve_invocation
 from smpa_ros.model import generate_world_model
 from smpa_ros_interfaces.action import GenerateText, GenerateStructured, Model
 
@@ -164,6 +164,12 @@ class ModelNode(Node):
             record = json.loads(record_path.read_text())
             result.record_path = str(record_path.relative_to(directory))
             result.snapshot_path = record['iteration']
+            if (directory / 'state/refinement.json').exists():
+                memory = MemoryManager.attach_active_run(self.get_parameter('memory_root').value, request.run_id)
+                refinement = memory.read_refinement()
+                if all(item['attempted'] for item in refinement['questions']):
+                    refinement['status'] = 'completed'
+                    memory.write_refinement(refinement)
             goal_handle.succeed()
         except Exception as error:
             if record_path is not None and not record_path.exists():
