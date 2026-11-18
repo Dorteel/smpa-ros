@@ -144,3 +144,76 @@ def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch
     finally:
         for name in module_names:
             sys.modules.pop(name, None)
+
+
+def test_experiment_acquires_snapshots_runs_and_releases(stage_types, tmp_path):
+    """Run the lifecycle with mocked ROS clients and a real persistent run.
+
+    Capture the server snapshot before any stage, execute the script's sequence,
+    then release the same owner and finalize metadata. The mock transport never
+    opens sensors, a model, a GPU or a simulator.
+    """
+    from smpa_ros.smpa import execute_experiment
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    identity = memory.metadata['run_id']
+    snapshot = dict(run_id=identity, server_instance_id='server-a', active_model='fixture',
+                    loading={'model_id': 'fixture'}, generation={'temperature': 0.0})
+    changes, stages, events = [], [], []
+    def set_parameters(values):
+        """Record acquisition or owner-checked release and accept it."""
+        changes.append(values[0].value)
+        return SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True, set_parameters_atomically=set_parameters,
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value=json.dumps(snapshot))]))
+    responses = {'sense': SimpleNamespace(observation='seen', record_path='sense'),
+                 'model': SimpleNamespace(world_model='world', record_path='model', snapshot_path='snapshot'),
+                 'plan': SimpleNamespace(action_json='{"action":"look_left"}', record_path='plan'),
+                 'act': SimpleNamespace(success=True)}
+    clients = {}
+    for name in responses:
+        def send(goal, name=name):
+            """Return a successful mocked result for the selected stage."""
+            stages.append(name)
+            return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(status=4, result=responses[name]))
+        clients[name] = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send)
+    def wait(future, timeout, operation):
+        """Return the already completed mock response."""
+        return future
+    def notify(stage, event):
+        """Record lifecycle events in their emitted order."""
+        events.append((stage, event))
+    execute_experiment(memory, 1, clients, parameters, wait, 1.0, notify=notify)
+    assert changes == [identity, 'release:' + identity]
+    assert stages == ['sense', 'model', 'plan', 'act']
+    assert memory.metadata['inference'] == snapshot and memory.metadata['status'] == 'completed'
+    assert events[0] == ('', 'run_started') and events[-1] == ('', 'run_completed')
+
+
+def test_experiment_keeps_freeze_when_stage_termination_unknown(stage_types, tmp_path):
+    """Leave inference owned if a timed-out stage cannot be confirmed finished.
+
+    Simulate an accepted Sense goal whose result never arrives. Cleanup must not
+    release the freeze, must finalize the run as failed, and must report that
+    the remote operation is still unconfirmed.
+    """
+    from smpa_ros.smpa import execute_experiment
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    identity = memory.metadata['run_id']
+    snapshot = dict(run_id=identity, server_instance_id='server-a', active_model='fixture', loading={}, generation={})
+    changes = []
+    def set_parameters(values):
+        """Record and accept any attempted ownership transition."""
+        changes.append(values[0].value)
+        return SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True, set_parameters_atomically=set_parameters,
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value=json.dumps(snapshot))]))
+    client = SimpleNamespace(wait_for_server=lambda timeout_sec: True,
+        send_goal_async=lambda goal: SimpleNamespace(accepted=True, get_result_async=lambda: 'pending'))
+    def wait(future, timeout, operation):
+        """Timeout every attempt to observe the pending stage result."""
+        if future == 'pending':
+            raise TimeoutError('stage still active')
+        return future
+    with pytest.raises(RuntimeError, match='cleanup was not confirmed'):
+        execute_experiment(memory, 1, {'sense': client}, parameters, wait, 1.0)
+    assert changes == [identity] and memory.metadata['status'] == 'failed'

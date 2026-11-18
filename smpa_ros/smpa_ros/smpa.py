@@ -240,3 +240,60 @@ def verify_inference(parameters, memory, wait, timeout):
     value = response.values[0].string_value
     if not value or json.loads(value) != memory.metadata.get('inference'):
         raise RuntimeError('Inference server ownership or frozen settings changed')
+
+
+def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, notify=None):
+    """Run the explicit cognitive sequence under one recorded inference freeze.
+
+    The caller creates the run, ROS clients and bounded wait function. Acquire
+    and persist the server's frozen settings before announcing or sending any
+    stage action. Before each stage verify that the same server and settings
+    remain owned, then send the requested action through its existing client.
+
+    On completion or failure, resolve any late acquisition and wait briefly for
+    a previously accepted stage to terminate. Release the freeze only when both
+    outcomes are known; otherwise leave it in place for safe recovery. Finalize
+    run metadata and notify the lifecycle observer of the actual terminal state.
+    Propagate the original error, or a cleanup error when cleanup is incomplete.
+    """
+    acquisition = {}
+    outstanding = {}
+    status = 'completed'
+    failure = None
+    cleanup_error = None
+    try:
+        acquire_inference(parameters, memory, wait, timeout, acquisition)
+        if notify is not None:
+            notify('', 'run_started')
+        def invoke(stage, action_type, goal):
+            """Verify ownership and invoke the stage selected by the script.
+
+            The stage name selects its already-created ROS client. Reject a
+            changed or restarted inference server before sending the goal, then
+            retain unconfirmed operations for the enclosing cleanup.
+            """
+            verify_inference(parameters, memory, wait, timeout)
+            return invoke_stage(clients[stage], goal, wait, timeout, outstanding)
+        run_actions(memory, cycles, invoke, notify=notify)
+    except KeyboardInterrupt as error:
+        status, failure = 'interrupted', error
+    except BaseException as error:
+        status, failure = 'failed', error
+    try:
+        resolve_inference_acquisition(acquisition, wait, timeout)
+        finish_outstanding_stage(outstanding, wait, timeout)
+        if acquisition.get('owned'):
+            release_inference(parameters, memory.metadata['run_id'], wait, timeout, outstanding)
+    except BaseException as error:
+        status, cleanup_error = 'failed', error
+    try:
+        memory.finalize(status)
+    except BaseException as error:
+        status, cleanup_error = 'failed', cleanup_error or error
+    if notify is not None:
+        event = {'completed': 'run_completed', 'interrupted': 'run_interrupted'}.get(status, 'run_failed')
+        notify('', event)
+    if cleanup_error is not None:
+        raise RuntimeError(f'Experiment cleanup was not confirmed: {cleanup_error}') from failure or cleanup_error
+    if failure is not None:
+        raise failure
