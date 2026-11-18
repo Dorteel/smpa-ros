@@ -30,7 +30,8 @@ class SenseNode(Node):
         """Connect sensing to the existing camera, speech, and inference services.
 
         Declare the run memory root and default operation. Create action clients
-        for shared vision inference and the existing Listen service. Starting the
+        for shared vision inference. Each Hear request connects to its run-specific
+        existing Listen service. Starting the
         node does not load model weights or start an experiment.
         """
         super().__init__('sense_stage', **node_options)
@@ -43,7 +44,6 @@ class SenseNode(Node):
         self.image_client = ActionClient(self, DescribeImage, inference + '/describe_image', callback_group=self.group)
         self.structured_client = ActionClient(self, DescribeStructuredImage, inference + '/describe_structured_image', callback_group=self.group)
         self.structured_text = ActionClient(self, GenerateStructured, inference + '/generate_structured', callback_group=self.group)
-        self.listener = ActionClient(self, Listen, '/speech/listen', callback_group=self.group)
         self.parameters = AsyncParameterClient(self, inference, callback_group=self.group)
         self.server = ActionServer(self, Sense, 'smpa/sense', self.execute,
                                    goal_callback=self.accept_goal, cancel_callback=self.cancel,
@@ -212,6 +212,7 @@ class SenseNode(Node):
         result = Sense.Result()
         record_path = None
         provenance = None
+        listener = None
         try:
             request = goal_handle.request
             timeout = self.get_parameter('timeout').value
@@ -224,6 +225,12 @@ class SenseNode(Node):
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name
             config = dict(pipeline, run_id=request.run_id, prompt=prompt)
             service = pipeline.get('_run', {}).get('service', 'vision')
+            from sense import modalities
+            speech = None
+            if modalities(config, service)['hear']:
+                endpoint = '/run_' + request.run_id.replace('-', '_') + '/sense/hear/listen'
+                listener = ActionClient(self, Listen, endpoint, callback_group=self.group)
+                speech = SimpleNamespace(listener=listener, perform=self.perform)
             executor = SimpleNamespace(spin_until_future_complete=self.wait)
             capture = partial(capture_once, describe=partial(self.describe, run_id=request.run_id,
                                                               directory=directory, pipeline=pipeline))
@@ -250,7 +257,7 @@ class SenseNode(Node):
                         cached['read'] = read(run, config['sensing']['read']['session'])
                         return json.dumps(cached, ensure_ascii=False)
                     return initial
-                return observe(self, config, run, executor, timeout, service, self, capture=capture)[0]
+                return observe(self, config, run, executor, timeout, service, speech, capture=capture)[0]
             from smpa_ros.plan import refinement_settings
             with (directory / '.sense.lock').open('a') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -311,16 +318,19 @@ class SenseNode(Node):
                     self.get_logger().error(f'Could not persist Sense failure: {record_error}')
             self.get_logger().error(f'Sense action failed: {error}')
             goal_handle.abort()
+        finally:
+            if listener is not None:
+                listener.destroy()
         return result
 
     def destroy_node(self):
         """Destroy this stage's clients and action server before its ROS node.
 
-        The independently owned speech and inference servers remain running and
+        Per-invocation Listen clients are destroyed after their calls. The
+        independently owned speech and inference servers remain running and
         retain responsibility for their resources and loaded model.
         """
         self.server.destroy()
-        self.listener.destroy()
         self.structured_text.destroy()
         self.image_client.destroy()
         self.structured_client.destroy()

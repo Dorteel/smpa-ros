@@ -275,3 +275,34 @@ def test_refinement_reuses_initial_observation_and_incorporates_focused_answer(s
     assert output['focused_observations'][0]['source_record'] == source
     record = json.loads((memory.directory / result.record_path).read_text())
     assert record['source_observations'] == [source] and record['output'] == result.observation
+
+
+def test_hear_connects_to_assigned_run_listener(sense_module, monkeypatch, tmp_path):
+    """Use the existing run-specific Listen endpoint for a Hear observation.
+
+    Mock the ROS client and sensory acquisition. Verify the endpoint is derived
+    from this run's identity and that its client is destroyed after the action.
+    """
+    pipeline = {'sensing': {'vision': False, 'hear': True},
+                'stage_prompts': {'sense': {'name': 'chosen', 'text': 'Listen.'}}}
+    memory = MemoryManager(tmp_path, goal='Listen', configuration={'pipeline': pipeline})
+    memory.begin_cycle()
+    listener = SimpleNamespace(destroy=Mock())
+    endpoints = []
+    def create_client(node, action_type, endpoint, callback_group):
+        """Record the selected Listen endpoint without opening audio hardware."""
+        endpoints.append(endpoint)
+        return listener
+    def observe_once(node, config, directory, executor, timeout, service, speech, *, capture):
+        """Check the assigned listener and return a fixed transcription."""
+        assert speech.listener is listener
+        return '{"speech":"hello"}', 'hello'
+    monkeypatch.setattr(sense_module, 'ActionClient', create_client)
+    monkeypatch.setattr(sense_module, 'observe', observe_once)
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0 if name == 'timeout' else str(tmp_path)),
+                           group=object(), perform=Mock(), wait=Mock(), describe=Mock(), get_logger=lambda: Mock())
+    handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id']), succeed=Mock(), abort=Mock())
+    sense_module.SenseNode.execute(node, handle)
+    handle.succeed.assert_called_once()
+    assert endpoints == ['/run_' + memory.metadata['run_id'].replace('-', '_') + '/sense/hear/listen']
+    listener.destroy.assert_called_once()
