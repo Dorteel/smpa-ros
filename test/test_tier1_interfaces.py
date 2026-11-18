@@ -1,18 +1,29 @@
 """Verify that Tier 1 generated types retain the agreed minimal wire contracts."""
+from pathlib import Path
+
 import pytest
 from rclpy.type_support import check_for_type_support
 from smpa_ros_interfaces import action, msg, srv
 
 
-@pytest.mark.parametrize('name,goal,result,feedback', [
-    ('GenerateText', ['prompt'], ['text'], ['partial_text']),
-    ('GenerateStructured', ['prompt', 'json_schema'], ['json_output'], ['partial_text']),
-    ('DescribeImage', ['image', 'prompt'], ['description'], ['partial_text']),
-    ('DescribeStructuredImage', ['image', 'prompt', 'json_schema'], ['json_output'], ['partial_text']),
+ACTION_CONTRACTS = [
+    ('GenerateText', ['prompt', 'run_id'], ['text'], ['partial_text']),
+    ('GenerateStructured', ['prompt', 'json_schema', 'run_id'], ['json_output'], ['partial_text']),
+    ('DescribeImage', ['image', 'prompt', 'run_id'], ['description'], ['partial_text']),
+    ('DescribeStructuredImage', ['image', 'prompt', 'json_schema', 'run_id'], ['json_output'], ['partial_text']),
+    ('GenerateStructuredChat', ['messages_json', 'json_schema', 'run_id'], ['json_output'], []),
+    ('Sense', ['run_id', 'capability'], ['observation', 'record_path'], []),
+    ('Model', ['run_id', 'capability', 'observation', 'source_record', 'previous_snapshot', 'messages_json'],
+     ['world_model', 'record_path', 'snapshot_path'], []),
+    ('Plan', ['run_id', 'capability', 'world_model', 'source_record'], ['action_json', 'record_path'], []),
+    ('Act', ['run_id', 'capability', 'action_json', 'source_record'], ['success', 'record_path'], []),
     ('LoadModel', ['model_id'], ['success', 'error_message'], ['stage']),
     ('UnloadModel', [], ['success', 'error_message'], ['stage']),
     ('SetActiveModel', ['model_id'], ['success', 'error_message'], ['stage']),
-])
+]
+
+
+@pytest.mark.parametrize('name,goal,result,feedback', ACTION_CONTRACTS)
 def test_action_contract(name, goal, result, feedback):
     """Inspect each installed action without starting any server or model.
 
@@ -57,3 +68,24 @@ def test_notification_contract(name, fields):
     interface = getattr(msg, name)
     check_for_type_support(interface)
     assert list(interface.get_fields_and_field_types()) == fields
+
+
+def test_source_action_contracts_are_registered():
+    """Check the approved action fields and registration directly from source.
+
+    Read each action definition in the checkout, separate its goal, result and
+    feedback sections, and compare their field names with the same contracts
+    used for generated types. Require every action to appear in CMake as well.
+    This check can run before rebuilding, but does not prove ROS type support.
+    """
+    root = Path(__file__).resolve().parents[1] / 'smpa_ros_interfaces'
+    registration = (root / 'CMakeLists.txt').read_text()
+    for name, goal, result, feedback in ACTION_CONTRACTS:
+        relative = f'action/{name}.action'
+        assert f'"{relative}"' in registration
+        sections = (root / relative).read_text().split('---')
+        assert len(sections) == 3
+        fields = [[line.split()[1] for line in section.splitlines()
+                   if line.strip() and not line.lstrip().startswith('#')]
+                  for section in sections]
+        assert fields == [goal, result, feedback], name

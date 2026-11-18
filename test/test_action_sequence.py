@@ -93,6 +93,9 @@ def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch
             """Create empty result fields matching one ungenerated action."""
             return SimpleNamespace(**{key: False if key == 'success' else '' for key in names})
         monkeypatch.setattr(action, name, SimpleNamespace(Goal=SimpleNamespace, Result=result_factory), raising=False)
+    for name in ('DescribeStructuredImage', 'GenerateStructuredChat'):
+        if not hasattr(action, name):
+            monkeypatch.setattr(action, name, SimpleNamespace(Goal=SimpleNamespace), raising=False)
     module_names = ['smpa_ros.sense_node', 'smpa_ros.model_node', 'smpa_ros.plan_node', 'smpa_ros.act_node']
     for name in module_names:
         sys.modules.pop(name, None)
