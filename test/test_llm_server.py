@@ -628,3 +628,30 @@ def test_stage_setting_validation_and_inheritance(server):
         Parameter('models.qwen3_4b.stages.plan.temperature', value=3.0),
         Parameter('models.qwen3_4b.stages.model.reasoning_effort', value='incorrect')]).successful
     assert server.stage_settings('qwen3_4b', 'plan')['temperature'] == 0.0
+
+
+def test_acquisition_atomically_initializes_stage_settings_and_rejects_conflicts(server):
+    """Initialize inherited stage values without overwriting explicit choices.
+
+    Acquire a ready fake model while proposing two independent stage controls.
+    The frozen snapshot must contain the installed values. After release, a
+    conflicting explicit value must reject the entire next acquisition, leaving
+    both ownership and the other proposed change untouched.
+    """
+    import json
+    server.replace_model('qwen3_4b')
+    model = 'models.qwen3_4b.stages.model.max_new_tokens'
+    plan = 'models.qwen3_4b.stages.plan.max_new_tokens'
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a'),
+        Parameter(model, value=41), Parameter(plan, value=83)]).successful
+    snapshot = json.loads(server.get_parameter('frozen_settings_json').value)
+    assert snapshot['stages']['model']['max_new_tokens'] == 41
+    assert snapshot['stages']['plan']['max_new_tokens'] == 83
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+    assert server.set_parameters_atomically([Parameter(plan, value=-1)]).successful
+    result = server.set_parameters_atomically([Parameter('experiment_run_id', value='run-b'),
+        Parameter(model, value=42), Parameter(plan, value=90)])
+    assert not result.successful and 'conflicts' in result.reason
+    assert server.get_parameter('experiment_run_id').value == ''
+    assert server.get_parameter(model).value == 41
+    assert server.get_parameter(plan).value == -1

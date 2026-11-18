@@ -216,8 +216,10 @@ class InferenceServer(Node):
         `release:<run_id>`, checked against its current owner under this lock.
         Normalize a matching command to the empty parameter value, and reject a
         bare or stale release. Capture the actual model device and dtype in the
-        frozen snapshot when the loaded backend exposes both. A rejected batch
-        installs no partial configuration.
+        frozen snapshot when the loaded backend exposes both. During acquisition,
+        stage overrides may be initialized in the same transaction only when they
+        are inherited or already match. Capture the proposed settings in the
+        snapshot. A rejected batch installs no partial configuration.
         """
         lock = getattr(self, 'lock', None)
         if lock is None:
@@ -241,12 +243,32 @@ class InferenceServer(Node):
             target = next((parameter.value for parameter in normalized
                            if parameter.name == 'experiment_run_id'), owner)
             snapshot = None
+            stage_overrides = {}
+            if target and target != owner:
+                for parameter in normalized:
+                    if not parameter.name.startswith('models.'):
+                        continue
+                    matched = False
+                    for stage in STAGES:
+                        prefix = f'models.{self.active_alias}.stages.{stage}.'
+                        if parameter.name.startswith(prefix):
+                            field = parameter.name[len(prefix):]
+                            if field not in STAGE_INHERIT:
+                                return SetParametersResult(successful=False, reason='Unknown inference parameter')
+                            current = self.get_parameter(parameter.name).value
+                            if current != STAGE_INHERIT[field] and current != parameter.value:
+                                return SetParametersResult(successful=False, reason=f'Explicit stage override conflicts: {parameter.name}')
+                            stage_overrides.setdefault(stage, {})[field] = parameter.value
+                            matched = True
+                            break
+                    if not matched:
+                        return SetParametersResult(successful=False, reason='Only active-model stage overrides can accompany acquisition')
             if target and target != owner and self.backend is not None:
                 values = self.settings(self.active_alias)
                 snapshot = dict(run_id=target, server_instance_id=self._instance_id, active_model=self.active_alias,
                     loading=dict(self.loaded_settings),
                     generation={field: values[field] for field in GENERATION_FIELDS},
-                    stages={stage: {field: self.stage_settings(self.active_alias, stage)[field]
+                    stages={stage: {field: self.stage_settings(self.active_alias, stage, stage_overrides.get(stage))[field]
                                     for field in (*GENERATION_FIELDS, 'reasoning_effort')}
                             for stage in STAGES}, model_root=self.model_root)
                 loaded_model = getattr(self.backend, 'model', None)
@@ -378,7 +400,9 @@ class InferenceServer(Node):
                     if transition and any(self.settings(self.active_alias)[key] != self.loaded_settings[key]
                                           for key in LOADING_FIELDS):
                         raise ValueError('Reload staged model settings before starting an experiment')
-                    if any(p.name.startswith('models.') or p.name == 'active_model' for p in parameters):
+                    if any(p.name == 'active_model' or (p.name.startswith('models.') and
+                           (not transition or not any(p.name.startswith(f'models.{self.active_alias}.stages.{stage}.')
+                                                      for stage in STAGES))) for p in parameters):
                         raise ValueError('Change model settings before acquiring or releasing an experiment')
                 for parameter in parameters:
                     if parameter.name == 'experiment_run_id':

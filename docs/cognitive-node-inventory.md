@@ -176,9 +176,13 @@ llm:
 ```
 
 The values above illustrate distinct settings for the registered shared model.
-Reasoning controls require an API model and provider that actually supports them. Stage ROS settings must
-match the experiment's corresponding frozen configuration. A mismatch fails
-explicitly rather than recording settings that were not used. Unit tests with
+Reasoning controls require an API model and provider that actually supports them. At startup the experiment submits its Sense, Model, and Plan settings together
+with freeze acquisition in one atomic parameter transaction. Inherited stage
+overrides are initialized from the experiment; an explicit ROS override must
+match or the entire transaction fails. The resulting server snapshot is checked
+and persisted before inference. A stage temperature must be explicit; null is
+not representable by the current server controls and is rejected. A mismatch
+fails rather than recording settings that were not used. Unit tests with
 mocked backends cover isolation, inheritance, freezing, ownership and forwarding.
 Generated action types and end-to-end ROS behavior for the new selector remain
 unverified until the isolated interface build can be completed without throttling.

@@ -192,8 +192,9 @@ def release_inference(parameters, run_id, wait, timeout, outstanding):
 def acquire_inference(parameters, memory, wait, timeout, acquisition):
     """Acquire this run's inference freeze and persist the server's snapshot.
 
-    Send the run identity to the inference server and retain the pending future
-    until its outcome is known. After acceptance, read the server-captured JSON,
+    Initialize inherited stage overrides and acquire the run identity together
+    in one server transaction. Conflicting explicit overrides reject the whole
+    transaction. Retain the pending future until its outcome is known. After acceptance, read the server-captured JSON,
     verify its identity and required fields, and write those exact settings into
     run metadata before any cognitive inference begins. If the server reports
     actual model device and dtype, preserve them in the existing runtime metadata
@@ -209,7 +210,25 @@ def acquire_inference(parameters, memory, wait, timeout, acquisition):
     if not parameters.wait_for_services(timeout_sec=timeout):
         raise TimeoutError('Inference parameter services are unavailable')
     identity = memory.metadata['run_id']
-    future = parameters.set_parameters_atomically([Parameter('experiment_run_id', value=identity)])
+    stage_settings = memory.metadata.get('configuration', {}).get('stage_settings')
+    proposed = [Parameter('experiment_run_id', value=identity)]
+    expected_stages = {}
+    if stage_settings:
+        response = wait(parameters.get_parameters(['active_model']), timeout, 'active inference model')
+        alias = response.values[0].string_value
+        if not alias:
+            raise RuntimeError('Inference server has no active model')
+        for stage in ('sense', 'model', 'plan'):
+            settings = stage_settings[stage]
+            if settings.get('temperature') is None:
+                raise ValueError(f'{stage} requires an explicit temperature for shared inference')
+            expected_stages[stage] = dict(max_new_tokens=settings['max_output_tokens'],
+                temperature=float(settings['temperature']), seed=settings.get('seed') if settings.get('seed') is not None else -1,
+                reasoning_effort=settings.get('reasoning_effort'))
+            for field, value in expected_stages[stage].items():
+                proposed.append(Parameter(f'models.{alias}.stages.{stage}.{field}',
+                    value='' if field == 'reasoning_effort' and value is None else value))
+    future = parameters.set_parameters_atomically(proposed)
     acquisition['future'] = future
     response = wait(future, timeout, 'inference acquisition')
     acquisition.clear()
@@ -222,6 +241,10 @@ def acquire_inference(parameters, memory, wait, timeout, acquisition):
             or not snapshot.get('server_instance_id') or not snapshot.get('active_model')
             or not isinstance(snapshot.get('loading'), dict) or not isinstance(snapshot.get('generation'), dict)):
         raise ValueError('Inference server returned an invalid frozen settings snapshot')
+    for stage, expected in expected_stages.items():
+        actual = snapshot.get('stages', {}).get(stage, {})
+        if any(actual.get(field) != value for field, value in expected.items()):
+            raise RuntimeError(f'Frozen inference settings do not match the {stage} configuration')
     models = memory.metadata.get('models', {})
     expected = {models[stage].get('model_id') for stage in ('vision', 'model', 'plan')
                 if isinstance(models.get(stage), dict) and models[stage].get('model_id')}

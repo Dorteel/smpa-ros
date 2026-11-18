@@ -104,3 +104,39 @@ def test_acquisition_preserves_actual_runtime_in_metadata_and_parameters(tmp_pat
     assert memory.metadata['configuration']['runtime'] == runtime
     frozen = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
     assert frozen['_run']['runtime'] == runtime
+
+
+def test_acquisition_initializes_experiment_stage_settings(tmp_path):
+    """Send each stage's configuration with ownership and verify the snapshot.
+
+    The mock server supplies the selected model and exact frozen settings. Check
+    that stage controls and ownership share one atomic request and that a wrong
+    server snapshot fails without pretending ownership was never acquired.
+    """
+    stages = {name: {'max_output_tokens': tokens, 'temperature': 0.0, 'seed': None,
+                     'reasoning_effort': None} for name, tokens in
+              [('sense', 30), ('model', 40), ('plan', 50)]}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'stage_settings': stages})
+    snapshot = dict(run_id=memory.metadata['run_id'], server_instance_id='server-a', active_model='fixture',
+        loading={}, generation={}, stages={name: dict(max_new_tokens=stage['max_output_tokens'],
+            temperature=0.0, seed=-1, reasoning_effort=None) for name, stage in stages.items()})
+    def get_parameters(names):
+        """Return the selected model or the already frozen settings."""
+        value = 'fixture' if names == ['active_model'] else json.dumps(snapshot)
+        return SimpleNamespace(values=[SimpleNamespace(string_value=value)])
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True,
+        set_parameters_atomically=Mock(return_value=SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))),
+        get_parameters=get_parameters)
+    def wait(future, limit, operation):
+        """Return the completed fake parameter response without running inference."""
+        return future
+    assert acquire_inference(parameters, memory, wait, 1.0, {}) == snapshot
+    sent = {parameter.name: parameter.value for parameter in parameters.set_parameters_atomically.call_args.args[0]}
+    assert sent['experiment_run_id'] == memory.metadata['run_id']
+    assert sent['models.fixture.stages.model.max_new_tokens'] == 40
+    assert sent['models.fixture.stages.plan.max_new_tokens'] == 50
+    snapshot['stages']['plan']['max_new_tokens'] = 51
+    acquisition = {}
+    with pytest.raises(RuntimeError, match='do not match the plan'):
+        acquire_inference(parameters, memory, wait, 1.0, acquisition)
+    assert acquisition == {'owned': True}
