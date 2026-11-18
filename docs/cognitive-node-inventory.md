@@ -116,7 +116,11 @@ ROS sequence now sends Model and Plan inference actions to one fake backend and
 checks their distinct frozen controls and persistence links. The installed command
 also passed completion, interruption, and camera-evidence tests after the Python
 packages were refreshed. Legacy Runner regression coverage still requires migration
-before the Runner can be removed without dropping assertions.
+before the Runner can be removed without dropping assertions. A later combined
+transport-suite run timed out waiting for the interruption test's Sense action,
+even though that installed-command test passed in the earlier isolated run.
+This intermittent failure and new hardware throttling need investigation before
+claiming final regression verification.
 
 To reproduce the generated interface build on a stable authorized host:
 
