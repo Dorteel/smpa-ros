@@ -3,6 +3,7 @@ from functools import partial
 import fcntl
 import hashlib
 import json
+import math
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -89,8 +90,9 @@ class ActNode(Node):
     def dispatch(self, action, record, *, pipeline, directory, run_id, cycle):
         """Execute a physical action or inspect already captured visual evidence.
 
-        Movement uses the existing ROS action executor. Observe uses the shared
-        inference server on the previously recorded image and persists its result;
+        Movement uses the existing ROS action executor and the run's configured
+        robot action timeout. Observe uses the shared inference server on the
+        previously recorded image and persists its result;
         it never starts the Sense cognitive action or captures a new camera frame.
         """
         if action == 'observe':
@@ -99,8 +101,11 @@ class ActNode(Node):
         timeout = self.get_parameter('timeout').value
         if timeout <= 0:
             raise ValueError('Act timeout must be positive')
+        action_timeout = pipeline.get('execution', {}).get('action_timeout', 30.0)
+        if isinstance(action_timeout, bool) or not isinstance(action_timeout, (int, float)) or not math.isfinite(action_timeout) or action_timeout <= 0:
+            raise ValueError('Configured robot action timeout must be positive')
         executor = SimpleNamespace(spin_until_future_complete=self.wait)
-        execute_action(self, executor, action, record, timeout, configuration=pipeline)
+        execute_action(self, executor, action, record, action_timeout, configuration=pipeline)
         from sense import modalities
         run_settings = pipeline.get('_run', {})
         if run_settings.get('demo') == 'true' and modalities(pipeline, run_settings.get('service', 'vision'))['hear']:

@@ -226,3 +226,21 @@ def test_demo_talk_uses_assigned_run_and_latest_transcript(act_node_class, tmp_p
     assert calls == ['I heard hello']
     assert endpoints == ['/run_' + memory.metadata['run_id'].replace('-', '_') + '/act/talk']
     client.destroy.assert_called_once()
+
+
+def test_movement_uses_frozen_robot_action_timeout(act_node_class, monkeypatch, tmp_path):
+    """Use the experiment's robot-action timeout for a movement command.
+
+    Mock only the existing action executor and verify the run-specific value is
+    passed through, independent of the stage's inference and speech timeout.
+    """
+    import sys
+    calls = []
+    def execute(node, executor, action_name, record, timeout, **kwargs):
+        """Record the timeout without contacting a robot action server."""
+        calls.append(timeout)
+    monkeypatch.setattr(sys.modules[act_node_class.__module__], 'execute_action', execute)
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=120.0), wait=Mock())
+    act_node_class.dispatch(node, 'look_left', {}, pipeline={'execution': {'action_timeout': 7.0}},
+                            directory=tmp_path, run_id='run-a', cycle=1)
+    assert calls == [7.0]

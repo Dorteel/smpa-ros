@@ -90,11 +90,13 @@ def run_actions(memory, cycles, invoke, *, notify=None):
             break
 
 
-def invoke_stage(client, goal, wait, timeout, outstanding):
+def invoke_stage(client, goal, wait, timeout, outstanding, *, result_timeout=None):
     """Send one stage goal and retain any operation whose end is unconfirmed.
 
     The client owns a single cognitive action endpoint. Wait for its server,
     acceptance and terminal result through the supplied bounded wait function.
+    An optional longer result timeout accommodates the stage's own bounded
+    sensor and inference operations without delaying server discovery.
     Keep the acceptance or result future in the shared outstanding dictionary
     until the remote goal is known to have terminated. This lets experiment
     cleanup retain inference ownership if a timeout leaves a stage still active.
@@ -114,7 +116,7 @@ def invoke_stage(client, goal, wait, timeout, outstanding):
     outstanding['handle'] = handle
     result_future = handle.get_result_async()
     outstanding['result'] = result_future
-    response = wait(result_future, timeout, 'stage result')
+    response = wait(result_future, result_timeout if result_timeout is not None else timeout, 'stage result')
     outstanding.clear()
     if response.status != GoalStatus.STATUS_SUCCEEDED:
         raise RuntimeError(f'Cognitive stage action failed with status {response.status}')
@@ -284,7 +286,8 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
             retain unconfirmed operations for the enclosing cleanup.
             """
             verify_inference(parameters, memory, wait, timeout)
-            return invoke_stage(clients[stage], goal, wait, timeout, outstanding)
+            return invoke_stage(clients[stage], goal, wait, timeout, outstanding,
+                                result_timeout=timeout * 16 + 30)
         run_actions(memory, cycles, invoke, notify=notify)
     except KeyboardInterrupt as error:
         status, failure = 'interrupted', error

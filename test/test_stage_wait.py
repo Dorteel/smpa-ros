@@ -89,3 +89,21 @@ def test_release_requires_no_outstanding_stage_and_names_owner():
         return SimpleNamespace(result=SimpleNamespace(successful=False, reason='server busy'))
     with pytest.raises(RuntimeError, match='server busy'):
         release_inference(parameters, 'run-a', rejected, 1.0, {})
+
+
+def test_stage_discovery_and_result_have_separate_timeouts():
+    """Allow a bounded stage result to outlast its short discovery timeout.
+
+    Record the timeouts passed to the fake wait function. Goal acceptance uses
+    the normal limit while the already-running stage gets its explicit longer
+    limit for its own sensor and inference operations.
+    """
+    waits = []
+    handle = SimpleNamespace(accepted=True, get_result_async=lambda: 'result')
+    client = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=lambda goal: 'acceptance')
+    def wait(future, timeout, operation):
+        """Return the goal handle and then a successful result."""
+        waits.append((operation, timeout))
+        return handle if future == 'acceptance' else SimpleNamespace(status=4, result='done')
+    assert invoke_stage(client, object(), wait, 2.0, {}, result_timeout=20.0) == 'done'
+    assert waits == [('stage acceptance', 2.0), ('stage result', 20.0)]
