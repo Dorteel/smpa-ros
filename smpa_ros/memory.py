@@ -154,31 +154,6 @@ class MemoryManager:
         parameters. Once the metadata file is durable, refresh this manager's
         snapshot and its visible dictionary to include other completed edits.
         """
-        missing = object()
-
-        def combine(previous, desired, current):
-            """Merge independent changes and reject incompatible concurrent edits.
-
-            Recurse through dictionaries to preserve changes to separate fields.
-            Treat lists and other values as indivisible. A deleted field remains
-            deleted only if another writer did not change it since the snapshot.
-            """
-            if previous == desired:
-                return current
-            if current == previous or desired == current:
-                return desired
-            if all(isinstance(value, dict) for value in (previous, desired, current)):
-                merged = dict(current)
-                for key in set(previous) | set(desired):
-                    value = combine(previous.get(key, missing), desired.get(key, missing),
-                                    current.get(key, missing))
-                    if value is missing:
-                        merged.pop(key, None)
-                    else:
-                        merged[key] = value
-                return merged
-            raise RuntimeError('Concurrent run metadata update conflicts with this write')
-
         destination = self.directory / 'metadata.yaml'
         lock = (locked_assigned_run(self.directory, self.metadata['run_id'])
                 if destination.exists() else nullcontext())
@@ -188,7 +163,7 @@ class MemoryManager:
                 if not isinstance(current, dict) or current.get('run_id') != self.metadata['run_id']:
                     raise ValueError('Run metadata identity changed during update')
                 previous = getattr(self, '_metadata_snapshot', current)
-                merged = deepcopy(combine(previous, self.metadata, current))
+                merged = merge_run_updates(previous, self.metadata, current)
             else:
                 merged = deepcopy(self.metadata)
             runtime = merged.get('configuration', {}).get('runtime')
@@ -219,18 +194,59 @@ class MemoryManager:
             self.metadata.update(deepcopy(merged))
             self._metadata_snapshot = deepcopy(merged)
 
-    def write_refinement(self, state):
-        """Persist the current finite question queue and its answer provenance."""
+    def read_refinement(self):
+        """Read a run's refinement queue and remember its update baseline.
+
+        Read the complete JSON under the run lock and retain a separate snapshot.
+        Return a fresh copy for the caller to edit. Missing or invalid state is
+        reported rather than replaced with an invented queue.
+        """
         import json
-        with NamedTemporaryFile(mode='w', dir=self.directory / 'state', prefix='.refinement-', delete=False) as output:
-            pending = Path(output.name)
-            try:
-                json.dump(state, output, ensure_ascii=False, indent=2)
-                output.flush()
-                os.fsync(output.fileno())
-                pending.replace(self.directory / 'state/refinement.json')
-            finally:
-                pending.unlink(missing_ok=True)
+
+        with locked_assigned_run(self.directory, self.metadata['run_id']):
+            state = json.loads((self.directory / 'state/refinement.json').read_text())
+            if not isinstance(state, dict):
+                raise ValueError('Refinement state must be an object')
+            self._refinement_snapshot = deepcopy(state)
+            return deepcopy(state)
+
+    def write_refinement(self, state):
+        """Publish refinement edits without discarding another writer's changes.
+
+        Under the run lock, compare the caller's edited queue with the last queue
+        it read or wrote and the current file. Merge independent dictionary edits
+        and reject conflicting changes. A newly attached manager must read an
+        existing queue first unless its proposed state already matches the file.
+
+        Replace the JSON atomically and remember the caller's edited baseline
+        without replacing objects that the caller may still reference. A failed
+        update leaves the prior file intact; read again to see other writers.
+        """
+        import json
+
+        if not isinstance(state, dict):
+            raise ValueError('Refinement state must be an object')
+        destination = self.directory / 'state/refinement.json'
+        with locked_assigned_run(self.directory, self.metadata['run_id']):
+            if destination.exists():
+                current = json.loads(destination.read_text())
+                if not isinstance(current, dict):
+                    raise ValueError('Refinement state must be an object')
+                if not hasattr(self, '_refinement_snapshot') and state != current:
+                    raise RuntimeError('Read current refinement state before updating it')
+                merged = merge_run_updates(getattr(self, '_refinement_snapshot', current), state, current)
+            else:
+                merged = deepcopy(state)
+            with NamedTemporaryFile(mode='w', dir=destination.parent, prefix='.refinement-', delete=False) as output:
+                pending = Path(output.name)
+                try:
+                    json.dump(merged, output, ensure_ascii=False, indent=2)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    pending.replace(destination)
+                finally:
+                    pending.unlink(missing_ok=True)
+            self._refinement_snapshot = deepcopy(state)
 
     def begin_cycle(self):
         if self.metadata['status'] != 'running' or self.in_cycle:
@@ -271,6 +287,42 @@ class MemoryManager:
         if self.metadata['status'] == 'running':
             self.metadata.update(status=status, completed_at=datetime.now().astimezone().isoformat())
             self.write_metadata()
+
+
+def merge_run_updates(previous, desired, current):
+    """Combine independent changes to a shared run record.
+
+    Compare the caller's edited value and the current durable value against its
+    earlier snapshot. Merge distinct nested dictionary fields, but reject
+    conflicting edits to a single value. Return an independent result without
+    changing any input, so a failed merge leaves the stored record untouched.
+    """
+    missing = object()
+
+    def combine(previous, desired, current):
+        """Merge independent changes and reject incompatible concurrent edits.
+
+        Recurse through dictionaries to preserve changes to separate fields.
+        Treat lists and other values as indivisible. A deleted field remains
+        deleted only if another writer did not change it since the snapshot.
+        """
+        if previous == desired:
+            return current
+        if current == previous or desired == current:
+            return desired
+        if all(isinstance(value, dict) for value in (previous, desired, current)):
+            merged = dict(current)
+            for key in set(previous) | set(desired):
+                value = combine(previous.get(key, missing), desired.get(key, missing),
+                                current.get(key, missing))
+                if value is missing:
+                    merged.pop(key, None)
+                else:
+                    merged[key] = value
+            return merged
+        raise RuntimeError('Concurrent run metadata or refinement update conflicts with this write')
+
+    return deepcopy(combine(previous, desired, current))
 
 
 _held_run_locks = local()

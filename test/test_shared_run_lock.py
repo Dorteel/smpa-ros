@@ -321,3 +321,115 @@ def test_reservation_recovers_from_legacy_records_and_rejects_stale_cycle(tmp_pa
     memory.finalize('completed')
     with pytest.raises(RuntimeError, match='active run'):
         reserve_invocation(memory.directory, memory.metadata['run_id'], 'model', 'default')
+
+
+def test_refinement_merges_independent_changes_without_replacing_caller_references(tmp_path):
+    """Retain live question references and combine independent writer updates.
+
+    Create a refinement queue, then attach a second manager and read its baseline.
+    One writer changes one field while the other changes a separate field. Both
+    values must survive, and the first writer's nested object remains the same
+    object so existing focused-observation code can continue updating it.
+    """
+    from copy import deepcopy
+    import json
+
+    first = MemoryManager(tmp_path, goal='Observe the scene')
+    state = {'question': {'answer': None}, 'status': 'running'}
+    question = state['question']
+    first.write_refinement(state)
+    assert state['question'] is question
+    second = MemoryManager.__new__(MemoryManager)
+    second.directory, second.metadata = first.directory, deepcopy(first.metadata)
+    second_state = second.read_refinement()
+    question['answer'] = 'red'
+    first.write_refinement(state)
+    second_state['status'] = 'completed'
+    second.write_refinement(second_state)
+    stored = json.loads((first.directory / 'state/refinement.json').read_text())
+    assert stored == {'question': {'answer': 'red'}, 'status': 'completed'}
+    assert state['question'] is question
+    question['answer'] = 'blue'
+    first.write_refinement(state)
+    stored = json.loads((first.directory / 'state/refinement.json').read_text())
+    assert stored == {'question': {'answer': 'blue'}, 'status': 'completed'}
+
+
+def test_refinement_stale_writer_rejects_conflicts(tmp_path):
+    """Preserve the current queue when two writers change the same field.
+
+    Read two independent snapshots, persist one answer, and attempt a different
+    answer using the stale snapshot. The second write must fail without replacing
+    the durable first answer or modifying historical records.
+    """
+    from copy import deepcopy
+    import json
+
+    first = MemoryManager(tmp_path, goal='Observe the scene')
+    first_state = {'answer': None}
+    first.write_refinement(first_state)
+    second = MemoryManager.__new__(MemoryManager)
+    second.directory, second.metadata = first.directory, deepcopy(first.metadata)
+    second_state = second.read_refinement()
+    first_state['answer'] = 'red'
+    second_state['answer'] = 'blue'
+    first.write_refinement(first_state)
+    with pytest.raises(RuntimeError, match='Concurrent run metadata or refinement'):
+        second.write_refinement(second_state)
+    assert json.loads((first.directory / 'state/refinement.json').read_text())['answer'] == 'red'
+
+
+def test_refinement_updates_from_separate_processes_are_merged(tmp_path):
+    """Preserve separate refinement updates made from simultaneous snapshots.
+
+    Two child processes read the same queue before either writes. After a shared
+    start signal, each updates its own field. Both must succeed and the durable
+    queue must contain both changes, without running a model or ROS node.
+    """
+    import json
+    import subprocess
+    import sys
+    import time
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    memory.write_refinement({'first': None, 'second': None})
+    go = tmp_path / 'go'
+    code = '''
+from copy import deepcopy
+from pathlib import Path
+from time import monotonic, sleep
+import sys, yaml
+from memory import MemoryManager
+run, field, start, ready = sys.argv[1:]
+memory = MemoryManager.__new__(MemoryManager)
+memory.directory = Path(run)
+memory.metadata = yaml.safe_load((memory.directory / 'metadata.yaml').read_text())
+memory._metadata_snapshot = deepcopy(memory.metadata)
+state = memory.read_refinement()
+state[field] = field
+Path(ready).touch()
+deadline = monotonic() + 5
+while not Path(start).exists() and monotonic() < deadline: sleep(0.01)
+assert Path(start).exists()
+memory.write_refinement(state)
+'''
+    children = [subprocess.Popen([sys.executable, '-c', code, str(memory.directory), field,
+                                  str(go), str(tmp_path / (field + '.ready'))],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for field in ('first', 'second')]
+    try:
+        deadline = time.monotonic() + 5
+        while not all((tmp_path / (field + '.ready')).exists() for field in ('first', 'second')):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        go.touch()
+        for child in children:
+            _, error = child.communicate(timeout=5)
+            assert child.returncode == 0, error
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=2)
+    assert json.loads((memory.directory / 'state/refinement.json').read_text()) == {
+        'first': 'first', 'second': 'second'}
