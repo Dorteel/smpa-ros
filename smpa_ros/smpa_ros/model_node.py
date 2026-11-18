@@ -1,0 +1,206 @@
+"""Expose the existing world-model generator as an independent ROS action."""
+import json
+from pathlib import Path
+from threading import Event
+
+import rclpy
+from action_msgs.msg import GoalStatus
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
+from rclpy.node import Node
+from rclpy.parameter_client import AsyncParameterClient
+import yaml
+
+from memory import locked_run, reserve_invocation
+from smpa_ros.model import generate_world_model
+from smpa_ros_interfaces.action import GenerateText, GenerateStructured, Model
+
+
+class ModelNode(Node):
+    """Offer world-model generation without invoking other cognitive stages."""
+
+    def __init__(self, **node_options):
+        """Connect the Model action to existing memory and shared inference.
+
+        Declare the run root, default capability, inference endpoint and timeout.
+        Create clients for text and schema-constrained generation. Starting this
+        node does not load a model, start a run or call another cognitive stage.
+        """
+        super().__init__('model_stage', **node_options)
+        self.declare_parameter('memory_root', str(Path.cwd() / 'memory'))
+        self.declare_parameter('default_capability', 'model')
+        self.declare_parameter('inference_node', '/llm')
+        self.declare_parameter('timeout', 120.0)
+        self.group = ReentrantCallbackGroup()
+        inference = self.get_parameter('inference_node').value.rstrip('/')
+        self.text_client = ActionClient(self, GenerateText, inference + '/generate', callback_group=self.group)
+        self.structured_client = ActionClient(self, GenerateStructured, inference + '/generate_structured', callback_group=self.group)
+        self.parameters = AsyncParameterClient(self, inference, callback_group=self.group)
+        self.server = ActionServer(self, Model, 'smpa/model', self.execute,
+                                   goal_callback=self.accept_goal, cancel_callback=self.cancel,
+                                   callback_group=self.group)
+
+    def accept_goal(self, request):
+        """Accept the default or explicit world-model capability only.
+
+        An empty selection uses the configured default. Reject an unsupported
+        selection before allocating a record or requesting inference.
+        """
+        selected = request.capability or self.get_parameter('default_capability').value
+        if selected != 'model':
+            self.get_logger().error(f'Unsupported Model capability: {selected}')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def cancel(self, goal_handle):
+        """Reject cancellation because the shared inference backend cannot stop.
+
+        The action must not claim cancellation while an accepted backend call
+        continues and may still persist a world-model snapshot.
+        """
+        return CancelResponse.REJECT
+
+    def wait(self, future, timeout, operation):
+        """Wait a bounded time for a response completed by another executor thread.
+
+        Return the future result or propagate its error. A timeout reports the
+        named operation without claiming that a remote request was canceled.
+        """
+        done = Event()
+        future.add_done_callback(lambda _: done.set())
+        if not done.wait(timeout):
+            raise TimeoutError(f'Timed out waiting for {operation}')
+        return future.result()
+
+    def generate(self, prompt, **settings):
+        """Send the existing Model prompt to the shared inference action.
+
+        Compare the active model's generation controls with the frozen run
+        configuration and reject unsupported reasoning settings. Select text or
+        schema-constrained generation as requested, then return successful output.
+        This comparison requires the run lifecycle to freeze server settings;
+        without that enforcement an intervening parameter update can race it.
+        """
+        timeout = self.get_parameter('timeout').value
+        if timeout <= 0:
+            raise ValueError('Model timeout must be positive')
+        if settings.get('reasoning_effort') is not None:
+            raise ValueError('The shared inference server does not expose reasoning_effort')
+        if not self.parameters.wait_for_services(timeout_sec=timeout):
+            raise TimeoutError('Inference parameter services are unavailable')
+        response = self.wait(self.parameters.get_parameters(['active_model']), timeout, 'active model')
+        alias = response.values[0].string_value
+        if not alias:
+            raise RuntimeError('The inference server has no active model')
+        names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
+        response = self.wait(self.parameters.get_parameters(names), timeout, 'inference parameters')
+        actual = (response.values[0].integer_value, response.values[1].double_value,
+                  response.values[2].integer_value, response.values[3].double_value)
+        expected = (settings.get('max_new_tokens'), settings.get('temperature'), settings.get('seed', -1), 1.0)
+        if actual != expected:
+            raise ValueError(f'Inference parameters do not match frozen Model settings: expected {expected}, got {actual}')
+        format_name = settings.get('response_format')
+        if format_name == 'text':
+            client = self.text_client
+            goal = GenerateText.Goal(prompt=prompt)
+        elif format_name == 'json_schema' and isinstance(settings.get('schema'), dict):
+            client = self.structured_client
+            goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(settings['schema']))
+        else:
+            raise ValueError('Unsupported Model response format')
+        if not client.wait_for_server(timeout_sec=timeout):
+            raise TimeoutError('Inference action is unavailable')
+        handle = self.wait(client.send_goal_async(goal), timeout, 'inference acceptance')
+        if not handle.accepted:
+            raise RuntimeError('Inference goal was rejected')
+        result = self.wait(handle.get_result_async(), timeout, 'inference result')
+        if result.status != GoalStatus.STATUS_SUCCEEDED:
+            raise RuntimeError('Inference action failed')
+        return result.result.text if format_name == 'text' else result.result.json_output
+
+    def execute(self, goal_handle):
+        """Generate one world model from a supplied observation and prior snapshot.
+
+        Resolve the existing active run, validate the source record and previous
+        snapshot as paths inside it, and reserve a durable invocation. Invoke the
+        existing generator with frozen run settings, preserving its snapshot and
+        provenance record. Return both paths on success. Record and abort errors
+        without replacing a record already written by the generator.
+        """
+        result = Model.Result()
+        record_path = None
+        provenance = None
+        try:
+            request = goal_handle.request
+            with locked_run(self.get_parameter('memory_root').value, request.run_id) as directory:
+                for value, area in ((request.source_record, None), (request.previous_snapshot, 'world_model')):
+                    if value:
+                        path = (directory / value).resolve()
+                        parent = directory / area if area else directory
+                        if Path(value).is_absolute() or not path.is_relative_to(parent) or not path.is_file():
+                            raise ValueError('Model source and previous snapshot must exist within the run')
+                observations = []
+                if request.source_record:
+                    source = json.loads((directory / request.source_record).read_text())
+                    observations = source.get('source_observations', [])
+                    if not isinstance(observations, list) or any(not isinstance(item, str) for item in observations):
+                        raise ValueError('Model source observations must be a list of paths')
+                pipeline = yaml.safe_load((directory / 'parameters.yaml').read_text())
+                prompt_name = pipeline.get('stage_prompts', {}).get('model', {}).get('name', 'default')
+                cycle, name, provenance = reserve_invocation(directory, request.run_id, 'model', prompt_name,
+                                                              request.source_record or None)
+                record_path = directory / 'state' / f'cycle_{cycle:06d}' / name
+            result.world_model = generate_world_model(directory, cycle, request.observation, self.generate,
+                                                       observations=observations, pipeline=pipeline,
+                                                       models=pipeline.get('_run', {}).get('models', {}),
+                                                       prompt_name=prompt_name,
+                                                       record_name=name, previous_snapshot=request.previous_snapshot,
+                                                       provenance=provenance)
+            record = json.loads(record_path.read_text())
+            result.record_path = str(record_path.relative_to(directory))
+            result.snapshot_path = record['iteration']
+            goal_handle.succeed()
+        except Exception as error:
+            if record_path is not None and not record_path.exists():
+                try:
+                    with record_path.open('x', encoding='utf-8') as output:
+                        json.dump(dict(stage='model', status='failed', error=f'{type(error).__name__}: {error}',
+                                       **provenance), output, ensure_ascii=False, indent=2)
+                except OSError as record_error:
+                    self.get_logger().error(f'Could not persist Model failure: {record_error}')
+            self.get_logger().error(f'Model action failed: {error}')
+            goal_handle.abort()
+        return result
+
+    def destroy_node(self):
+        """Release this stage's action endpoints while leaving inference running.
+
+        Destroy both inference clients and the Model server before releasing the
+        node itself. The independently owned backend is not unloaded.
+        """
+        self.server.destroy()
+        self.text_client.destroy()
+        self.structured_client.destroy()
+        return super().destroy_node()
+
+
+def main(args=None):
+    """Run the independent Model action server until ROS shutdown.
+
+    Two executor threads let an action callback wait while ROS completes its
+    inference and parameter requests. Stop callbacks before destroying endpoints.
+    """
+    rclpy.init(args=args)
+    node = ModelNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    try:
+        executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        executor.shutdown(wait_for_threads=True)
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()

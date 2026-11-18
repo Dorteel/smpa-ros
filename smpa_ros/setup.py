@@ -30,6 +30,7 @@ setup(
         'conversation = smpa_ros.conversation_web:main',
         'smpa = smpa_ros.smpa:main',
         'smpa_control = smpa_ros.run_control:main',
+        'model_stage = smpa_ros.model_node:main',
         'plan_stage = smpa_ros.plan_node:main',
         'listen = speech.actions:listen_main',
         'talk = speech.actions:talk_main',

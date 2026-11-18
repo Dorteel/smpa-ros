@@ -1,0 +1,10 @@
+string run_id
+string capability
+string observation
+string source_record
+string previous_snapshot
+---
+string world_model
+string record_path
+string snapshot_path
+---

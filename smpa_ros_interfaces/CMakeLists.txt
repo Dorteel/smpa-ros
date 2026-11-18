@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/DescribeImage.action"
   "action/DescribeStructuredImage.action"
   "action/Plan.action"
+  "action/Model.action"
   "action/LoadModel.action"
   "action/UnloadModel.action"
   "action/SetActiveModel.action"
