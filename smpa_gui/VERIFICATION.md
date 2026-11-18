@@ -1,5 +1,43 @@
 # Verification results (GUI version 7, 2026-11-18)
 
+## Fix: NaN and infinity in JSON answers (on version 7)
+
+**Cause.** `GET /ros/nodes/parameters` and the Workspace's `GET /ros/parameters` (polled
+every five seconds, hence the repeated errors) returned parameter values as Python
+floats from `ros_parameters.parameter_value`, and parameter ranges from
+`ros_parameters.describe_descriptor`. A node with a NaN or infinite double, an array
+element like that, or a range bound of ±inf made FastAPI's strict JSON rendering raise
+`ValueError: Out of range float values are not JSON compliant: nan` (HTTP 500); in the
+Workspace one such node made the whole parameter panel fail. The same applied to the
+change records of `POST /ros/parameters/set` and `GET /ros/parameters/changes`, and to
+FastAPI's 422 answer when a request body contained a `NaN` token. Topic echo, sensor
+streams, service responses, goal records and interface defaults already converted
+such numbers (`ros_topics.plain`, `sensors`, `ros_interfaces`).
+
+**Fix.** `app.SafeJSONResponse` is the default response class (also used for the routes
+that build responses and for validation errors): it renders as before and, only when
+that fails, passes the content through `app.json_safe`, which names non-finite numbers
+`"nan"`, `"inf"`, `"-inf"` at any depth. The frontend shows those names unquoted for
+doubles, starts an edit of such a value empty, accepts infinite range bounds, and its
+checks (like the gateway's) refuse the names as values.
+
+**Ran (cloud only):** reproduced first with the new fixture node `/fixture_mgmt/nonfinite`
+(both routes answered 500), then the full suite with the same command as version 7:
+**177 passed** (backend, ROS integration, packaging) and **66 passed** (browser), none
+skipped. The three new ROS integration tests were also run eight more times on their own;
+one run failed once at the `ros2 param get` cross-check (the CLI's own discovery lagging),
+which now waits for it as the other CLI checks do. Not run on the workstation, and the
+node on the workstation that holds the NaN was not identified from here (no shell there;
+the launch logs contain no GUI output).
+
+| Test | Kind |
+|---|---|
+| `test_units.py`: `test_json_safe_names_non_finite_numbers_at_any_depth`, `test_safe_json_response_renders_strict_json`, `test_descriptor_with_infinite_range_is_served_by_name` | unit: nested dicts/lists/tuples, finite values and types kept, descriptors |
+| `test_management.py`: `test_non_finite_parameters_are_served_by_name`, `test_non_finite_names_and_values_are_never_set`, `test_finite_value_replaces_nan_and_the_record_names_the_old_value` | real fixture node, strict JSON parsing |
+| `test_frontend_logic.py`: `test_non_finite_doubles_are_shown_by_name_and_never_proposed` | display, edit text, checks, open ranges |
+| `test_browser_management.py`: `test_non_finite_parameters_are_shown_and_never_proposed_by_name`; `test_browser_workspace.py` (parameter panel) | browser |
+
+
 ## Version 7: ROS 2 Workspace (phase 1: layout, discovery, inspection)
 
 ### Where it ran

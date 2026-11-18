@@ -16,6 +16,15 @@ for the ROS 2 Workspace. Nothing earlier changed. Every JSON response contains `
 URL-encoded query parameters because they contain slashes. A machine-readable
 description of the HTTP routes is served at `/api/openapi.json`.
 
+**Non-finite numbers.** JSON has no NaN or infinity, but ROS values can hold them (a
+double parameter, an element of a double array, the bounds of a floating-point range).
+Every JSON answer, at any depth, carries them as the strings `"nan"`, `"inf"` and
+`"-inf"`, the names the topic echo already used. Finite numbers, integers and types are
+unchanged, so a parameter of type `double` whose value is `"nan"` is NaN, while a
+`string` parameter with the text `"nan"` is text. These names are for display: a change
+request whose value is such a name, or a raw `NaN`/`Infinity` token, is refused with
+`422` (`must be a finite number`); the GUI does not set non-finite values.
+
 Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
 `404` unknown topic, `415` data that cannot be drawn, `503` ROS gateway unavailable,
 `504` no data in time.

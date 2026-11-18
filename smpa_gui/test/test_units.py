@@ -327,3 +327,47 @@ def test_server_options_ignore_ros_arguments():
     assert strip_ros_arguments(['--port', '9000', '--ros-args', '-r', '__node:=x']) == ['--port', '9000']
     options = parse_options(['--port', '9001', '--read-only', '--no-smpa', '--ros-args', '--log-level', 'info'])
     assert options.port == 9001 and options.read_only and options.no_smpa
+
+
+def test_json_safe_names_non_finite_numbers_at_any_depth():
+    """NaN and infinities become "nan", "inf", "-inf" in nested dicts, lists and tuples; everything else is kept."""
+    from smpa_gui.app import json_safe
+    structure = dict(top=math.nan, finite=0.1, negative_zero=-0.0, huge=1.7976931348623157e308, tiny=5e-324,
+                     whole=7, flag=True, none=None, text='nan',
+                     nested=dict(deeper=[1.5, math.inf, (-math.inf, 2), dict(x=math.nan)]))
+    safe = json_safe(structure)
+    assert safe == dict(top='nan', finite=0.1, negative_zero=-0.0, huge=1.7976931348623157e308, tiny=5e-324,
+                        whole=7, flag=True, none=None, text='nan',
+                        nested=dict(deeper=[1.5, 'inf', ['-inf', 2], dict(x='nan')]))
+    assert type(safe['whole']) is int and type(safe['flag']) is bool and type(safe['finite']) is float
+    assert math.copysign(1.0, safe['negative_zero']) == -1.0
+    assert structure['top'] != structure['top']  # the input is not changed
+
+
+def test_safe_json_response_renders_strict_json():
+    """A response with non-finite numbers is rendered as standard JSON; a normal one is rendered exactly as before."""
+    import json
+    from fastapi.responses import JSONResponse
+    from smpa_gui.app import SafeJSONResponse
+
+    def refuse(token):
+        """Fail on a token that standard JSON does not have."""
+        raise AssertionError(token)
+
+    normal = dict(values=[1, 2.5, 'x'], nested={'a': None})
+    assert SafeJSONResponse(normal).body == JSONResponse(normal).body
+    rendered = json.loads(SafeJSONResponse(dict(value=math.nan, values=[math.inf, -math.inf, 0.5])).body,
+                          parse_constant=refuse)
+    assert rendered == dict(value='nan', values=['inf', '-inf', 0.5])
+
+
+def test_descriptor_with_infinite_range_is_served_by_name():
+    """A floating-point range from -inf to +inf (allowed by ROS) is described with its bounds named."""
+    from smpa_gui.app import json_safe
+    from smpa_gui.ros_adapter import ros_parameters
+    descriptor = NS(description='', read_only=False, dynamic_typing=False, additional_constraints='', type=3,
+                    integer_range=[], floating_point_range=[NS(from_value=-math.inf, to_value=math.inf, step=0.0)])
+    described = ros_parameters.describe_descriptor(descriptor)
+    assert described['floating_point_range']['from'] == -math.inf  # the checks keep working on real numbers
+    assert json_safe(described)['floating_point_range'] == {'from': '-inf', 'to': 'inf', 'step': 0.0}
+    assert ros_parameters.in_range(12.5, described['floating_point_range'], integer=False)

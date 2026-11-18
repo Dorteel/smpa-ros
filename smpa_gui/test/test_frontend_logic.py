@@ -168,3 +168,28 @@ def test_parameter_proposals_follow_the_gateway_rules():
     assert parameter_check(raw, 'byte_array', '[0, 256]')['problems'] == ['[1] must be between 0 and 255']
     flag = dict(PARAMETER, type='bool', integer_range=None)
     assert parameter_check(flag, 'bool', 'false') == {'value': False, 'problems': []}
+
+
+def test_non_finite_doubles_are_shown_by_name_and_never_proposed():
+    """Names of non-finite doubles are displayed as such, start no edit text, fail every check, and open ranges work."""
+    script = ("import {check, displayValue, editText, isNonFinite, parseInput} from './tabs/ros/parameter_values.js';"
+              "const unbounded = {type: 'double', read_only: false, dynamic_typing: false, "
+              "floating_point_range: {from: '-inf', to: 'inf', step: 0}};"
+              "const stepped = {...unbounded, floating_point_range: {from: 0, to: 'inf', step: 0.5}};"
+              "const list = {type: 'double_array', read_only: false, dynamic_typing: false};"
+              "console.log(JSON.stringify({"
+              "shown: [displayValue('double', 'nan'), displayValue('double', '-inf'), displayValue('double_array', [1.5, 'nan', 'inf']),"
+              "        displayValue('string', 'nan'), displayValue('double', 0.25), displayValue('double', null)],"
+              "named: [isNonFinite('double', 'inf'), isNonFinite('string', 'inf'), isNonFinite('double', 'infinity')],"
+              "edit: [editText('double', 'nan'), editText('double', 'inf'), editText('double_array', [1.5, 'nan']), editText('string', 'nan')],"
+              "parsed: [parseInput('double', 'nan').error, parseInput('double', 'Infinity').error],"
+              "listProblems: check(list, 'double_array', JSON.parse(editText('double_array', [1.5, 'nan']))),"
+              "openRange: [check(unbounded, 'double', 1e300), check(stepped, 'double', 2.5), check(stepped, 'double', 2.25).length,"
+              "            check(stepped, 'double', -1).length]}))")
+    assert run_module(script) == dict(
+        shown=['nan', '-inf', '[1.5,nan,inf]', '"nan"', '0.25', '–'],
+        named=[True, False, False],
+        edit=['', '', '[1.5,"nan"]', 'nan'],
+        parsed=['must be a number', 'must be a number'],
+        listProblems=['[1] must be a finite number'],
+        openRange=[[], [], 1, 1])

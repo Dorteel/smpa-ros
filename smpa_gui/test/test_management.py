@@ -112,6 +112,75 @@ def test_parameters_are_read_with_descriptors(world):
     assert found['gains']['type'] == 'double_array' and found['names']['value'] == ['a', 'b']
 
 
+NONFINITE = '/fixture_mgmt/nonfinite'
+
+
+def strict(text):
+    """Parse a response body as standard JSON, refusing the NaN and Infinity tokens Python would otherwise accept."""
+    def refuse(token):
+        """Fail on a token that standard JSON does not have."""
+        raise AssertionError(f'non-standard JSON token {token}')
+    return json.loads(text, parse_constant=refuse)
+
+
+def strict_get(base, path, **parameters):
+    """Fetch one endpoint, require HTTP 200, and parse its body as standard JSON."""
+    with urlopen(base + API + path + ('?' + urlencode(parameters) if parameters else ''), timeout=15) as response:
+        assert response.status == 200
+        return strict(response.read())
+
+
+def test_non_finite_parameters_are_served_by_name(world):
+    """NaN and infinite doubles, array elements and range bounds of a real node are sent as "nan", "inf", "-inf".
+
+    Before the fix these routes failed with "Out of range float values are
+    not JSON compliant". Finite values, integers and types stay unchanged.
+    """
+    reading = strict_get(world['base'], '/ros/nodes/parameters', node=NONFINITE)
+    found = {item['name']: item for item in reading['parameters']}
+    assert reading['state'] == 'ok'
+    assert (found['nan_value']['value'], found['nan_value']['type']) == ('nan', 'double')
+    assert found['positive_infinity']['value'] == 'inf' and found['negative_infinity']['value'] == '-inf'
+    assert found['mixed_array']['value'] == [1.5, 'nan', 'inf', '-inf'] and found['mixed_array']['type'] == 'double_array'
+    assert found['unbounded']['value'] == 0.5
+    assert found['unbounded']['floating_point_range'] == {'from': '-inf', 'to': 'inf', 'step': 0.0}
+    assert found['finite']['value'] == 0.25 and found['finite']['type'] == 'double'
+    wait_until(lambda: any(item['node'] == NONFINITE for item in strict_get(world['base'], '/ros/parameters')['nodes']),
+               message='the overview never listed the non-finite node')
+    nodes = {item['node']: item for item in strict_get(world['base'], '/ros/parameters')['nodes']}
+    assert {item['name']: item['value'] for item in nodes[NONFINITE]['parameters']}['nan_value'] == 'nan'
+    assert nodes[SETTINGS]['state'] == 'ok'  # one node's NaN no longer breaks the whole overview
+    assert {item['name']: item['value'] for item in nodes[SETTINGS]['parameters']}['level'] in (4, 6, 8)
+
+
+def test_non_finite_names_and_values_are_never_set(world):
+    """A displayed name ("nan") or a raw NaN/Infinity sent as a value is refused, and nothing changes on the node."""
+    for request_id, value in (('nonfinite-0001', 'nan'), ('nonfinite-0002', float('nan')), ('nonfinite-0003', float('inf'))):
+        status, body = change(world, [dict(name='finite', type='double', value=value)], request_id, node=NONFINITE)
+        assert status == 422 and body['errors'] == [dict(path='finite', message='must be a finite number')], body
+    status, body = change(world, [dict(name='mixed_array', type='double_array', value=[1.5, 'nan', 'inf', '-inf'])],
+                          'nonfinite-0004', node=NONFINITE)
+    assert status == 422 and [error['path'] for error in body['errors']] == ['mixed_array[1]', 'mixed_array[2]', 'mixed_array[3]']
+    status, body = post(world['base'], '/ros/services/call', dict(service='/fixture/add_two_ints', type='example_interfaces/srv/AddTwoInts',
+                        request=dict(a=1, b=2), request_id='nonfinite-0005', timeout=float('nan')), world['token'])
+    assert status == 422 and body['detail'][0]['input'] == 'nan'  # FastAPI's own validation answer, made JSON-safe
+    found = {item['name']: item['value'] for item in get(world['base'], '/ros/nodes/parameters', node=NONFINITE)['parameters']}
+    assert found['finite'] == 0.25 and found['mixed_array'] == [1.5, 'nan', 'inf', '-inf']
+
+
+def test_finite_value_replaces_nan_and_the_record_names_the_old_value(world):
+    """Setting a NaN parameter to a finite number works; the change record reports the old value as "nan"."""
+    status, body = change(world, [dict(name='nan_value', type='double', value=2.5)], 'nonfinite-0006', node=NONFINITE)
+    assert status == 200, body
+    result = body['change']['results'][0]
+    assert body['change']['outcome'] == 'applied' and result['previous_value'] == 'nan' and result['value'] == 2.5
+    assert strict_get(world['base'], '/ros/parameters/changes')['changes'][0]['change_id'] == 'nonfinite-0006'
+    found = {item['name']: item['value'] for item in get(world['base'], '/ros/nodes/parameters', node=NONFINITE)['parameters']}
+    assert found['nan_value'] == 2.5
+    wait_until(lambda: 'Double value is: 2.5' in ros2(world, 'param', 'get', NONFINITE, 'nan_value'),
+               message='ros2 param get never reported the new value')  # the CLI's discovery can lag
+
+
 def test_successful_change_is_applied_once_and_read_back(world):
     """A valid atomic change is applied, read back, visible to ros2 param, and a repeated request changes nothing."""
     status, body = change(world, [dict(name='label', type='string', value='beta'),

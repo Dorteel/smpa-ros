@@ -32,6 +32,7 @@
  */
 import {getJSON, h, poll} from '../../api.js';
 import {createCanvas} from './workspace_canvas.js';
+import {displayValue} from './parameter_values.js';
 
 const GONE_MS = 10000;
 const LAYOUT_KEY = 'smpa-gui.workspace.layout';
@@ -138,10 +139,9 @@ function matches(text, ...candidates) {
   return !wanted || candidates.some((candidate) => String(candidate).toLowerCase().includes(wanted));
 }
 
-/** Show a parameter value compactly: strings and lists as JSON, at most 60 characters. */
-function valueText(value) {
-  const text = value === null || value === undefined ? '–'
-    : typeof value === 'object' || typeof value === 'string' ? JSON.stringify(value) : String(value);
+/** Show a parameter value compactly, as the Parameters view does (non-finite doubles by name), at most 60 characters. */
+function valueText(type, value) {
+  const text = displayValue(type, value);
   return text.length > 60 ? text.slice(0, 59) + '…' : text;
 }
 
@@ -197,9 +197,9 @@ function actionChip(action) {
 function parameterChip(node, parameter, gone) {
   return chip({kind: 'parameter', name: parameter.name, type: parameter.type, state: gone ? 'gone' : 'ok',
     target: `ros/parameters/${node}@${parameter.name}`, extra: {'data-node': node, 'data-value': JSON.stringify(parameter.value)},
-    title: `${node}: ${parameter.name}\n${parameter.type} = ${valueText(parameter.value)}` + (parameter.read_only ? '\nread-only' : '')
+    title: `${node}: ${parameter.name}\n${parameter.type} = ${valueText(parameter.type, parameter.value)}` + (parameter.read_only ? '\nread-only' : '')
       + (parameter.description ? `\n${parameter.description}` : ''),
-    lines: [h('span', {class: 'mono ws-value'}, valueText(parameter.value)), parameter.type + (parameter.read_only ? ' · read-only' : '')]});
+    lines: [h('span', {class: 'mono ws-value'}, valueText(parameter.type, parameter.value)), parameter.type + (parameter.read_only ? ' · read-only' : '')]});
 }
 
 /**
@@ -267,7 +267,7 @@ const PANELS = {
         total += reading.parameters.length;
         const nodeMatches = matches(text, reading.node);
         const parameters = reading.parameters.filter((parameter) => nodeMatches
-          || matches(text, parameter.name, valueText(parameter.value), parameter.type));
+          || matches(text, parameter.name, valueText(parameter.type, parameter.value), parameter.type));
         if (!nodeMatches && !parameters.length) continue;
         shown += parameters.length;
         groups.push(parameterGroup(reading, parameters.map((parameter) => parameterChip(reading.node, parameter, reading.gone))));

@@ -118,7 +118,7 @@ def test_actions_appear_in_the_right_panel(page):
 
 
 def test_parameters_appear_grouped_by_their_nodes(page):
-    """The bottom panel groups parameters under their owning node with values and types; silent nodes are explained."""
+    """The bottom panel groups parameters under their owning node with values and types; NaN is shown by name; silent nodes are explained."""
     group = page.locator('.ws-group[data-node="/fixture_ns/fixture_parameters"]')
     assert group.get_attribute('data-state') == 'ok'
     integer = group.locator('.ws-chip[data-name="fixture_integer"]')
@@ -129,6 +129,11 @@ def test_parameters_appear_grouped_by_their_nodes(page):
     page.wait_for_selector('.ws-group[data-node="/fixture_silent"][data-state="not_responding"]')
     assert 'not responding' in page.inner_text('.ws-group[data-node="/fixture_silent"]')
     assert page.locator(chip('parameter', 'frozen', SETTINGS)).inner_text().count('read-only') == 1
+    page.wait_for_selector(chip('parameter', 'nan_value', '/fixture_mgmt/nonfinite'), timeout=20000)
+    nan_chip = page.locator(chip('parameter', 'nan_value', '/fixture_mgmt/nonfinite'))
+    assert nan_chip.get_attribute('data-value') == '"nan"' and nan_chip.locator('.ws-value').inner_text() == 'nan'
+    assert page.locator(chip('parameter', 'mixed_array', '/fixture_mgmt/nonfinite') + ' .ws-value').inner_text() == '[1.5,nan,inf,-inf]'
+    assert page.get_attribute('[data-panel="parameters"]', 'data-offline') is None
     page.fill('[data-panel="parameters"] .ws-filter', 'fixture_double')
     page.wait_for_function("document.querySelectorAll('[data-panel=parameters] .ws-group').length === 1")
     assert page.locator('[data-panel="parameters"] .ws-chip').count() == 1

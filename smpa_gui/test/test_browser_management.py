@@ -136,6 +136,37 @@ def test_unresponsive_node_is_explained(page):
     assert page.locator('#parameter-apply').count() == 0
 
 
+def test_non_finite_parameters_are_shown_and_never_proposed_by_name(page, server):
+    """NaN and infinite values are shown by name; editing one starts empty and only a finite number can be applied."""
+    page.goto(page.url.split('#')[0] + '#ros/parameters/fixture_mgmt/nonfinite')
+    page.wait_for_selector('#parameter-table tr[data-parameter="nan_value"]', timeout=15000)
+    cells = lambda name: page.locator(f'tr[data-parameter="{name}"] td').all_inner_texts()
+    assert cells('nan_value')[1:3] == ['double', 'nan'] and cells('positive_infinity')[2] == 'inf'
+    assert cells('negative_infinity')[2] == '-inf' and cells('mixed_array')[2] == '[1.5,nan,inf,-inf]'
+    assert '-inf…inf' in cells('unbounded')[3]
+    page.click('button[data-edit="nan_value"]')
+    field = page.locator('tr[data-parameter="nan_value"] .proposal-input')
+    assert field.input_value() == '' and page.is_disabled('#parameter-apply')
+    field.fill('nan')
+    assert page.is_disabled('#parameter-apply') and 'must be a number' in page.inner_text('tr[data-parameter="nan_value"] .proposal-note')
+    page.click('button[data-edit="mixed_array"]')
+    assert page.locator('tr[data-parameter="mixed_array"] .proposal-input').input_value() == '[1.5,"nan","inf","-inf"]'
+    assert page.is_disabled('#parameter-apply')
+    page.click('button[data-discard="mixed_array"]')
+    page.click('button[data-edit="unbounded"]')
+    page.fill('tr[data-parameter="unbounded"] .proposal-input', '1234.5')
+    field.fill('3.5')
+    assert page.is_enabled('#parameter-apply')
+    page.click('#parameter-apply')
+    page.wait_for_selector('#parameter-dialog[open]')
+    assert 'nan (double)' in page.inner_text('#parameter-confirm-changes')
+    page.click('#parameter-confirm')
+    page.wait_for_selector('#parameter-outcome[data-outcome="applied"]')
+    assert 'nan → 3.5' in page.inner_text('#parameter-outcome')
+    values = {item['name']: item['value'] for item in fetch(f'{server}/api/v1/ros/nodes/parameters?node=/fixture_mgmt/nonfinite')['parameters']}
+    assert values['nan_value'] == 3.5 and values['unbounded'] == 1234.5 and values['mixed_array'] == [1.5, 'nan', 'inf', '-inf']
+
+
 def test_services_list_filters_and_interface(page):
     """Services are listed with providers; plumbing is hidden by default; nested request forms are generated."""
     page.goto(page.url.split('#')[0] + '#ros/services')

@@ -10,6 +10,12 @@ Concepts:
     read-only parameter, a parameter with dynamic typing, and a parameter
     whose set callback rejects the value ``forbidden`` with a reason.
 
+    The node ``/fixture_mgmt/nonfinite`` declares doubles that JSON cannot
+    express: ``nan_value`` (NaN), ``positive_infinity``, ``negative_infinity``,
+    ``mixed_array`` ([1.5, NaN, inf, -inf]), and ``unbounded`` (0.5 with a
+    floating-point range from -inf to +inf), plus the finite ``finite``
+    (0.25) for comparison. It accepts every change.
+
     The services node ``/fixture_mgmt/services`` offers:
         /fixture/add_two_ints   example_interfaces/srv/AddTwoInts, answers at once
         /fixture/nested         rcl_interfaces/srv/SetParameters, nested messages and arrays,
@@ -25,6 +31,7 @@ Concepts:
     Usage: ``python management_nodes.py [--vanishing]``; prints ``MANAGEMENT READY``.
 """
 import json
+import math
 import os
 import sys
 import threading
@@ -68,6 +75,15 @@ class Management:
         declare('guarded', 'ok', ParameterDescriptor(description='Rejects the value "forbidden"',
                                                      additional_constraints='Any text except "forbidden"'))
         self.settings.add_on_set_parameters_callback(self.guard)
+        self.nonfinite = rclpy.create_node('nonfinite', namespace='/fixture_mgmt')
+        unlimited = FloatingPointRange(from_value=-math.inf, to_value=math.inf, step=0.0)
+        self.nonfinite.declare_parameter('nan_value', math.nan)
+        self.nonfinite.declare_parameter('positive_infinity', math.inf)
+        self.nonfinite.declare_parameter('negative_infinity', -math.inf)
+        self.nonfinite.declare_parameter('mixed_array', [1.5, math.nan, math.inf, -math.inf])
+        self.nonfinite.declare_parameter('unbounded', 0.5, ParameterDescriptor(
+            description='Any double', floating_point_range=[unlimited]))
+        self.nonfinite.declare_parameter('finite', 0.25)
         group = ReentrantCallbackGroup()
         self.services.create_service(AddTwoInts, '/fixture/add_two_ints', self.add, callback_group=group)
         self.services.create_service(SetParameters, '/fixture/nested', self.nested, callback_group=group)
@@ -134,7 +150,7 @@ def main():
         nodes = vanishing()
     else:
         fixtures = Management()
-        nodes = [fixtures.settings, fixtures.services]
+        nodes = [fixtures.settings, fixtures.services, fixtures.nonfinite]
     executor = MultiThreadedExecutor(num_threads=4)
     for node in nodes:
         executor.add_node(node)

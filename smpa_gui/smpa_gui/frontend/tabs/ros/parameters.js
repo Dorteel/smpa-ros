@@ -11,7 +11,7 @@
  * ever changed by selecting, typing, or reloading.
  */
 import {getJSON, h, poll, postJSON} from '../../api.js';
-import {SETTABLE_TYPES, check, constraintText, editText, parseInput} from './parameter_values.js';
+import {SETTABLE_TYPES, check, constraintText, displayValue, editText, parseInput} from './parameter_values.js';
 
 const STATE_TEXT = {
   not_responding: 'This node did not answer in time. It may be busy (for example running inference) or not spinning. Try again later.',
@@ -111,7 +111,7 @@ function renderTable() {
     h('tbody', {}, shown.map((parameter) => h('tr', {'data-parameter': parameter.name,
       class: parameter.name === focusedParameter ? 'selected' : null, 'data-focused': parameter.name === focusedParameter},
       h('td', {class: 'mono'}, parameter.name), h('td', {}, parameter.type),
-      h('td', {class: 'mono'}, valueText(parameter.value)),
+      h('td', {class: 'mono'}, displayValue(parameter.type, parameter.value)),
       h('td', {class: 'muted'}, constraintText(parameter)), h('td', {}, parameter.description || ''),
       h('td', {}, proposals.has(parameter.name) ? proposalEditor(parameter)
         : editable(parameter) ? h('button', {class: 'action', type: 'button', 'data-edit': parameter.name,
@@ -176,7 +176,7 @@ function askToApply() {
     h('tbody', {}, list.map((proposal) => {
       const parameter = current(proposal.name);
       return h('tr', {}, h('td', {class: 'mono'}, proposal.name),
-        h('td', {class: 'mono'}, `${valueText(parameter && parameter.value)} (${parameter ? parameter.type : '?'})`),
+        h('td', {class: 'mono'}, `${parameter ? displayValue(parameter.type, parameter.value) : '–'} (${parameter ? parameter.type : '?'})`),
         h('td', {class: 'mono'}, `${valueText(proposal.value)} (${proposal.type})`));
     })));
   dom.dialogAtomic.textContent = dom.atomic.checked
@@ -239,7 +239,7 @@ function renderOutcome() {
     'data-outcome': record ? record.outcome : 'refused'},
     h('strong', {}, record ? text[record.outcome] : lastOutcome.text),
     record ? h('ul', {}, record.results.map((result) => h('li', {'data-result': result.name},
-      h('span', {class: 'mono'}, result.name), `: ${valueText(result.previous_value)} → ${valueText(result.value)} `,
+      h('span', {class: 'mono'}, result.name), `: ${displayValue(result.type, result.previous_value)} → ${displayValue(result.type, result.value)} `,
       result.successful === true ? '✓ applied' : result.successful === false ? `✗ rejected${result.reason ? ': ' + result.reason : ''}` : `? ${result.reason}`))) : null,
     lastOutcome.errors && lastOutcome.errors.length ? h('ul', {class: 'error-list'},
       lastOutcome.errors.map((error) => h('li', {}, `${error.path}: ${error.message}`))) : null));

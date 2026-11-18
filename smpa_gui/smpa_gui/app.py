@@ -21,6 +21,7 @@ Concepts:
 import asyncio
 import ipaddress
 import logging
+import math
 from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
@@ -28,6 +29,8 @@ import time
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -50,6 +53,49 @@ SILENCE_SECONDS = 2.0
 def envelope(**fields):
     """Add the contract version to a response body."""
     return dict(contract_version=CONTRACT_VERSION, **fields)
+
+
+def json_safe(value):
+    """Replace the floating-point numbers that JSON cannot express by their names, everywhere in a structure.
+
+    JSON has no NaN and no infinities, but ROS values can hold them: a
+    double parameter may be NaN, a double array may contain infinities, and
+    a parameter descriptor may declare a range from -inf to +inf. Such a
+    number becomes the text "nan", "inf" or "-inf", the same names the
+    topic echo has always used (``ros_topics.plain``). Dictionaries, lists
+    and tuples are walked to any depth; tuples become lists, as in JSON.
+    Every other value, including every finite number, booleans and
+    integers, is returned unchanged, so types and precision are kept.
+    """
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        return 'nan' if math.isnan(value) else ('inf' if value > 0 else '-inf')
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
+
+
+class SafeJSONResponse(JSONResponse):
+    """A JSON response that never fails because of NaN or an infinity in its content.
+
+    Every JSON answer of the gateway is rendered by this class: it is the
+    application's default response class and is used wherever a route
+    builds a response itself. Rendering is first tried as usual, which
+    refuses non-finite numbers; only when that fails is the content passed
+    through ``json_safe`` and rendered again. Normal answers therefore cost
+    nothing extra, and an answer with a NaN somewhere is still delivered
+    instead of ending as a server error.
+    """
+
+    def render(self, content):
+        """Render the content as strict JSON, naming non-finite numbers when there are any."""
+        try:
+            return super().render(content)
+        except ValueError:
+            return super().render(json_safe(content))
 
 
 def bounded_rate(requested, default, highest):
@@ -192,7 +238,19 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
             logging.getLogger('uvicorn.error').setLevel(logging.CRITICAL)
 
     app = FastAPI(title='SMPA-ROS GUI gateway', version=CONTRACT_VERSION, lifespan=lifespan,
-                  docs_url='/api/docs', redoc_url=None, openapi_url='/api/openapi.json')
+                  docs_url='/api/docs', redoc_url=None, openapi_url='/api/openapi.json',
+                  default_response_class=SafeJSONResponse)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        """Answer a request that does not fit its route with 422 and the problems, as FastAPI does.
+
+        FastAPI's own answer repeats the offending input. Python's JSON
+        reader accepts NaN and Infinity in a request body, so that input can
+        be a non-finite number; the answer is therefore rendered with
+        ``SafeJSONResponse`` so it never turns into a server error.
+        """
+        return SafeJSONResponse(status_code=422, content={'detail': jsonable_encoder(error.errors())})
     app.state.gateway = gateway
 
     def graph():
@@ -311,7 +369,7 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
             record = app.state.parameter_writer.apply(body.node, [change.model_dump() for change in body.changes],
                                                       body.atomic, body.request_id)
         except ros_parameters.ParameterChangeRefused as error:
-            return JSONResponse(status_code=error.status, content=envelope(detail=str(error), errors=error.errors))
+            return SafeJSONResponse(status_code=error.status, content=envelope(detail=str(error), errors=error.errors))
         except GatewayError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         return envelope(change=record)
@@ -358,14 +416,14 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
         try:
             record = app.state.service_caller.call(body.service, body.type, body.request, body.request_id, body.timeout)
         except ros_interfaces.InvalidValue as error:
-            return JSONResponse(status_code=422, content=envelope(detail='The request does not fit the service type',
+            return SafeJSONResponse(status_code=422, content=envelope(detail='The request does not fit the service type',
                                                                   errors=error.errors))
         except ros_services.ServiceCallRefused as error:
             raise HTTPException(status_code=error.status, detail=str(error)) from error
         except GatewayError as error:
             raise HTTPException(status_code=404 if 'not available' in str(error) else 503, detail=str(error)) from error
         status = 504 if record['state'] in ('timed_out', 'server_lost') else 200
-        return JSONResponse(status_code=status, content=envelope(call=record))
+        return SafeJSONResponse(status_code=status, content=envelope(call=record))
 
     @app.get('/api/v1/ros/actions')
     def get_actions():
@@ -660,13 +718,13 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
             record = app.state.goals.submit(submission.action, submission.type, submission.goal,
                                             submission.request_id)
         except ros_interfaces.InvalidValue as error:
-            return JSONResponse(status_code=422, content=dict(detail='The goal does not fit the action type',
+            return SafeJSONResponse(status_code=422, content=dict(detail='The goal does not fit the action type',
                                                               errors=error.errors))
         except GoalRefused as error:
             raise HTTPException(status_code=error.status, detail=str(error)) from error
         except GatewayError as error:
             raise HTTPException(status_code=404 if 'not available' in str(error) else 503, detail=str(error)) from error
-        return JSONResponse(status_code=200 if record.get('duplicate') else 201, content=envelope(goal=record))
+        return SafeJSONResponse(status_code=200 if record.get('duplicate') else 201, content=envelope(goal=record))
 
     @app.post('/api/v1/actions/goals/{goal_id}/cancel')
     def post_cancel(goal_id: str, request: Request):
@@ -755,7 +813,7 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
         try:
             work()
         except ConversationError as error:
-            return JSONResponse(status_code=error.status, content=envelope(
+            return SafeJSONResponse(status_code=error.status, content=envelope(
                 detail=str(error), conversation=conversation_status(refresh=False)))
         return envelope(conversation=conversation_status(refresh=False))
 

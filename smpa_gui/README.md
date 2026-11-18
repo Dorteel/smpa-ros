@@ -534,6 +534,9 @@ Actions
 - Goals sent by other clients (SMPA, `ros2 action send_goal`) are not shown.
 - Whole numbers beyond ±2^53 cannot be entered exactly in a browser and are refused by
   the form. NaN and infinity cannot be entered.
+- NaN and infinite parameter values and range bounds are shown as `nan`, `inf` and `-inf`
+  (the API sends these names because JSON has no such numbers). They can be replaced by
+  a finite value but not set from the GUI; use `ros2 param set` for that.
 - Byte arrays are edited as lists of numbers, which is impractical for large data.
 - Action types whose package is not sourced in the GUI's environment are listed but
   cannot be used (see `SMPA_GUI_OVERLAY`).

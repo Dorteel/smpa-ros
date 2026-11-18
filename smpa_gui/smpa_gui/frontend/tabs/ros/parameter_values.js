@@ -11,6 +11,8 @@
 
 export const SETTABLE_TYPES = ['bool', 'integer', 'double', 'string', 'byte_array', 'bool_array', 'integer_array',
   'double_array', 'string_array'];
+// JSON cannot carry NaN or infinities, so the gateway sends them as these names (API.md, "Non-finite numbers").
+export const NON_FINITE = {nan: NaN, inf: Infinity, '-inf': -Infinity};
 const INTEGER_LOW = -(2n ** 63n);
 const INTEGER_HIGH = 2n ** 63n - 1n;
 
@@ -21,13 +23,45 @@ export function elementType(type) {
 }
 
 /**
+ * Tell whether a value received for a double (or a double array element) is a non-finite number sent by name.
+ *
+ * Only doubles can be NaN or infinite, so the names count only for the
+ * types double and double_array; a string parameter whose text is "nan"
+ * is ordinary text.
+ */
+export function isNonFinite(type, value) {
+  return (type === 'double' || type === 'double_array') && typeof value === 'string'
+    && Object.prototype.hasOwnProperty.call(NON_FINITE, value);
+}
+
+/**
+ * Show a current value for reading: names for non-finite doubles, JSON for strings and lists, plain text otherwise.
+ *
+ * A NaN or infinite double is shown as its name without quotes (nan, inf,
+ * -inf), also inside a double array, so it is not mistaken for text. A
+ * missing value is shown as a dash.
+ */
+export function displayValue(type, value) {
+  if (value === null || value === undefined) return '–';
+  if (isNonFinite(type, value)) return value;
+  if (type === 'double_array' && Array.isArray(value)) {
+    return '[' + value.map((item) => (isNonFinite(type, item) ? item : JSON.stringify(item))).join(',') + ']';
+  }
+  return typeof value === 'object' || typeof value === 'string' ? JSON.stringify(value) : String(value);
+}
+
+/**
  * Show a value the way it is edited: arrays and strings as JSON, numbers and booleans as plain text.
  *
  * Arrays are edited as JSON lists, so a string array keeps its quotes and
- * an element containing a comma stays one element.
+ * an element containing a comma stays one element. A non-finite double
+ * cannot be set from here, so its edit field starts empty and the user
+ * must type a finite number; in a double array its name stays visible as a
+ * quoted element, which the check reports until it is replaced. Either way
+ * the name of a non-finite number is never sent as a value.
  */
 export function editText(type, value) {
-  if (value === null || value === undefined) return '';
+  if (value === null || value === undefined || isNonFinite(type, value)) return '';
   if (elementType(type) || Array.isArray(value)) return JSON.stringify(value);
   return String(value);
 }
@@ -76,17 +110,26 @@ function scalarProblem(kind, value) {
   return `has unsupported type ${kind}`;
 }
 
+/** Turn a range bound into a number: a finite number stays, the names nan, inf and -inf become NaN and ±Infinity. */
+function bound(value) {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(NON_FINITE, value) ? NON_FINITE[value] : value;
+}
+
 /**
  * Tell whether a number lies within a ROS parameter range and on its step grid.
  *
- * Both ends are included. A step of zero allows any value; otherwise the
- * value must be a whole number of steps above the lower end, or equal the
- * upper end. Floating-point steps are compared with a small tolerance.
+ * Both ends are included; an end may be infinite (sent as "inf" or
+ * "-inf"). A step of zero allows any value; otherwise the value must be a
+ * whole number of steps above the lower end, or equal the upper end.
+ * Floating-point steps are compared with a small tolerance.
  */
 export function inRange(value, range, integer) {
-  if (value < range.from || value > range.to) return false;
-  if (!range.step || value === range.to) return true;
-  const distance = (value - range.from) / range.step;
+  const from = bound(range.from);
+  const to = bound(range.to);
+  const step = bound(range.step);
+  if (value < from || value > to) return false;
+  if (!step || value === to) return true;
+  const distance = (value - from) / step;
   return integer ? Number.isInteger(distance) : Math.abs(distance - Math.round(distance)) < 1e-9;
 }
 
