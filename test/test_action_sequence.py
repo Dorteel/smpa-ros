@@ -292,7 +292,7 @@ def test_prepare_experiment_preserves_configuration_without_loading_model(monkey
         """Supply a resolved model identity without reading or loading weights."""
         profile.models = {stage: {'model_id': 'fixture/model', 'backend': 'transformers'}
                           for stage in ('vision', 'model', 'plan')}
-    monkeypatch.setattr(script.Runner, 'initialize_backends', resolve)
+    monkeypatch.setattr(script, 'resolve_experiment_models', resolve)
     configuration = Path(__file__).resolve().parents[1] / 'smpa_ros/config.yaml'
     profile, memory = script.prepare_experiment(['smpa', '--config', str(configuration),
         '--world-model-root', str(tmp_path), '--max-cycles', '2'], '# Requested goal')
@@ -303,3 +303,27 @@ def test_prepare_experiment_preserves_configuration_without_loading_model(monkey
     frozen = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
     assert set(frozen['stage_prompts']) >= {'sense', 'model', 'plan', 'act'}
     assert frozen['_run']['max_cycles'] == 2
+
+
+def test_transferred_configuration_matches_existing_runner(tmp_path):
+    """Retain Runner's configuration, modality and command-line semantics.
+
+    Resolve the same repository configuration through the previous parser and the
+    transferred experiment function. Compare the frozen settings and selected
+    limits without creating a run, loading a model or starting ROS participants.
+    """
+    from pathlib import Path
+    from runner import Runner
+    from smpa_ros.smpa import configure_experiment
+    configuration = Path(__file__).resolve().parents[1] / 'smpa_ros/config.yaml'
+    arguments = ['smpa', '--config', str(configuration), '--world-model-root', str(tmp_path),
+                 '--max-cycles', '3', '--vision', 'false', '--hear', 'false']
+    previous, transferred = SimpleNamespace(), SimpleNamespace()
+    Runner.configure(previous, arguments)
+    configure_experiment(transferred, arguments)
+    assert transferred.config == previous.config
+    assert transferred.original_config == previous.original_config
+    assert transferred.modalities == previous.modalities
+    assert transferred.limit == previous.limit == 3
+    assert transferred.action_timeout == previous.action_timeout
+    assert transferred.options == previous.options

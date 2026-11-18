@@ -1,6 +1,5 @@
 """Edit this program to choose goals, prompts, repetitions, and stage order."""
 from functools import partial
-from runner import Runner
 
 GOAL = '# Goal\n\nExplore the environment to discover previously unobserved objects and relationships.\n'
 
@@ -320,8 +319,7 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
 def prepare_experiment(args, goal):
     """Resolve the existing experiment settings without loading any model.
 
-    Reuse the established configuration and model-catalogue resolution while
-    the remaining Runner responsibilities are migrated. Construct the same
+    Resolve the established configuration and model catalogue. Construct the same
     frozen run configuration and metadata as the legacy entry point, then
     create a new run. Resolving configuration does not create a backend or start
     a stage; the shared inference server owns its already-loaded model.
@@ -334,8 +332,8 @@ def prepare_experiment(args, goal):
     from smpa_ros.plan import validate_settings as validate_plan_settings
 
     profile = SimpleNamespace()
-    Runner.configure(profile, args)
-    Runner.initialize_backends(profile)
+    configure_experiment(profile, args)
+    resolve_experiment_models(profile)
     if isinstance(profile.limit, bool) or not isinstance(profile.limit, int) or profile.limit < 1:
         raise ValueError('max_cycles must be a positive integer')
     refinement_settings(profile.config)
@@ -483,3 +481,122 @@ def run_ros_experiment(args=None, *, goal=GOAL, notify=None):
         if cleanup_error is not None:
             raise RuntimeError(f'Experiment cleanup was not confirmed: {cleanup_error}') from error
         raise
+
+
+def configure_experiment(profile, args=None):
+    """Resolve the existing pipeline plus explicit sequential modality switches.
+
+    Read package defaults through ROS resources or retain a complete legacy
+    configuration. Preserve stage controls and model defaults. Hear/Vision overrides
+    and an explicitly selected Read conversation are frozen into this run's
+    configuration; no message receipt changes stage ordering or resumes a
+    physical experiment. Reject incomplete modality configuration at startup.
+    """
+    import argparse
+    import sys
+    from copy import deepcopy
+    from importlib.resources import files
+    from pathlib import Path
+    from smpa_ros.backends.base import GENERATION_KEYS, stage_generation
+    from smpa_ros.model import unify_model
+    from smpa_ros.plan import enabled_actions, refinement_settings
+
+    from ament_index_python.packages import get_package_share_directory
+    from rclpy.utilities import remove_ros_args
+
+    parser = argparse.ArgumentParser(description='Execute one run of sequential SMPA cycles.')
+    parser.add_argument('--config', type=Path, default=Path(
+        get_package_share_directory('smpa_ros')) / 'config.yaml')
+    parser.add_argument('--world-model-root', type=Path, default=Path.cwd() / 'memory')
+    parser.add_argument('--run-name', default='smpa')
+    parser.add_argument('--max-cycles', type=int, default=None)
+    parser.add_argument('--service', choices=['vision', 'speech', 'all'], default='vision')
+    parser.add_argument('--hear', choices=['true', 'false'])
+    parser.add_argument('--vision', choices=['true', 'false'])
+    parser.add_argument('--read-session', type=Path)
+    parser.add_argument('--python', default=sys.executable)
+    parser.add_argument('--model-root', default=str(Path.cwd() / 'models'))
+    parser.add_argument('--audio-lock', default='')
+    parser.add_argument('--input-device', default='')
+    parser.add_argument('--output-device', default='')
+    parser.add_argument('--demo', choices=['true', 'false'], default='false')
+    parser.add_argument('--timeout', type=float, default=120)
+    options = parser.parse_args(remove_ros_args(args=args)[1:])
+    from smpa_llm.configuration import load_configuration
+    config = load_configuration(options.config)
+    if options.hear is not None or options.vision is not None or options.read_session is not None:
+        sensing = config.setdefault('sensing', {})
+        for name in ('hear', 'vision'):
+            if getattr(options, name) is not None:
+                sensing[name] = getattr(options, name) == 'true'
+        if options.read_session is not None:
+            sensing['read'] = dict(enabled=True, session=str(options.read_session.resolve()))
+    from sense import modalities
+    profile.modalities = modalities(config, options.service)
+    if profile.modalities['read']:
+        text = config['sensing']['read']
+        text['session'] = str((options.config.resolve().parent / text['session']).resolve())
+    limit = options.max_cycles if options.max_cycles is not None else config.get('execution', {}).get('max_cycles', 1)
+    if options.timeout <= 0:
+        parser.error('--timeout must be positive')
+    import math
+    action_timeout = config.get('execution', {}).get('action_timeout', 30.0)
+    if not isinstance(action_timeout, (int, float)) or isinstance(action_timeout, bool) or not math.isfinite(action_timeout) or action_timeout <= 0:
+        parser.error('execution.action_timeout must be finite and positive')
+    profile.options = options
+    profile.original_config = deepcopy(config)
+    env_path = options.config.resolve().parent / '.env'
+    if env_path.is_file():
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=False)
+    config = deepcopy(config)
+    prompts = config.setdefault('stage_prompts', {})
+    for stage in ('sense', 'model', 'plan', 'act'):
+        name = config.get('prompt', 'describe_scene') if stage == 'sense' else 'default'
+        if stage not in prompts:
+            prompts[stage] = dict(name=name, text=files('smpa_ros').joinpath(
+                f'prompts/{stage}/{name}.txt').read_text(encoding='utf-8'))
+    effective = {stage: stage_generation(config, stage) for stage in ('sense', 'model', 'plan', 'act')}
+    config['stage_settings'] = effective
+    for section in ('vision', 'modeling', 'planning'):
+        for key in (*GENERATION_KEYS, 'output_schema'):
+            config.get(section, {}).pop(key, None)
+    profile.config = unify_model(config)
+    profile.config['enabled_actions'] = list(enabled_actions(profile.config))
+    if 'scene_refinement' in profile.config:
+        profile.config['scene_refinement'] = refinement_settings(profile.config)
+    if refinement_settings(profile.config)['enabled'] and not profile.modalities['vision']:
+        raise ValueError('Scene refinement requires the vision service')
+    profile.limit = limit
+    profile.action_timeout = action_timeout
+
+
+def resolve_experiment_models(profile):
+    """Resolve one shared cognitive model and any enabled audio model entries.
+
+    Preserve the configured model selection for Sense, Model and Plan. Hear
+    registers its existing recognition and synthesis models independently;
+    Read adds no inference backend and never invokes conversational inference.
+    """
+    from copy import deepcopy
+    from pathlib import Path
+    import yaml
+    from smpa_ros.model import resolve_vision_model
+
+    from ament_index_python.packages import get_package_share_directory
+
+    registry = Path(get_package_share_directory('smpa_llm')) / 'models'
+    selected = dict(profile.config['model'])
+    if selected['backend'] == 'transformers':
+        selected = resolve_vision_model(profile.config, registry, profile.options.model_root)
+    elif selected['backend'] != 'api':
+        raise ValueError('The global model must support both images and text (Transformers VLM or API)')
+    profile.config['model'] = selected
+    profile.selected = selected
+    profile.models = {stage: deepcopy(selected) for stage in ('vision', 'model', 'plan')}
+    profile.model_identifier = profile.plan_identifier = selected['model_id']
+    if profile.modalities['hear']:
+        # Speech recognition/synthesis are separate from cognitive inference.
+        entries = yaml.safe_load((registry / 'model_library.yaml').read_text())['models']
+        profile.models.update({name: entry for name, entry in entries.items()
+                            if name not in profile.models})
