@@ -655,3 +655,80 @@ def test_acquisition_atomically_initializes_stage_settings_and_rejects_conflicts
     assert server.get_parameter('experiment_run_id').value == ''
     assert server.get_parameter(model).value == 41
     assert server.get_parameter(plan).value == -1
+
+
+@pytest.mark.parametrize('failure', ['malformed_schema', 'invalid_schema', 'unsupported_image', 'invalid_image', 'invalid_output'])
+def test_request_failure_allows_new_experiment_without_reloading(server, failure):
+    """Abort a bad standalone request while preserving a usable loaded backend.
+
+    Invalid schemas and unsupported operations fail before generation; invalid
+    generated output fails after the backend returns. Neither outcome proves a
+    backend failure. Require the action to abort, the exclusive slot to clear,
+    and a new experiment to acquire the same loaded model without reloading it.
+    Then complete an owned request and release that experiment's freeze.
+    """
+    from smpa_ros_interfaces.action import GenerateStructured, GenerateText, DescribeImage
+    from sensor_msgs.msg import Image
+    calls = []
+    def generate(prompt, **settings):
+        """Record a fake backend call and return invalid JSON only for schema requests."""
+        calls.append((prompt, settings))
+        return 'invalid JSON' if 'schema' in settings else 'fixture response'
+    server.replace_model('qwen3_4b')
+    server.backend.generate = generate
+    backend = server.backend
+    loaded = dict(server.loaded_settings)
+    if failure in ('unsupported_image', 'invalid_image'):
+        if failure == 'invalid_image':
+            server.backend.describe = generate
+        action, field = DescribeImage, 'description'
+        request = FakeGoal(prompt='Describe this image', image=Image(), run_id='')
+    else:
+        action, field = GenerateStructured, 'json_output'
+        schema = {'malformed_schema': '{', 'invalid_schema': '{"type":"made_up"}',
+                  'invalid_output': '{"type":"object"}'}[failure]
+        request = FakeGoal(prompt='Describe the scene', json_schema=schema, run_id='')
+    assert server.reserve(request.request, inference=True) == GoalResponse.ACCEPT
+    server.infer(request, action_type=action, result_field=field)
+    assert request.outcome == 'aborted'
+    assert not server.busy and server.state == 'ready'
+    assert server.backend is backend and server.loaded_settings == loaded
+    assert server.active_alias == 'qwen3_4b' and len(server.load_calls) == 1
+    assert len(calls) == (1 if failure == 'invalid_output' else 0)
+    acquired = server.set_parameters_atomically([Parameter('experiment_run_id', value='recovered-run')])
+    assert acquired.successful, acquired.reason
+    owned = FakeGoal(prompt='Continue the experiment', run_id='recovered-run')
+    assert server.reserve(owned.request, inference=True) == GoalResponse.ACCEPT
+    result = server.infer(owned, action_type=GenerateText, result_field='text')
+    assert owned.outcome == 'succeeded' and result.text == 'fixture response'
+    assert server.backend is backend and len(server.load_calls) == 1
+    assert server.set_parameters_atomically([
+        Parameter('experiment_run_id', value='release:recovered-run')]).successful
+
+
+@pytest.mark.parametrize('error_type', [RuntimeError, ValueError])
+def test_backend_failure_still_blocks_experiment_acquisition(server, error_type):
+    """Retain the error state for an exception raised by the generation backend.
+
+    A backend exception differs from a rejected request or invalid returned
+    output. Abort that generation and keep the model in error state. Reject a
+    fresh freeze, and ensure a later malformed request cannot erase that state.
+    The fixture retains the backend so existing model management can recover it.
+    """
+    from smpa_ros_interfaces.action import GenerateText, GenerateStructured
+    def fail(prompt, **settings):
+        """Simulate a generation failure without executing any actual model."""
+        raise error_type('fixture backend failure')
+    server.replace_model('qwen3_4b')
+    server.backend.generate = fail
+    backend = server.backend
+    request = FakeGoal(prompt='Generate', run_id='')
+    assert server.reserve(request.request, inference=True) == GoalResponse.ACCEPT
+    server.infer(request, action_type=GenerateText, result_field='text')
+    assert request.outcome == 'aborted' and server.state == 'error' and not server.busy
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='new-run')]).successful
+    malformed = FakeGoal(prompt='Generate JSON', json_schema='{', run_id='')
+    assert server.reserve(malformed.request, inference=True) == GoalResponse.ACCEPT
+    server.infer(malformed, action_type=GenerateStructured, result_field='json_output')
+    assert malformed.outcome == 'aborted' and server.state == 'error'
+    assert server.backend is backend and len(server.load_calls) == 1

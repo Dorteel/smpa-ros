@@ -27,18 +27,24 @@ class Goal:
 class Server:
     """Provide the minimum state needed by the real inference callback."""
     def __init__(self, backend, kind):
-        """Retain a fake backend and its catalogue kind without loading weights."""
+        """Retain a fake backend, its catalogue kind and initial ready state.
+
+        The real callback reads readiness before validating a request, so keep
+        current state alongside the recorded transitions without loading weights.
+        """
         self.lock = RLock()
         self.backend = backend
         self.active_alias = 'test'
         self.loaded_settings = {'backend': kind}
         self.busy = True
+        self.state = 'ready'
         self.states = []
     def settings(self, alias):
         """Return fixed generation settings for the current request."""
         return dict(max_new_tokens=128, temperature=0.0, top_p=1.0, seed=-1)
     def change_state(self, state):
-        """Record server states as the real callback changes them."""
+        """Update current readiness and retain each transition for assertions."""
+        self.state = state
         self.states.append(state)
     def get_logger(self):
         """Accept errors without publishing ROS logging messages."""

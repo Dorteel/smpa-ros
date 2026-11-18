@@ -603,12 +603,19 @@ class InferenceServer(Node):
         the native success state and failures abort with a logged diagnostic because
         the agreed minimal inference results contain no error field. Keep weights
         loaded after a request failure and release the exclusive slot in all cases.
+        Request validation, unsupported operations and invalid returned output
+        preserve the backend's previous readiness. An exception during the backend
+        call marks a genuine generation failure as error. A bad request must not
+        reset an already failed backend to ready.
         """
         result = action_type.Result()
+        recovery_state = 'error'
+        backend_call_active = False
         try:
             with self.lock:
                 if self.backend is None:
                     raise RuntimeError('No active model; use load_model first')
+                recovery_state = self.state
                 request = goal_handle.request
                 stage = getattr(request, 'stage', '')
                 values = self.stage_settings(self.active_alias, stage) if stage else self.settings(self.active_alias)
@@ -654,8 +661,11 @@ class InferenceServer(Node):
                 if values['top_p'] != 1.0:
                     raise ValueError('The existing image backend does not expose top_p')
                 from smpa_llm.inference.images import image_to_pil
-                output = self.backend.describe(image_to_pil(request.image), request.prompt, **options)
+                pixels = image_to_pil(request.image)
+                backend_call_active = True
+                output = self.backend.describe(pixels, request.prompt, **options)
             elif chat and backend_kind == 'api':
+                backend_call_active = True
                 output = self.backend.generate_conversation(prompt,
                     max_new_tokens=values['max_new_tokens'], schema=schema,
                     temperature=values['temperature'], top_p=values['top_p'],
@@ -667,9 +677,11 @@ class InferenceServer(Node):
                                     do_sample=values['temperature'] > 0)
                     if values['seed'] != -1:
                         controls['seed'] = values['seed']
+                    backend_call_active = True
                     output = self.backend.generate(prompt, **options,
                                                    _conversation_settings=controls)
                 elif backend_kind == 'api':
+                    backend_call_active = True
                     output = self.backend.generate_conversation(prompt,
                         max_new_tokens=values['max_new_tokens'], schema=schema,
                         temperature=values['temperature'], top_p=values['top_p'],
@@ -678,7 +690,9 @@ class InferenceServer(Node):
                 else:
                     raise ValueError('Backend does not expose top_p')
             else:
+                backend_call_active = True
                 output = self.backend.generate(prompt, **options)
+            backend_call_active = False
             output = validate_output(output, 'json_schema' if schema is not None else 'text', schema)
             setattr(result, result_field, output)
             goal_handle.succeed()
@@ -686,7 +700,7 @@ class InferenceServer(Node):
         except Exception as error:
             self.get_logger().error(str(error))
             goal_handle.abort()
-            self.change_state('error')
+            self.change_state('error' if backend_call_active else recovery_state)
         finally:
             with self.lock:
                 self.busy = False
