@@ -123,6 +123,9 @@ class InferenceServer(Node):
         self.internal_parameter_update = False
         self.loader = loader or load_registered_backend
         self.declare_parameter('active_model', '')
+        self.declare_parameter('experiment_run_id', '')
+        if self.get_parameter('experiment_run_id').value:
+            raise ValueError('experiment_run_id can only be acquired after the model is ready')
         initial = self.get_parameter('active_model').value
         for alias, entry in self.catalogue.items():
             defaults = dict(model_id=entry.get('model_id', entry.get('base_model', {}).get('model_id', alias)), path=entry.get('path', ''),
@@ -146,7 +149,7 @@ class InferenceServer(Node):
                                   (SetActiveModel, 'set_active_model')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
                 partial(self.manage, action_type=action_type, operation=name),
-                goal_callback=self.reserve, cancel_callback=self.cancel,
+                goal_callback=partial(self.reserve, management=True), cancel_callback=self.cancel,
                 callback_group=self.group))
         for action_type, name, field in [(GenerateText, 'generate', 'text'),
                 (GenerateStructured, 'generate_structured', 'json_output'),
@@ -243,14 +246,36 @@ class InferenceServer(Node):
         Inspect each affected registered namespace after applying all proposed
         values to its snapshot. Direct active-model changes are rejected because
         only successful management may advertise readiness for a different model.
-        Loading edits do not mutate the live backend. Reject unknown parameters;
+        Loading edits do not mutate the live backend. A run ID freezes the active
+        model and all model settings after an idle, ready server is acquired.
+        Reject unknown parameters and changes that would invalidate the freeze;
         ordinary ROS use_sim_time remains available. Return an actionable reason
         instead of partially applying an invalid batch.
         """
         with self.lock:
             changed = {}
             try:
+                frozen = self.get_parameter('experiment_run_id').value
+                transition = next((p.value for p in parameters if p.name == 'experiment_run_id'), frozen)
+                if type(transition) is not str:
+                    raise ValueError('experiment_run_id must be a string')
+                if frozen and transition not in ('', frozen):
+                    raise ValueError('An experiment already owns the inference server')
+                if transition != frozen:
+                    if self.busy:
+                        raise ValueError('Cannot change experiment ownership during an operation')
+                    if transition and (self.backend is None or self.state != 'ready'):
+                        raise ValueError('An experiment requires a ready model')
+                    if transition and any(self.settings(self.active_alias)[key] != self.loaded_settings[key]
+                                          for key in LOADING_FIELDS):
+                        raise ValueError('Reload staged model settings before starting an experiment')
+                    if any(p.name.startswith('models.') or p.name == 'active_model' for p in parameters):
+                        raise ValueError('Change model settings before acquiring or releasing an experiment')
                 for parameter in parameters:
+                    if parameter.name == 'experiment_run_id':
+                        continue
+                    if frozen and (parameter.name.startswith('models.') or parameter.name == 'active_model'):
+                        raise ValueError('Inference settings are frozen for an active experiment')
                     if parameter.name == 'active_model':
                         if not self.internal_parameter_update and parameter.value != self.active_alias:
                             raise ValueError('Use load_model or set_active_model to select a model')
@@ -351,16 +376,18 @@ class InferenceServer(Node):
             self.change_state('error')
             raise
 
-    def reserve(self, goal):
+    def reserve(self, goal, *, management=False):
         """Reserve the sole operation slot or promptly reject an overlapping goal.
 
         Keep status and parameter services responsive while exactly one management
-        or inference action owns backend access. The slot is released in execute
+        or inference action owns backend access. Reject model management while
+        an experiment owns the loaded settings; inference remains available.
+        The slot is released in execute
         cleanup, including failure. No second goal is queued against stale model
         settings or allowed to unload weights used by an active generation.
         """
         with self.lock:
-            if self.busy:
+            if self.busy or (management and self.get_parameter('experiment_run_id').value):
                 return GoalResponse.REJECT
             self.busy = True
             return GoalResponse.ACCEPT

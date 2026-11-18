@@ -367,3 +367,42 @@ def test_structured_image_delegates_schema_and_rejects_invalid_output(server):
     server.reserve(None)
     server.infer(goal, action_type=DescribeStructuredImage, result_field='json_output')
     assert goal.outcome == 'aborted' and len(calls) == before
+
+
+def test_experiment_freezes_configuration_and_management(server):
+    """Freeze a ready mocked model, reject changes, and release it explicitly.
+
+    An unloaded or busy server cannot be acquired. Once a run owns a ready
+    server, model settings and model-management goals are rejected while normal
+    inference can still reserve the backend. Releasing the run restores edits.
+    No real model weights are loaded.
+    """
+    run = Parameter('experiment_run_id', value='run-a')
+    release = Parameter('experiment_run_id', value='')
+    temperature = Parameter('models.qwen3_4b.temperature', value=0.4)
+    assert not server.set_parameters_atomically([run]).successful
+    server.replace_model('qwen3_4b')
+    assert server.reserve(None) == GoalResponse.ACCEPT
+    assert not server.set_parameters_atomically([run]).successful
+    server.busy = False
+    assert not server.set_parameters_atomically([run, temperature]).successful
+    assert server.set_parameters_atomically([run]).successful
+    assert not server.set_parameters_atomically([temperature]).successful
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='run-b')]).successful
+    assert server.reserve(None, management=True) == GoalResponse.REJECT
+    assert server.reserve(None) == GoalResponse.ACCEPT
+    assert not server.set_parameters_atomically([release]).successful
+    server.busy = False
+    assert server.set_parameters_atomically([release]).successful
+    assert server.set_parameters_atomically([temperature]).successful
+
+
+def test_experiment_rejects_staged_loading_settings(server):
+    """Require a reload before freezing a model whose loading settings changed.
+
+    The frozen parameter values must identify the actual loaded weights, rather
+    than a staged configuration that only applies to a future model load.
+    """
+    server.replace_model('qwen3_4b')
+    assert server.set_parameters_atomically([Parameter('models.qwen3_4b.model_id', value='staged')]).successful
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
