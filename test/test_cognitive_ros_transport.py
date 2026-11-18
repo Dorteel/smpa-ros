@@ -207,7 +207,7 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
         rclpy.shutdown()
 
 
-def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None):
+def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None, camera=False):
     """Serve one stage in its own process with only external operations mocked.
 
     Select the named existing node, replace its external work with deterministic
@@ -218,7 +218,13 @@ def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None):
     import smpa_ros.model_node as model
     import smpa_ros.plan_node as plan
     import smpa_ros.act_node as act
-    sense.observe = fake_observation
+    if camera and stage == 'sense':
+        def describe(self, image, prompt, **context):
+            """Return a fixed visual description without running image inference."""
+            return 'A red pixel.'
+        sense.SenseNode.describe = describe
+    else:
+        sense.observe = fake_observation
     if stage == 'sense' and sensing_started is not None:
         def delayed_observation(*args, **kwargs):
             """Hold one observation until the test allows the sensor to finish.
@@ -241,10 +247,22 @@ def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None):
              'plan': plan.PlanNode, 'act': act.ActNode}
     rclpy.init(args=[])
     node = kinds[stage](parameter_overrides=[Parameter('memory_root', value=root), Parameter('timeout', value=3.0)])
+    executor = None
+    thread = None
     try:
-        while not stop.is_set():
-            rclpy.spin_once(node, timeout_sec=0.1)
+        if camera and stage == 'sense':
+            executor = MultiThreadedExecutor(num_threads=2)
+            executor.add_node(node)
+            thread = Thread(target=executor.spin, daemon=True)
+            thread.start()
+            stop.wait()
+        else:
+            while not stop.is_set():
+                rclpy.spin_once(node, timeout_sec=0.1)
     finally:
+        if executor is not None:
+            executor.shutdown(timeout_sec=10)
+            thread.join(timeout=10)
         node.destroy_node()
         rclpy.shutdown()
 
@@ -527,3 +545,91 @@ def test_installed_smpa_command_interrupts_and_releases_freeze(tmp_path):
                 child.terminate()
                 child.join(timeout=5)
         assert all(child.exitcode == 0 for child in processes)
+
+
+def test_installed_experiment_preserves_camera_evidence(tmp_path):
+    """Persist mocked camera frames through the installed cognitive experiment.
+
+    Start the four stage processes and the weight-free inference server. Publish
+    an actual ROS image while only the visual description, language generation,
+    planning and robot movement are mocked. Run two cycles through the installed
+    command and verify the original image and Markdown evidence, Model source
+    links, completed cycles, and cleanup of all owned participants.
+    """
+    import multiprocessing
+    import os
+    from pathlib import Path
+    import subprocess
+    import yaml
+    from ament_index_python.packages import get_package_prefix, get_package_share_directory
+    from PIL import Image as PILImage
+    from rclpy.qos import qos_profile_sensor_data
+    from sensor_msgs.msg import Image
+    from smpa_llm.server import InferenceServer
+
+    context = multiprocessing.get_context('spawn')
+    stop = context.Event()
+    names = ('sense', 'model', 'plan', 'act')
+    processes = [context.Process(target=stage_process,
+        args=(name, str(tmp_path), stop, None, None, name == 'sense')) for name in names]
+    for process in processes:
+        process.start()
+    registry = tmp_path / 'models.yaml'
+    registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
+    configuration = yaml.safe_load((Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text())
+    configuration['model'] = {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture'}
+    configuration['sensing'] = {'vision': True, 'hear': False}
+    configuration['camera_topic'] = '/test/cognitive_camera'
+    configuration.pop('scene_refinement', None)
+    config = tmp_path / 'config.yaml'
+    config.write_text(yaml.safe_dump(configuration))
+    rclpy.init(args=[])
+    server = InferenceServer(loader=fake_backend_loader,
+                             parameter_overrides=[Parameter('registry_file', value=str(registry))])
+    server.replace_model('fixture')
+    camera = Node('mock_camera')
+    publisher = camera.create_publisher(Image, configuration['camera_topic'], qos_profile_sensor_data)
+    frame = Image(width=1, height=1, encoding='rgb8', step=3, data=[255, 0, 0])
+    def publish_frame():
+        """Publish one deterministic fixture image without connecting hardware."""
+        publisher.publish(frame)
+    camera.create_timer(0.05, publish_frame)
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(server)
+    executor.add_node(camera)
+    thread = Thread(target=executor.spin, daemon=True)
+    thread.start()
+    executable = Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/smpa'
+    try:
+        completed = subprocess.run([str(executable), '--config', str(config), '--world-model-root', str(tmp_path),
+                                    '--max-cycles', '2', '--timeout', '15'], cwd=tmp_path,
+                                   capture_output=True, text=True, timeout=90, env=os.environ.copy())
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        metadata_path, = (tmp_path / 'runs').glob('*/metadata.yaml')
+        metadata = yaml.safe_load(metadata_path.read_text())
+        assert metadata['status'] == 'completed' and metadata['completed_cycles'] == 2
+        directory = metadata_path.parent
+        observations = list((directory / 'observations/vision').glob('*.md'))
+        assert len(observations) == 2
+        for observation in observations:
+            assert observation.read_text() == 'A red pixel.'
+            with PILImage.open(observation.with_suffix('.png')) as image:
+                assert image.getpixel((0, 0)) == (255, 0, 0)
+        for cycle in (1, 2):
+            record = json.loads((directory / f'state/cycle_{cycle:06d}/model.json').read_text())
+            assert record['source_observations'][0] == f'state/cycle_{cycle:06d}/sense.json'
+            assert {Path(item).suffix for item in record['source_observations'][1:]} == {'.md', '.png'}
+            assert (directory / f'world_model/iteration_{cycle:03d}.md').exists()
+    finally:
+        executor.shutdown(timeout_sec=10)
+        thread.join(timeout=10)
+        camera.destroy_node()
+        server.destroy_node()
+        rclpy.shutdown()
+        stop.set()
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        assert all(process.exitcode == 0 for process in processes)
