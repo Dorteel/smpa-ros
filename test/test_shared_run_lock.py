@@ -297,3 +297,27 @@ def test_separate_processes_reserve_unique_stage_invocations(tmp_path):
     cycle, name, provenance = reserve_invocation(memory.directory, memory.metadata['run_id'], 'plan', 'default')
     assert (cycle, name, provenance['sequence']) == (1, 'plan.json', 3)
     assert provenance['previous_record'] == 'state/cycle_000001/model_002.json'
+
+
+def test_reservation_recovers_from_legacy_records_and_rejects_stale_cycle(tmp_path):
+    """Recover invocation provenance for a run created before reservations existed.
+
+    Store an existing stage record without a reservation sidecar. The next
+    invocation must retain its previous-record link and continue its sequence
+    and per-stage count. A stale cycle or a completed run must be rejected.
+    """
+    import json
+    from memory import reserve_invocation
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    memory.begin_cycle()
+    record = memory.directory / 'state/cycle_000001/model.json'
+    record.write_text(json.dumps({'stage': 'model', 'sequence': 7, 'invocation': 1}))
+    cycle, name, provenance = reserve_invocation(memory.directory, memory.metadata['run_id'], 'model', 'default')
+    assert (cycle, name, provenance['sequence'], provenance['invocation']) == (1, 'model_002.json', 8, 2)
+    assert provenance['previous_record'] == 'state/cycle_000001/model.json'
+    with pytest.raises(RuntimeError, match='active cycle'):
+        reserve_invocation(memory.directory, memory.metadata['run_id'], 'model', 'default', expected_cycle=2)
+    memory.finalize('completed')
+    with pytest.raises(RuntimeError, match='active run'):
+        reserve_invocation(memory.directory, memory.metadata['run_id'], 'model', 'default')
