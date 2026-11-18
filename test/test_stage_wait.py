@@ -65,3 +65,27 @@ def test_ros_wait_returns_result_and_reports_timeout(monkeypatch):
     assert wait_for_ros(object(), ready, 1.0, 'fixture') == 'response'
     with pytest.raises(TimeoutError, match='fixture'):
         wait_for_ros(object(), pending, 1.0, 'fixture')
+
+
+def test_release_requires_no_outstanding_stage_and_names_owner():
+    """Release only a confirmed-idle experiment using its owner-checked command.
+
+    An unconfirmed stage prevents any release request. Once it has ended, the
+    exact run identity must be sent to the server and unsuccessful replies must
+    remain visible to the caller.
+    """
+    from smpa_ros.smpa import release_inference
+    parameters = SimpleNamespace(set_parameters_atomically=Mock(return_value='future'))
+    def success(future, timeout, operation):
+        """Return an accepted release response for the sent request."""
+        return SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))
+    with pytest.raises(RuntimeError, match='unconfirmed'):
+        release_inference(parameters, 'run-a', success, 1.0, {'result': object()})
+    parameters.set_parameters_atomically.assert_not_called()
+    release_inference(parameters, 'run-a', success, 1.0, {})
+    assert parameters.set_parameters_atomically.call_args.args[0][0].value == 'release:run-a'
+    def rejected(future, timeout, operation):
+        """Return a failed release without pretending the freeze was cleared."""
+        return SimpleNamespace(result=SimpleNamespace(successful=False, reason='server busy'))
+    with pytest.raises(RuntimeError, match='server busy'):
+        release_inference(parameters, 'run-a', rejected, 1.0, {})

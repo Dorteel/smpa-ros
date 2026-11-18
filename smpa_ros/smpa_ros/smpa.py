@@ -155,3 +155,20 @@ def wait_for_ros(node, future, timeout, operation):
     if not future.done():
         raise TimeoutError(f'Timed out waiting for {operation}')
     return future.result()
+
+
+def release_inference(parameters, run_id, wait, timeout, outstanding):
+    """Release only this experiment's inference freeze after its stages finish.
+
+    Refuse to release while a cognitive action or freeze acquisition remains
+    unconfirmed. Send the server's owner-checked release command and require a
+    successful response. A rejection or timeout is reported to the caller; it
+    must not claim cleanup succeeded or clear another experiment's ownership.
+    """
+    from rclpy.parameter import Parameter
+    if outstanding:
+        raise RuntimeError('Cannot release inference while an operation is unconfirmed')
+    response = wait(parameters.set_parameters_atomically([
+        Parameter('experiment_run_id', value='release:' + run_id)]), timeout, 'inference release')
+    if not response.result.successful:
+        raise RuntimeError(f'Inference release failed: {response.result.reason}')
