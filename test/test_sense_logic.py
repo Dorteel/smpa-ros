@@ -153,3 +153,47 @@ def test_listen_failure_requests_cancellation(sense_module):
         sense_module.SenseNode.perform(node, client, SimpleNamespace())
     handle.cancel_goal_async.assert_called_once()
     assert operations[-2:] == ['Listen cancellation', 'terminal Listen result']
+
+
+def test_refinement_image_is_frozen_for_shared_inference(monkeypatch, tmp_path):
+    """Publish and reuse complete original pixels for refinement inference.
+
+    Mock parameter responses and the structured image action. Two different
+    camera frames must send the same first image to inference, with the run ID
+    and schema attached. The persisted frozen PNG must contain the first frame.
+    """
+    from sensor_msgs.msg import Image
+    from PIL import Image as PILImage
+    from smpa_ros.sense import describe_image
+    from smpa_ros_interfaces import action
+    monkeypatch.setattr(action, 'DescribeStructuredImage', SimpleNamespace(Goal=SimpleNamespace))
+    pipeline = {'enabled_actions': ['observe'], 'scene_refinement': {'enabled': True},
+        'stage_settings': {'sense': {'temperature': 0.0, 'max_output_tokens': 32, 'reasoning_effort': None,
+                                    'seed': None, 'response_format': 'json_schema', 'output_schema': {'type': 'object'}}}}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'pipeline': pipeline})
+    calls = []
+    def get_parameters(names):
+        """Return one matching run and its frozen generation controls."""
+        if names[0] == 'experiment_run_id':
+            return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
+                                           SimpleNamespace(string_value='fixture')])
+        return SimpleNamespace(values=[SimpleNamespace(integer_value=32), SimpleNamespace(double_value=0.0),
+                                       SimpleNamespace(integer_value=-1), SimpleNamespace(double_value=1.0)])
+    def send(goal):
+        """Record the generated goal and return a successful fake ROS handle."""
+        calls.append(goal)
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(
+            status=4, result=SimpleNamespace(json_output='{}')))
+    client = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send)
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0),
+        parameters=SimpleNamespace(wait_for_services=lambda timeout_sec: True, get_parameters=get_parameters),
+        structured_client=client, result=lambda future, timeout, operation: future)
+    first = Image(width=1, height=1, encoding='rgb8', step=3, data=[255, 0, 0])
+    second = Image(width=1, height=1, encoding='rgb8', step=3, data=[0, 0, 255])
+    for frame in (first, second):
+        assert describe_image(node, frame, 'Describe', run_id=memory.metadata['run_id'],
+                              directory=memory.directory, pipeline=pipeline) == '{}'
+    assert [bytes(goal.image.data) for goal in calls] == [bytes([255, 0, 0])] * 2
+    assert all(goal.run_id == memory.metadata['run_id'] for goal in calls)
+    with PILImage.open(memory.directory / 'observations/vision/frozen_image.png') as saved:
+        assert saved.getpixel((0, 0)) == (255, 0, 0)

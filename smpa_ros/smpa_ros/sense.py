@@ -150,8 +150,22 @@ def describe_image(node, image, prompt, *, run_id, directory, pipeline):
             with PILImage.open(frozen) as stored:
                 pixels = stored.convert('RGB')
         else:
-            with frozen.open('xb') as output:
-                pixels.save(output, format='PNG')
+            import os
+            from tempfile import NamedTemporaryFile
+            with NamedTemporaryFile(mode='wb', dir=frozen.parent, prefix='.frozen-image-', delete=False) as output:
+                pending = Path(output.name)
+                try:
+                    pixels.save(output, format='PNG')
+                    output.flush()
+                    os.fsync(output.fileno())
+                    try:
+                        os.link(pending, frozen)
+                    except FileExistsError:
+                        from PIL import Image as PILImage
+                        with PILImage.open(frozen) as stored:
+                            pixels = stored.convert('RGB')
+                finally:
+                    pending.unlink(missing_ok=True)
     pixels.thumbnail((512, 512))
     message = Image(height=pixels.height, width=pixels.width, encoding='rgb8',
                     is_bigendian=0, step=pixels.width * 3, data=list(pixels.tobytes()))
