@@ -7,11 +7,11 @@ from smpa_ros_interfaces import action, msg, srv
 
 
 ACTION_CONTRACTS = [
-    ('GenerateText', ['prompt', 'run_id'], ['text'], ['partial_text']),
-    ('GenerateStructured', ['prompt', 'json_schema', 'run_id'], ['json_output'], ['partial_text']),
-    ('DescribeImage', ['image', 'prompt', 'run_id'], ['description'], ['partial_text']),
-    ('DescribeStructuredImage', ['image', 'prompt', 'json_schema', 'run_id'], ['json_output'], ['partial_text']),
-    ('GenerateStructuredChat', ['messages_json', 'json_schema', 'run_id'], ['json_output'], []),
+    ('GenerateText', ['prompt', 'run_id', 'stage'], ['text'], ['partial_text']),
+    ('GenerateStructured', ['prompt', 'json_schema', 'run_id', 'stage'], ['json_output'], ['partial_text']),
+    ('DescribeImage', ['image', 'prompt', 'run_id', 'stage'], ['description'], ['partial_text']),
+    ('DescribeStructuredImage', ['image', 'prompt', 'json_schema', 'run_id', 'stage'], ['json_output'], ['partial_text']),
+    ('GenerateStructuredChat', ['messages_json', 'json_schema', 'run_id', 'stage'], ['json_output'], []),
     ('Sense', ['run_id', 'capability', 'prompt_name'], ['observation', 'record_path'], []),
     ('Model', ['run_id', 'capability', 'prompt_name', 'observation', 'source_record', 'previous_snapshot', 'messages_json'],
      ['world_model', 'record_path', 'snapshot_path'], []),

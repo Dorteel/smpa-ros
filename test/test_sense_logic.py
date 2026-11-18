@@ -174,11 +174,13 @@ def test_refinement_image_is_frozen_for_shared_inference(monkeypatch, tmp_path):
     calls = []
     def get_parameters(names):
         """Return one matching run and its frozen generation controls."""
-        if names[0] == 'experiment_run_id':
-            return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
-                                           SimpleNamespace(string_value='fixture')])
-        return SimpleNamespace(values=[SimpleNamespace(integer_value=32), SimpleNamespace(double_value=0.0),
-                                       SimpleNamespace(integer_value=-1), SimpleNamespace(double_value=1.0)])
+        snapshot = dict(run_id=memory.metadata['run_id'], active_model='fixture', stages={'sense':
+            dict(max_new_tokens=32, temperature=0.0, seed=-1, top_p=1.0, reasoning_effort=None)})
+        memory.metadata['inference'] = snapshot
+        memory.write_metadata()
+        return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
+                                       SimpleNamespace(string_value='fixture'),
+                                       SimpleNamespace(string_value=json.dumps(snapshot))])
     def send(goal):
         """Record the generated goal and return a successful fake ROS handle."""
         calls.append(goal)
@@ -194,7 +196,7 @@ def test_refinement_image_is_frozen_for_shared_inference(monkeypatch, tmp_path):
         assert describe_image(node, frame, 'Describe', run_id=memory.metadata['run_id'],
                               directory=memory.directory, pipeline=pipeline) == '{}'
     assert [bytes(goal.image.data) for goal in calls] == [bytes([255, 0, 0])] * 2
-    assert all(goal.run_id == memory.metadata['run_id'] for goal in calls)
+    assert all(goal.run_id == memory.metadata['run_id'] and goal.stage == 'sense' for goal in calls)
     with PILImage.open(memory.directory / 'observations/vision/frozen_image.png') as saved:
         assert saved.getpixel((0, 0)) == (255, 0, 0)
 
@@ -218,11 +220,13 @@ def test_identification_creates_persisted_refinement_queue(sense_module, tmp_pat
     calls = []
     def get_parameters(names):
         """Return matching experiment ownership and frozen generation values."""
-        if names[0] == 'experiment_run_id':
-            return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
-                                           SimpleNamespace(string_value='fixture')])
-        return SimpleNamespace(values=[SimpleNamespace(integer_value=32), SimpleNamespace(double_value=0.0),
-                                       SimpleNamespace(integer_value=-1), SimpleNamespace(double_value=1.0)])
+        snapshot = dict(run_id=memory.metadata['run_id'], active_model='fixture', stages={'sense':
+            dict(max_new_tokens=32, temperature=0.0, seed=-1, top_p=1.0, reasoning_effort=None)})
+        memory.metadata['inference'] = snapshot
+        memory.write_metadata()
+        return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
+                                       SimpleNamespace(string_value='fixture'),
+                                       SimpleNamespace(string_value=json.dumps(snapshot))])
     def send(goal):
         """Return one fixed entity through a fake successful action result."""
         calls.append(goal)
@@ -238,7 +242,8 @@ def test_identification_creates_persisted_refinement_queue(sense_module, tmp_pat
     assert [item['property'] for item in state['questions']] == ['color', 'shape']
     assert all(not item['attempted'] for item in state['questions'])
     assert state['entities'][0]['id'] == 'cup' and len(state['image_sha256']) == 64
-    assert calls[0].run_id == memory.metadata['run_id'] and json.loads(calls[0].json_schema)['required'] == ['entities']
+    assert calls[0].run_id == memory.metadata['run_id'] and calls[0].stage == 'sense'
+    assert json.loads(calls[0].json_schema)['required'] == ['entities']
 
 
 def test_refinement_reuses_initial_observation_and_incorporates_focused_answer(sense_module, monkeypatch, tmp_path):

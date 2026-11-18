@@ -109,7 +109,10 @@ inference backend call remains unverified. The conversation reply backend
 remains unchanged. The legacy Runner and compatibility entry points remain in the
 repository until their remaining regression coverage has been migrated. Some
 legacy tests require different per-stage generation controls within one run;
-the shared inference server currently freezes one setting set for that run.
+the server source now supports separate frozen settings for each stage. The
+inference action definitions changed and must be regenerated before ROS transport
+verification; the last regeneration attempt was stopped when the machine reported
+new thermal throttling. The existing installed overlay is therefore stale.
 
 To reproduce the generated interface build on a stable authorized host:
 
@@ -138,3 +141,44 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LO
   test/test_tier1_interfaces.py test/test_action_sequence.py \
   test/test_inference_freeze.py test/test_stage_wait.py test/test_smpa_control.py
 ```
+
+## Per-stage inference configuration
+
+Inference goals accept an optional `stage` selector. An empty selector keeps
+the existing standalone or conversational generation settings. Cognitive nodes
+send `sense`, `model`, or `plan`; focused visual observations reuse `sense`
+settings. The server freezes the selected model's resolved settings for every
+stage in `frozen_settings_json`. Each stage checks that snapshot against both
+its run metadata and requested configuration before sending inference. Model
+parameter changes are rejected while the run owns the server.
+
+Each registered model has `models.<alias>.stages.<stage>` parameters for
+`max_new_tokens`, `temperature`, `top_p`, `seed`, and `reasoning_effort`. The
+first four default to inheritance from the model's base generation parameters
+using sentinels `-1`, `-1.0`, `-1.0`, and `-2`, respectively. An empty
+`reasoning_effort` means no reasoning control. Nonempty reasoning values are
+forwarded only to API backends; the backend still validates provider support.
+For example, these two namespaces can be set before an experiment acquires the
+server:
+
+```yaml
+llm:
+  ros__parameters:
+    models:
+      qwen3_vl_2b:
+        stages:
+          model:
+            max_new_tokens: 512
+            temperature: 0.2
+          plan:
+            max_new_tokens: 256
+            temperature: 0.0
+```
+
+The values above illustrate distinct settings for the registered shared model.
+Reasoning controls require an API model and provider that actually supports them. Stage ROS settings must
+match the experiment's corresponding frozen configuration. A mismatch fails
+explicitly rather than recording settings that were not used. Unit tests with
+mocked backends cover isolation, inheritance, freezing, ownership and forwarding.
+Generated action types and end-to-end ROS behavior for the new selector remain
+unverified until the isolated interface build can be completed without throttling.

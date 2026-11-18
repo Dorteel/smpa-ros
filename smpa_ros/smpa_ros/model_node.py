@@ -81,39 +81,47 @@ class ModelNode(Node):
     def generate(self, prompt, *, run_id, **settings):
         """Send the existing Model prompt to the shared inference action.
 
-        Compare the active model's generation controls with the frozen run
-        configuration and reject unsupported reasoning settings. Select text or
+        Compare the server's frozen Model controls with the run configuration.
+        Select text or
         schema-constrained generation as requested, then return successful output.
-        Require the server freeze to belong to this run before comparing the
-        server settings with the run configuration and sending the request.
+        Require the server freeze and saved snapshot to match this run before
+        comparing its stage settings and sending the request.
         """
         timeout = self.get_parameter('timeout').value
         if timeout <= 0:
             raise ValueError('Model timeout must be positive')
-        if settings.get('reasoning_effort') is not None:
-            raise ValueError('The shared inference server does not expose reasoning_effort')
         if not self.parameters.wait_for_services(timeout_sec=timeout):
             raise TimeoutError('Inference parameter services are unavailable')
-        response = self.wait(self.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'experiment and active model')
+        response = self.wait(self.parameters.get_parameters(['experiment_run_id', 'active_model', 'frozen_settings_json']), timeout, 'experiment and active model')
         if response.values[0].string_value != run_id:
             raise RuntimeError('The inference server is not frozen for this experiment')
         alias = response.values[1].string_value
         if not alias:
             raise RuntimeError('The inference server has no active model')
-        names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
-        response = self.wait(self.parameters.get_parameters(names), timeout, 'inference parameters')
-        actual = (response.values[0].integer_value, response.values[1].double_value,
-                  response.values[2].integer_value, response.values[3].double_value)
-        expected = (settings.get('max_new_tokens'), settings.get('temperature'), settings.get('seed', -1), 1.0)
+        snapshot = json.loads(response.values[2].string_value)
+        if snapshot.get('run_id') != run_id or snapshot.get('active_model') != alias:
+            raise RuntimeError('Inference snapshot does not match this experiment')
+        with locked_run(self.get_parameter('memory_root').value, run_id) as directory:
+            saved = yaml.safe_load((directory / 'metadata.yaml').read_text()).get('inference')
+        if snapshot != saved:
+            raise RuntimeError('Inference server or frozen settings changed during this experiment')
+        controls = snapshot.get('stages', {}).get('model')
+        if not isinstance(controls, dict):
+            raise RuntimeError('Inference snapshot has no frozen Model settings')
+        actual = tuple(controls.get(field) for field in
+                       ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
+        expected = (settings.get('max_new_tokens'), settings.get('temperature'),
+                    settings.get('seed') if settings.get('seed') is not None else -1,
+                    1.0, settings.get('reasoning_effort'))
         if actual != expected:
             raise ValueError(f'Inference parameters do not match frozen Model settings: expected {expected}, got {actual}')
         format_name = settings.get('response_format')
         if format_name == 'text':
             client = self.text_client
-            goal = GenerateText.Goal(prompt=prompt, run_id=run_id)
+            goal = GenerateText.Goal(prompt=prompt, run_id=run_id, stage='model')
         elif format_name == 'json_schema' and isinstance(settings.get('schema'), dict):
             client = self.structured_client
-            goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(settings['schema']), run_id=run_id)
+            goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(settings['schema']), run_id=run_id, stage='model')
         else:
             raise ValueError('Unsupported Model response format')
         if not client.wait_for_server(timeout_sec=timeout):

@@ -79,7 +79,7 @@ class PlanNode(Node):
     def generate(self, prompt, *, run_id, **settings):
         """Request schema-constrained generation from the configured LLM node.
 
-        Require the inference server to be frozen for this run. Check that the
+        Require the inference server to match this run's saved snapshot. Check that the
         selected server's active model has the same generation
         controls as the frozen planning request; otherwise fail instead of
         silently recording settings that were not used. Send the actual schema
@@ -89,29 +89,37 @@ class PlanNode(Node):
         timeout = self.get_parameter('timeout').value
         if timeout <= 0:
             raise ValueError('Plan timeout must be positive')
-        if settings.get('reasoning_effort') is not None:
-            raise ValueError('The shared inference server does not expose reasoning_effort')
         schema = settings.get('schema')
         if not isinstance(schema, dict) or settings.get('response_format') != 'json_schema':
             raise ValueError('Planning requires a JSON Schema')
         if not self.parameters.wait_for_services(timeout_sec=timeout):
             raise TimeoutError('Inference parameter services are unavailable')
-        response = self.wait(self.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'experiment and active model')
+        response = self.wait(self.parameters.get_parameters(['experiment_run_id', 'active_model', 'frozen_settings_json']), timeout, 'experiment and active model')
         if response.values[0].string_value != run_id:
             raise RuntimeError('The inference server is not frozen for this experiment')
         alias = response.values[1].string_value
         if not alias:
             raise RuntimeError('The inference server has no active model')
-        names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
-        response = self.wait(self.parameters.get_parameters(names), timeout, 'inference parameters')
-        actual = (response.values[0].integer_value, response.values[1].double_value,
-                  response.values[2].integer_value, response.values[3].double_value)
-        expected = (settings.get('max_new_tokens'), settings.get('temperature'), settings.get('seed', -1), 1.0)
+        snapshot = json.loads(response.values[2].string_value)
+        if snapshot.get('run_id') != run_id or snapshot.get('active_model') != alias:
+            raise RuntimeError('Inference snapshot does not match this experiment')
+        with locked_run(self.get_parameter('memory_root').value, run_id) as directory:
+            saved = yaml.safe_load((directory / 'metadata.yaml').read_text()).get('inference')
+        if snapshot != saved:
+            raise RuntimeError('Inference server or frozen settings changed during this experiment')
+        controls = snapshot.get('stages', {}).get('plan')
+        if not isinstance(controls, dict):
+            raise RuntimeError('Inference snapshot has no frozen Plan settings')
+        actual = tuple(controls.get(field) for field in
+                       ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
+        expected = (settings.get('max_new_tokens'), settings.get('temperature'),
+                    settings.get('seed') if settings.get('seed') is not None else -1,
+                    1.0, settings.get('reasoning_effort'))
         if actual != expected:
             raise ValueError(f'Inference parameters do not match frozen Plan settings: expected {expected}, got {actual}')
         if not self.client.wait_for_server(timeout_sec=timeout):
             raise TimeoutError('Structured inference action is unavailable')
-        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema), run_id=run_id)
+        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema), run_id=run_id, stage='plan')
         handle = self.wait(self.client.send_goal_async(goal), timeout, 'inference acceptance')
         if not handle.accepted:
             raise RuntimeError('Structured inference goal was rejected')

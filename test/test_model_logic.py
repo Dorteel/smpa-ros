@@ -192,3 +192,44 @@ def test_belief_rejects_history_that_differs_from_transcript(model_node_class, t
                               messages_json=json.dumps([{'role': 'user', 'content': 'invented'}]))
     with pytest.raises(ValueError, match='does not match'):
         model_node_class.update_beliefs(node, request)
+
+
+def test_model_uses_its_saved_stage_settings(model_node_class, tmp_path, monkeypatch):
+    """Send Model's frozen controls and stage identity to shared inference.
+
+    Persist a run snapshot that differs from Plan's settings, then invoke the
+    real Model adapter with matching controls. Confirm the outgoing goal selects
+    Model and a changed server snapshot is rejected before another request.
+    """
+    import smpa_ros.model_node as module
+    from action_msgs.msg import GoalStatus
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    memory.begin_cycle()
+    controls = dict(max_new_tokens=41, temperature=0.2, seed=-1, top_p=1.0, reasoning_effort='low')
+    snapshot = dict(run_id=memory.metadata['run_id'], active_model='fixture',
+                    stages={'model': controls, 'plan': dict(controls, max_new_tokens=83)})
+    memory.metadata['inference'] = snapshot
+    memory.write_metadata()
+    outgoing = []
+    def get_parameters(names):
+        """Return the saved ownership and authoritative frozen snapshot."""
+        return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
+            SimpleNamespace(string_value='fixture'), SimpleNamespace(string_value=json.dumps(snapshot))])
+    def send(goal):
+        """Capture one inference goal and return an already completed response."""
+        outgoing.append(goal)
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED, result=SimpleNamespace(text='world')))
+    monkeypatch.setattr(module, 'GenerateText', SimpleNamespace(Goal=SimpleNamespace))
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path) if name == 'memory_root' else 1.0),
+        parameters=SimpleNamespace(wait_for_services=lambda timeout_sec: True, get_parameters=get_parameters),
+        text_client=SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send),
+        wait=lambda future, timeout, operation: future)
+    assert model_node_class.generate(node, 'prompt', run_id=memory.metadata['run_id'],
+        max_new_tokens=41, temperature=0.2, reasoning_effort='low', response_format='text') == 'world'
+    assert outgoing[0].stage == 'model' and outgoing[0].run_id == memory.metadata['run_id']
+    snapshot['stages']['model']['reasoning_effort'] = 'high'
+    with pytest.raises(RuntimeError, match='frozen settings changed'):
+        model_node_class.generate(node, 'prompt', run_id=memory.metadata['run_id'],
+            max_new_tokens=41, temperature=0.2, reasoning_effort='low', response_format='text')
+    assert len(outgoing) == 1

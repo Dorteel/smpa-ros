@@ -150,21 +150,27 @@ class SenseNode(Node):
         from smpa_ros.backends.base import stage_generation, validate_output
         from smpa_ros.plan import refinement_settings
         settings = stage_generation(pipeline, 'sense')
-        if settings.get('reasoning_effort') is not None:
-            raise ValueError('The shared inference server does not expose reasoning_effort')
         timeout = self.get_parameter('timeout').value
         if not self.parameters.wait_for_services(timeout_sec=timeout):
             raise TimeoutError('Inference parameter services are unavailable')
-        response = self.result(self.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'inference ownership')
+        response = self.result(self.parameters.get_parameters(['experiment_run_id', 'active_model', 'frozen_settings_json']), timeout, 'inference ownership')
         if response.values[0].string_value != run_id or not response.values[1].string_value:
             raise RuntimeError('Inference server is not frozen for this experiment')
         alias = response.values[1].string_value
-        names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
-        response = self.result(self.parameters.get_parameters(names), timeout, 'inference settings')
-        actual = (response.values[0].integer_value, response.values[1].double_value,
-                  response.values[2].integer_value, response.values[3].double_value)
+        snapshot = json.loads(response.values[2].string_value)
+        if snapshot.get('run_id') != run_id or snapshot.get('active_model') != alias:
+            raise RuntimeError('Inference snapshot does not match this experiment')
+        saved = yaml.safe_load((directory / 'metadata.yaml').read_text()).get('inference')
+        if snapshot != saved:
+            raise RuntimeError('Inference server or frozen settings changed during this experiment')
+        controls = snapshot.get('stages', {}).get('sense')
+        if not isinstance(controls, dict):
+            raise RuntimeError('Inference snapshot has no frozen Sense settings')
+        actual = tuple(controls.get(field) for field in
+                       ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
         expected = (settings.get('max_output_tokens'), settings.get('temperature'),
-                    settings.get('seed') if settings.get('seed') is not None else -1, 1.0)
+                    settings.get('seed') if settings.get('seed') is not None else -1,
+                    1.0, settings.get('reasoning_effort'))
         if actual != expected:
             raise ValueError(f'Inference parameters do not match frozen Sense settings: expected {expected}, got {actual}')
         schema = {'type': 'object', 'properties': {'entities': {'type': 'array', 'items': {
@@ -175,7 +181,7 @@ class SenseNode(Node):
                   'Do not invent entities. Return JSON.\n' + observation)
         if not self.structured_text.wait_for_server(timeout_sec=timeout):
             raise TimeoutError('Structured inference action is unavailable')
-        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema), run_id=run_id)
+        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema), run_id=run_id, stage='sense')
         handle = self.result(self.structured_text.send_goal_async(goal), timeout, 'entity identification acceptance')
         if not handle.accepted:
             raise RuntimeError('Entity identification goal was rejected')

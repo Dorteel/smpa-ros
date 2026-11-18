@@ -1,5 +1,6 @@
 string prompt
 string run_id
+string stage
 ---
 string text
 ---

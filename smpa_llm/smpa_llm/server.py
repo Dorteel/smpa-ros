@@ -34,6 +34,8 @@ from smpa_llm.inference.backends.base import validate_generation, validate_outpu
 
 LOADING_FIELDS = ('model_id', 'path', 'backend', 'device', 'dtype', 'enable_thinking')
 GENERATION_FIELDS = ('max_new_tokens', 'temperature', 'top_p', 'seed')
+STAGES = ('sense', 'model', 'plan', 'act')
+STAGE_INHERIT = {'max_new_tokens': -1, 'temperature': -1.0, 'top_p': -1.0, 'seed': -2, 'reasoning_effort': ''}
 
 
 def registered_models(configuration, registry):
@@ -140,6 +142,10 @@ class InferenceServer(Node):
             for field, value in defaults.items():
                 self.declare_parameter(f'models.{alias}.{field}', value)
             self.validate_settings(self.settings(alias))
+            for stage in STAGES:
+                for field, default in STAGE_INHERIT.items():
+                    self.declare_parameter(f'models.{alias}.stages.{stage}.{field}', default)
+                self.validate_stage_settings(alias, stage)
         self.add_on_set_parameters_callback(self.validate_parameters)
         self.group = ReentrantCallbackGroup()
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -240,7 +246,9 @@ class InferenceServer(Node):
                 snapshot = dict(run_id=target, server_instance_id=self._instance_id, active_model=self.active_alias,
                     loading=dict(self.loaded_settings),
                     generation={field: values[field] for field in GENERATION_FIELDS},
-                    model_root=self.model_root)
+                    stages={stage: {field: self.stage_settings(self.active_alias, stage)[field]
+                                    for field in (*GENERATION_FIELDS, 'reasoning_effort')}
+                            for stage in STAGES}, model_root=self.model_root)
                 loaded_model = getattr(self.backend, 'model', None)
                 device = getattr(loaded_model, 'device', None)
                 dtype = getattr(loaded_model, 'dtype', None)
@@ -271,6 +279,43 @@ class InferenceServer(Node):
         values.update({field: self.get_parameter(f'models.{alias}.{field}').value
                        for field in (*LOADING_FIELDS, *GENERATION_FIELDS)})
         return values
+
+    def stage_settings(self, alias, stage, overrides=None):
+        """Resolve one stage's model settings against its shared model defaults.
+
+        Read the model's current base generation controls and the selected
+        stage's declared overrides. Sentinel values inherit the corresponding
+        base control, while an empty reasoning effort means no reasoning option.
+        Apply optional proposed overrides before resolving, then return a new
+        mapping without changing ROS parameters or loading another model.
+        """
+        if stage not in STAGES:
+            raise ValueError('Unknown cognitive inference stage')
+        values = self.settings(alias)
+        proposed = overrides or {}
+        for field, sentinel in STAGE_INHERIT.items():
+            value = proposed.get(field, self.get_parameter(f'models.{alias}.stages.{stage}.{field}').value)
+            if field == 'reasoning_effort':
+                values[field] = None if value == sentinel else value
+            elif value != sentinel:
+                values[field] = value
+        return values
+
+    def validate_stage_settings(self, alias, stage, overrides=None):
+        """Validate one stage's proposed overrides without changing the server.
+
+        Check the override types and inheritance sentinels first, then validate
+        the resolved generation controls and optional reasoning effort. Backend
+        capability restrictions are checked when the selected operation runs.
+        """
+        proposed = overrides or {}
+        for field, sentinel in STAGE_INHERIT.items():
+            value = proposed.get(field, self.get_parameter(f'models.{alias}.stages.{stage}.{field}').value)
+            if type(value) is not type(sentinel):
+                raise ValueError(f'{stage}.{field} has an invalid type')
+        values = self.stage_settings(alias, stage, proposed)
+        self.validate_settings(values)
+        validate_generation(dict(reasoning_effort=values['reasoning_effort']))
 
     def validate_settings(self, values):
         """Reject invalid typed controls without loading or changing a backend.
@@ -317,6 +362,7 @@ class InferenceServer(Node):
         """
         with self.lock:
             changed = {}
+            changed_stages = {}
             try:
                 frozen = self.get_parameter('experiment_run_id').value
                 transition = next((p.value for p in parameters if p.name == 'experiment_run_id'), frozen)
@@ -345,13 +391,29 @@ class InferenceServer(Node):
                     elif parameter.name == 'use_sim_time':
                         continue
                     else:
-                        prefix, field = parameter.name.rsplit('.', 1)
-                        alias = prefix.removeprefix('models.')
-                        if prefix != 'models.' + alias or field not in (*LOADING_FIELDS, *GENERATION_FIELDS):
-                            raise ValueError('Unknown inference parameter')
-                        changed.setdefault(alias, self.settings(alias))[field] = parameter.value
+                        matched_stage = False
+                        for alias in self.catalogue:
+                            for stage in STAGES:
+                                prefix = f'models.{alias}.stages.{stage}.'
+                                if parameter.name.startswith(prefix):
+                                    field = parameter.name[len(prefix):]
+                                    if field not in STAGE_INHERIT:
+                                        raise ValueError('Unknown inference parameter')
+                                    changed_stages.setdefault((alias, stage), {})[field] = parameter.value
+                                    matched_stage = True
+                                    break
+                            if matched_stage:
+                                break
+                        if not matched_stage:
+                            prefix, field = parameter.name.rsplit('.', 1)
+                            alias = prefix.removeprefix('models.')
+                            if prefix != 'models.' + alias or field not in (*LOADING_FIELDS, *GENERATION_FIELDS):
+                                raise ValueError('Unknown inference parameter')
+                            changed.setdefault(alias, self.settings(alias))[field] = parameter.value
                 for values in changed.values():
                     self.validate_settings(values)
+                for (alias, stage), overrides in changed_stages.items():
+                    self.validate_stage_settings(alias, stage, overrides)
             except (ValueError, KeyError, TypeError) as error:
                 return SetParametersResult(successful=False, reason=str(error))
         return SetParametersResult(successful=True)
@@ -456,6 +518,8 @@ class InferenceServer(Node):
             if self.busy or (management and owner):
                 return GoalResponse.REJECT
             requested_run = goal.run_id if inference else ''
+            if inference and getattr(goal, 'stage', '') not in ('', *STAGES):
+                return GoalResponse.REJECT
             if inference and requested_run != owner:
                 return GoalResponse.REJECT
             self.busy = True
@@ -507,6 +571,8 @@ class InferenceServer(Node):
         before passing it to the backend's constrained generation path. Structured
         image requests forward that schema to the existing vision backend. Decode images
         with the same converter used by legacy Sense. Never synthesize feedback.
+        Resolve a named cognitive stage against that model's frozen overrides;
+        an empty stage uses the existing standalone generation settings.
         For chat, validate the role-preserving message list and allow an empty
         schema for plain responses. Preserve message roles in supported backends.
         Existing blocking backends reject cancellation; successful completion uses
@@ -519,9 +585,10 @@ class InferenceServer(Node):
             with self.lock:
                 if self.backend is None:
                     raise RuntimeError('No active model; use load_model first')
-                values = self.settings(self.active_alias)
+                request = goal_handle.request
+                stage = getattr(request, 'stage', '')
+                values = self.stage_settings(self.active_alias, stage) if stage else self.settings(self.active_alias)
                 backend_kind = self.loaded_settings['backend']
-            request = goal_handle.request
             if chat:
                 prompt = json.loads(request.messages_json)
                 if (not isinstance(prompt, list) or not prompt or any(
@@ -546,6 +613,11 @@ class InferenceServer(Node):
                 if backend_kind not in ('transformers', 'api'):
                     raise ValueError('Backend cannot enforce the requested schema')
             options = dict(max_new_tokens=values['max_new_tokens'], temperature=values['temperature'])
+            effort = values.get('reasoning_effort')
+            if effort is not None:
+                if backend_kind != 'api':
+                    raise ValueError('Backend does not support reasoning_effort')
+                options['reasoning_effort'] = effort
             if values['seed'] != -1:
                 options['seed'] = values['seed']
             if schema is not None:
@@ -563,6 +635,7 @@ class InferenceServer(Node):
                 output = self.backend.generate_conversation(prompt,
                     max_new_tokens=values['max_new_tokens'], schema=schema,
                     temperature=values['temperature'], top_p=values['top_p'],
+                    **({'reasoning_effort': effort} if effort is not None else {}),
                     **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
             elif values['top_p'] != 1.0:
                 if backend_kind == 'transformers':
@@ -576,6 +649,7 @@ class InferenceServer(Node):
                     output = self.backend.generate_conversation(prompt,
                         max_new_tokens=values['max_new_tokens'], schema=schema,
                         temperature=values['temperature'], top_p=values['top_p'],
+                        **({'reasoning_effort': effort} if effort is not None else {}),
                         **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
                 else:
                     raise ValueError('Backend does not expose top_p')

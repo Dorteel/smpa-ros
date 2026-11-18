@@ -126,20 +126,26 @@ def describe_image(node, image, prompt, *, run_id, directory, pipeline):
 
     timeout = node.get_parameter('timeout').value
     settings = stage_generation(pipeline, 'sense')
-    if settings.get('reasoning_effort') is not None:
-        raise ValueError('The shared inference server does not expose reasoning_effort')
     if not node.parameters.wait_for_services(timeout_sec=timeout):
         raise TimeoutError('Inference parameter services are unavailable')
-    response = node.result(node.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'inference ownership')
+    response = node.result(node.parameters.get_parameters(['experiment_run_id', 'active_model', 'frozen_settings_json']), timeout, 'inference ownership')
     if response.values[0].string_value != run_id or not response.values[1].string_value:
         raise RuntimeError('Inference server is not frozen for this experiment')
     alias = response.values[1].string_value
-    names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
-    response = node.result(node.parameters.get_parameters(names), timeout, 'inference settings')
-    actual = (response.values[0].integer_value, response.values[1].double_value,
-              response.values[2].integer_value, response.values[3].double_value)
+    snapshot = json.loads(response.values[2].string_value)
+    if snapshot.get('run_id') != run_id or snapshot.get('active_model') != alias:
+        raise RuntimeError('Inference snapshot does not match this experiment')
+    saved = yaml.safe_load((directory / 'metadata.yaml').read_text()).get('inference')
+    if snapshot != saved:
+        raise RuntimeError('Inference server or frozen settings changed during this experiment')
+    controls = snapshot.get('stages', {}).get('sense')
+    if not isinstance(controls, dict):
+        raise RuntimeError('Inference snapshot has no frozen Sense settings')
+    actual = tuple(controls.get(field) for field in
+                   ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
     expected = (settings.get('max_output_tokens'), settings.get('temperature'),
-                settings.get('seed') if settings.get('seed') is not None else -1, 1.0)
+                settings.get('seed') if settings.get('seed') is not None else -1,
+                1.0, settings.get('reasoning_effort'))
     if actual != expected:
         raise ValueError(f'Inference parameters do not match frozen Sense settings: expected {expected}, got {actual}')
     pixels = image_to_pil(image)
@@ -172,11 +178,11 @@ def describe_image(node, image, prompt, *, run_id, directory, pipeline):
     format_name = settings.get('response_format')
     if format_name == 'text':
         client = node.image_client
-        goal = DescribeImage.Goal(image=message, prompt=prompt, run_id=run_id)
+        goal = DescribeImage.Goal(image=message, prompt=prompt, run_id=run_id, stage='sense')
     elif format_name == 'json_schema' and isinstance(settings.get('output_schema'), dict):
         client = node.structured_client
         goal = DescribeStructuredImage.Goal(image=message, prompt=prompt,
-                                              json_schema=json.dumps(settings['output_schema']), run_id=run_id)
+                                              json_schema=json.dumps(settings['output_schema']), run_id=run_id, stage='sense')
     else:
         raise ValueError('Unsupported Sense response format')
     if not client.wait_for_server(timeout_sec=timeout):

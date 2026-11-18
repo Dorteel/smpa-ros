@@ -560,3 +560,63 @@ def test_freeze_snapshot_captures_actual_model_runtime(server):
     snapshot = json.loads(server.get_parameter('frozen_settings_json').value)
     assert snapshot['runtime'] == {'device': 'fixture-device', 'dtype': 'fixture-dtype'}
     assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+
+
+def test_stage_specific_settings_are_frozen_and_forwarded(server):
+    """Freeze distinct stage settings and forward only the selected stage's values.
+
+    Use one fake API backend and a single model instance. Configure Model and
+    Plan independently, acquire one run, and reject edits while it owns the
+    server. Check the recorded snapshot and the exact options sent to the
+    backend; unknown stages and other runs must not reserve an operation.
+    """
+    import json
+    from smpa_ros_interfaces.action import GenerateText
+    assert server.set_parameters_atomically([Parameter('models.qwen3_4b.backend', value='api')]).successful
+    server.replace_model('qwen3_4b')
+    calls = []
+    def generate(prompt, **options):
+        """Record the selected generation controls without contacting a model."""
+        calls.append((prompt, options))
+        return 'fixture response'
+    server.backend.generate = generate
+    updates = [Parameter('models.qwen3_4b.stages.model.max_new_tokens', value=41),
+               Parameter('models.qwen3_4b.stages.model.reasoning_effort', value='low'),
+               Parameter('models.qwen3_4b.stages.plan.max_new_tokens', value=83),
+               Parameter('models.qwen3_4b.stages.plan.reasoning_effort', value='high')]
+    assert server.set_parameters_atomically(updates).successful
+    assert server.stage_settings('llama3_8b', 'model')['max_new_tokens'] == 128
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+    snapshot = json.loads(server.get_parameter('frozen_settings_json').value)
+    assert snapshot['stages']['model']['max_new_tokens'] == 41
+    assert snapshot['stages']['model']['reasoning_effort'] == 'low'
+    assert snapshot['stages']['plan']['max_new_tokens'] == 83
+    assert snapshot['stages']['plan']['reasoning_effort'] == 'high'
+    assert not server.set_parameters_atomically([updates[0]]).successful
+    assert server.reserve(SimpleNamespace(run_id='run-a', stage='unknown'), inference=True) == GoalResponse.REJECT
+    assert server.reserve(SimpleNamespace(run_id='wrong', stage='model'), inference=True) == GoalResponse.REJECT
+    for stage in ('model', 'plan'):
+        goal = FakeGoal(prompt='hello', run_id='run-a', stage=stage)
+        assert server.reserve(goal.request, inference=True) == GoalResponse.ACCEPT
+        result = server.infer(goal, action_type=GenerateText, result_field='text')
+        assert goal.outcome == 'succeeded' and result.text == 'fixture response'
+    assert calls[0][1]['max_new_tokens'] == 41 and calls[0][1]['reasoning_effort'] == 'low'
+    assert calls[1][1]['max_new_tokens'] == 83 and calls[1][1]['reasoning_effort'] == 'high'
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+
+
+def test_stage_setting_validation_and_inheritance(server):
+    """Inherit shared defaults and reject invalid stage overrides atomically.
+
+    A stage may override one control without changing another stage. Invalid
+    ranges or reasoning values reject the entire batch, leaving prior settings.
+    """
+    base = Parameter('models.qwen3_4b.max_new_tokens', value=512)
+    model = Parameter('models.qwen3_4b.stages.model.max_new_tokens', value=256)
+    assert server.set_parameters_atomically([base, model]).successful
+    assert server.stage_settings('qwen3_4b', 'model')['max_new_tokens'] == 256
+    assert server.stage_settings('qwen3_4b', 'plan')['max_new_tokens'] == 512
+    assert not server.set_parameters_atomically([
+        Parameter('models.qwen3_4b.stages.plan.temperature', value=3.0),
+        Parameter('models.qwen3_4b.stages.model.reasoning_effort', value='incorrect')]).successful
+    assert server.stage_settings('qwen3_4b', 'plan')['temperature'] == 0.0

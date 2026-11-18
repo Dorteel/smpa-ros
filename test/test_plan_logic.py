@@ -119,3 +119,45 @@ def test_plan_requires_matching_inference_freeze(plan_node_class):
                            wait=lambda future, timeout, operation: future)
     with pytest.raises(RuntimeError, match='not frozen for this experiment'):
         plan_node_class.generate(node, 'prompt', run_id='run-a', response_format='json_schema', schema={})
+
+
+def test_plan_uses_its_saved_stage_settings(plan_node_class, tmp_path, monkeypatch):
+    """Send Plan's frozen controls and stage identity to structured inference.
+
+    Give Plan settings distinct from Model, persist the exact run snapshot, and
+    check the generated goal and schema. A mismatched requested control must
+    fail without sending another action.
+    """
+    import smpa_ros.plan_node as module
+    from action_msgs.msg import GoalStatus
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    memory.begin_cycle()
+    controls = dict(max_new_tokens=83, temperature=0.3, seed=-1, top_p=1.0, reasoning_effort='high')
+    snapshot = dict(run_id=memory.metadata['run_id'], active_model='fixture',
+                    stages={'plan': controls, 'model': dict(controls, max_new_tokens=41)})
+    memory.metadata['inference'] = snapshot
+    memory.write_metadata()
+    outgoing = []
+    def get_parameters(names):
+        """Return the saved ownership and authoritative frozen snapshot."""
+        return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
+            SimpleNamespace(string_value='fixture'), SimpleNamespace(string_value=json.dumps(snapshot))])
+    def send(goal):
+        """Capture the request and return a successful structured fixture."""
+        outgoing.append(goal)
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED, result=SimpleNamespace(json_output='{}')))
+    monkeypatch.setattr(module, 'GenerateStructured', SimpleNamespace(Goal=SimpleNamespace))
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path) if name == 'memory_root' else 1.0),
+        parameters=SimpleNamespace(wait_for_services=lambda timeout_sec: True, get_parameters=get_parameters),
+        client=SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send),
+        wait=lambda future, timeout, operation: future)
+    assert plan_node_class.generate(node, 'prompt', run_id=memory.metadata['run_id'],
+        max_new_tokens=83, temperature=0.3, reasoning_effort='high',
+        response_format='json_schema', schema={'type': 'object'}) == '{}'
+    assert outgoing[0].stage == 'plan' and json.loads(outgoing[0].json_schema) == {'type': 'object'}
+    with pytest.raises(ValueError, match='do not match'):
+        plan_node_class.generate(node, 'prompt', run_id=memory.metadata['run_id'],
+            max_new_tokens=41, temperature=0.3, reasoning_effort='high',
+            response_format='json_schema', schema={'type': 'object'})
+    assert len(outgoing) == 1

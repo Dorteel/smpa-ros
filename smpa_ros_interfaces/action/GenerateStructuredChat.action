@@ -1,6 +1,7 @@
 string messages_json
 string json_schema
 string run_id
+string stage
 ---
 string json_output
 ---
