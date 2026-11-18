@@ -108,3 +108,69 @@ def observe(node, config, directory, executor, timeout, service, speech=None, *,
 
 # Preserve established Python and console entry points during the module move.
 from sense.vision import SenseService, image_to_pil, capture_once, main
+
+
+def describe_image(node, image, prompt, *, run_id, directory, pipeline):
+    """Describe camera pixels with the run-owned shared inference server.
+
+    Check the active experiment and generation controls against the frozen
+    Sense configuration. Preserve the original image for refinement and send
+    a bounded RGB copy with the request-specific schema when configured.
+    Return only successful inference output. Never load a model locally.
+    """
+    from sensor_msgs.msg import Image
+    from action_msgs.msg import GoalStatus
+    from smpa_llm.inference.images import image_to_pil
+    from smpa_ros.plan import refinement_settings
+    from smpa_ros_interfaces.action import DescribeImage, DescribeStructuredImage
+
+    timeout = node.get_parameter('timeout').value
+    settings = stage_generation(pipeline, 'sense')
+    if settings.get('reasoning_effort') is not None:
+        raise ValueError('The shared inference server does not expose reasoning_effort')
+    if not node.parameters.wait_for_services(timeout_sec=timeout):
+        raise TimeoutError('Inference parameter services are unavailable')
+    response = node.result(node.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'inference ownership')
+    if response.values[0].string_value != run_id or not response.values[1].string_value:
+        raise RuntimeError('Inference server is not frozen for this experiment')
+    alias = response.values[1].string_value
+    names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
+    response = node.result(node.parameters.get_parameters(names), timeout, 'inference settings')
+    actual = (response.values[0].integer_value, response.values[1].double_value,
+              response.values[2].integer_value, response.values[3].double_value)
+    expected = (settings.get('max_output_tokens'), settings.get('temperature'),
+                settings.get('seed') if settings.get('seed') is not None else -1, 1.0)
+    if actual != expected:
+        raise ValueError(f'Inference parameters do not match frozen Sense settings: expected {expected}, got {actual}')
+    pixels = image_to_pil(image)
+    if refinement_settings(pipeline)['enabled']:
+        frozen = directory / 'observations/vision/frozen_image.png'
+        if frozen.exists():
+            from PIL import Image as PILImage
+            with PILImage.open(frozen) as stored:
+                pixels = stored.convert('RGB')
+        else:
+            with frozen.open('xb') as output:
+                pixels.save(output, format='PNG')
+    pixels.thumbnail((512, 512))
+    message = Image(height=pixels.height, width=pixels.width, encoding='rgb8',
+                    is_bigendian=0, step=pixels.width * 3, data=list(pixels.tobytes()))
+    format_name = settings.get('response_format')
+    if format_name == 'text':
+        client = node.image_client
+        goal = DescribeImage.Goal(image=message, prompt=prompt, run_id=run_id)
+    elif format_name == 'json_schema' and isinstance(settings.get('output_schema'), dict):
+        client = node.structured_client
+        goal = DescribeStructuredImage.Goal(image=message, prompt=prompt,
+                                              json_schema=json.dumps(settings['output_schema']), run_id=run_id)
+    else:
+        raise ValueError('Unsupported Sense response format')
+    if not client.wait_for_server(timeout_sec=timeout):
+        raise TimeoutError('Vision inference action is unavailable')
+    handle = node.result(client.send_goal_async(goal), timeout, 'vision acceptance')
+    if not handle.accepted:
+        raise RuntimeError('Vision inference goal was rejected')
+    response = node.result(handle.get_result_async(), timeout, 'vision result')
+    if response.status != GoalStatus.STATUS_SUCCEEDED:
+        raise RuntimeError('Vision inference action failed')
+    return response.result.description if format_name == 'text' else response.result.json_output
