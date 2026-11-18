@@ -73,3 +73,40 @@ ROS interfaces and complete mocked multi-process action sequence are tested.
 The new and modified action definitions require a ROS interface rebuild before
 their transport can be exercised; callback tests using stand-ins do not establish
 ROS wire compatibility. No model weights or simulation were used for these checks.
+
+## Remaining ROS integration gate
+
+The approved inference goals include `run_id`; `GenerateStructuredChat` and the
+four cognitive actions must be generated from this branch before testing them
+with ROS clients. Existing workspace installations may still contain the older
+Tier 1 action definitions. Source-level contract and mocked callback checks do
+not establish generated type support, message transport, or package installation.
+The legacy Runner remains required until those checks pass.
+
+When an authorized machine is stable, build the affected packages with one
+worker and source that installation. The following uses the existing isolated
+feature build directory and does not install models:
+
+```bash
+cd /home/dorteel/ros2_ws/smpa-cognitive-nodes
+source /opt/ros/jazzy/setup.bash
+export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+colcon --log-base /tmp/cognitive-stage/log build \
+  --base-paths "$PWD/smpa_ros_interfaces" "$PWD/smpa_llm" "$PWD/smpa_ros" \
+  --build-base /tmp/cognitive-stage/build --install-base /tmp/cognitive-stage/install \
+  --packages-select smpa_ros_interfaces smpa_llm smpa_ros \
+  --executor sequential --parallel-workers 1
+source /tmp/cognitive-stage/install/setup.bash
+PYTHONPATH="$PWD:$PWD/smpa_ros:$PWD/smpa_llm:$PYTHONPATH" \
+  /home/dorteel/ros2_ws/src/smpa-ros/.venv/bin/python -m pytest -q \
+  -c /dev/null -p no:cacheprovider test/test_tier1_interfaces.py
+```
+
+Then exercise actual ROS action clients and servers with mocked inference,
+sensors and robot execution. Verify independent stage calls, the complete
+script-controlled sequence, recorded run identity and inference snapshot,
+lifecycle failure and shutdown, and installed launch files and entry points.
+The current callback tests use action-message stand-ins and are not that transport
+test. Only after successful integration should the Runner implementations, their
+entry points and now-unused dependencies be removed and retested. The conversation
+reply backend remains unchanged.
