@@ -1,0 +1,8 @@
+string run_id
+string capability
+string world_model
+string source_record
+---
+string action_json
+string record_path
+---
