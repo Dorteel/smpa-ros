@@ -100,7 +100,11 @@ installed `smpa` command completed a run against separate mocked stage processes
 and a weight-free inference server. The command was exercised outside the source
 checkout with the installed Python packages on its import path. An operating-system interrupt during a held Sense request was
 also checked: the run remained incomplete, was marked interrupted, and released
-the inference freeze after the stage terminated. An interrupt during a real
+the inference freeze after the stage terminated. A mocked ROS camera publisher
+exercised two installed-command cycles with actual image and description files;
+Model records retained links to both evidence files. The server snapshot now also
+records the loaded model device and dtype when its backend exposes them, preserving
+the existing runtime metadata and frozen-parameters format. An interrupt during a real
 inference backend call remains unverified. The conversation reply backend
 remains unchanged. The legacy Runner and compatibility entry points remain in the
 repository until their remaining regression coverage has been migrated. Some
