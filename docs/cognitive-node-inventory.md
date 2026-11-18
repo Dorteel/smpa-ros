@@ -75,8 +75,8 @@ with one build worker. The generated-action contract tests passed for the four
 cognitive actions, the inference actions including their approved `run_id`
 fields, `DescribeStructuredImage`, and `GenerateStructuredChat`. Each
 cognitive goal also accepts an optional `prompt_name`; an empty name keeps the
-frozen configured prompt, while a supplied name selects the existing prompt resource. They also
-checked the existing management actions, lifecycle services and status messages.
+frozen configured prompt, while a supplied name selects an existing prompt resource.
+The checks also covered management actions, lifecycle services and status messages.
 `ros2 interface show` resolved both `Model` and `GenerateStructuredChat` from
 the isolated overlay. This installation is a temporary verification artifact,
 not an installation into the normal workspace.
@@ -94,8 +94,7 @@ weight-free backend: the server rejected standalone inference and a parameter
 change during the freeze, but accepted a request owned by the active run.
 
 These tests establish communication in the local DDS environment. They do not
-exercise real models, sensors, robot hardware, simulation, GPU operations, or a
-real inference, sensors, robot hardware, simulation, or GPU operations. The two
+exercise real inference, sensors, robot hardware, simulation, or GPU operations. The two
 Python packages were installed into the isolated overlay and the installed `smpa`
 command completed a run against separate mocked stage processes and a weight-free
 inference server. An operating-system interrupt during a held Sense request was
@@ -103,7 +102,7 @@ also checked: the run remained incomplete, was marked interrupted, and released
 the inference freeze after the stage terminated. An interrupt during a real
 inference backend call remains unverified. The conversation reply backend
 remains unchanged. The legacy Runner and compatibility entry points remain in the
-repository; removal is outside this verification task.
+repository until their remaining regression coverage has been migrated.
 
 To reproduce the generated interface build on a stable authorized host:
 
