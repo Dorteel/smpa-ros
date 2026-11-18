@@ -95,14 +95,17 @@ change during the freeze, but accepted a request owned by the active run.
 
 These tests establish communication in the local DDS environment. They do not
 exercise real inference, sensors, robot hardware, simulation, or GPU operations. The two
-Python packages were installed into the isolated overlay and the installed `smpa`
-command completed a run against separate mocked stage processes and a weight-free
-inference server. An operating-system interrupt during a held Sense request was
+Python packages were installed into a clean copied-package overlay, and the
+installed `smpa` command completed a run against separate mocked stage processes
+and a weight-free inference server. The command was exercised outside the source
+checkout with the installed Python packages on its import path. An operating-system interrupt during a held Sense request was
 also checked: the run remained incomplete, was marked interrupted, and released
 the inference freeze after the stage terminated. An interrupt during a real
 inference backend call remains unverified. The conversation reply backend
 remains unchanged. The legacy Runner and compatibility entry points remain in the
-repository until their remaining regression coverage has been migrated.
+repository until their remaining regression coverage has been migrated. Some
+legacy tests require different per-stage generation controls within one run;
+the shared inference server currently freezes one setting set for that run.
 
 To reproduce the generated interface build on a stable authorized host:
 
