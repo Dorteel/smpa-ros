@@ -378,7 +378,7 @@ def test_experiment_freezes_configuration_and_management(server):
     No real model weights are loaded.
     """
     run = Parameter('experiment_run_id', value='run-a')
-    release = Parameter('experiment_run_id', value='')
+    release = Parameter('experiment_run_id', value='release:run-a')
     temperature = Parameter('models.qwen3_4b.temperature', value=0.4)
     assert not server.set_parameters_atomically([run]).successful
     server.replace_model('qwen3_4b')
@@ -426,9 +426,29 @@ def test_run_scoped_inference_requires_matching_owner(server):
     assert server.reserve(run_b, inference=True) == GoalResponse.REJECT
     assert server.reserve(standalone, inference=True) == GoalResponse.REJECT
     assert server.reserve(run_a, inference=True) == GoalResponse.ACCEPT
-    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='')]).successful
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
     server.busy = False
-    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='')]).successful
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
     assert server.reserve(run_a, inference=True) == GoalResponse.REJECT
     assert server.reserve(standalone, inference=True) == GoalResponse.ACCEPT
     server.busy = False
+
+
+def test_experiment_release_checks_owner_atomically(server):
+    """Reject a bare or stale release without disturbing a newer experiment.
+
+    Release the first owner's freeze using its identifier, then acquire for a
+    second run. A delayed release for the first run must not clear the second
+    owner's parameter. No model weights or inference are used.
+    """
+    server.replace_model('qwen3_4b')
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='')]).successful
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-b')]).successful
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+    assert not server.set_parameters([Parameter('experiment_run_id', value='')])[0].successful
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-b'),
+                                                  Parameter('experiment_run_id', value='run-c')]).successful
+    assert server.get_parameter('experiment_run_id').value == 'run-b'
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-b')]).successful

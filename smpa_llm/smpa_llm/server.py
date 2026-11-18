@@ -179,20 +179,37 @@ class InferenceServer(Node):
         if lock is None:
             return super().set_parameters(parameters)
         with lock:
-            return super().set_parameters(parameters)
+            return [self.set_parameters_atomically([parameter]) for parameter in parameters]
 
     def set_parameters_atomically(self, parameters):
         """Keep atomic batches indivisible to inference and model-loading snapshots.
 
         Serialize both validation and ROS value installation under the same lock
-        used by snapshots. Fall back to ordinary initialization behavior before
-        server state exists. A rejected batch installs no partial configuration.
+        used by snapshots. An active experiment can be released only with
+        `release:<run_id>`, checked against its current owner under this lock.
+        Normalize a matching command to the empty parameter value, and reject a
+        bare or stale release. A rejected batch installs no partial configuration.
         """
         lock = getattr(self, 'lock', None)
         if lock is None:
             return super().set_parameters_atomically(parameters)
         with lock:
-            return super().set_parameters_atomically(parameters)
+            from rclpy.parameter import Parameter
+            owner = self.get_parameter('experiment_run_id').value
+            if sum(parameter.name == 'experiment_run_id' for parameter in parameters) > 1:
+                return SetParametersResult(successful=False, reason='Experiment ownership may appear only once in a batch')
+            normalized = []
+            for parameter in parameters:
+                if parameter.name == 'experiment_run_id' and isinstance(parameter.value, str):
+                    value = parameter.value
+                    if value.startswith('release:'):
+                        if not owner or value[8:] != owner:
+                            return SetParametersResult(successful=False, reason='Release does not match the active experiment')
+                        parameter = Parameter('experiment_run_id', value='')
+                    elif not value and owner:
+                        return SetParametersResult(successful=False, reason='Release must name the active experiment')
+                normalized.append(parameter)
+            return super().set_parameters_atomically(normalized)
 
     def settings(self, alias):
         """Return a fresh namespace snapshot for one registered alias.
