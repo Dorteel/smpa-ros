@@ -433,3 +433,30 @@ memory.write_refinement(state)
                 child.wait(timeout=2)
     assert json.loads((memory.directory / 'state/refinement.json').read_text()) == {
         'first': 'first', 'second': 'second'}
+
+
+def test_attach_active_run_shares_provenance_and_rejects_inactive_runs(tmp_path):
+    """Attach independent managers only while an experiment cycle is active.
+
+    An attachment must not create a run or modify its metadata. Two attached
+    managers reserve distinct records using the same durable sequence. Once the
+    run is completed, another attachment must be rejected without changing files.
+    """
+    owner = MemoryManager(tmp_path, goal='Observe the scene')
+    identity = owner.metadata['run_id']
+    with pytest.raises(RuntimeError, match='active cycle'):
+        MemoryManager.attach_active_run(tmp_path, identity)
+    owner.begin_cycle()
+    before = (owner.directory / 'metadata.yaml').read_bytes()
+    first = MemoryManager.attach_active_run(tmp_path, identity)
+    second = MemoryManager.attach_active_run(tmp_path, identity)
+    assert (owner.directory / 'metadata.yaml').read_bytes() == before
+    first_name, first_record = first.invocation('sense', 'default')
+    second_name, second_record = second.invocation('model', 'default', str(first.record_path(first_name)))
+    assert (first_name, second_name) == ('sense.json', 'model.json')
+    assert (first_record['sequence'], second_record['sequence']) == (1, 2)
+    assert second_record['source_record'] == 'state/cycle_000001/sense.json'
+    assert second_record['previous_record'] == 'state/cycle_000001/sense.json'
+    owner.finalize('completed')
+    with pytest.raises(RuntimeError, match='not running'):
+        MemoryManager.attach_active_run(tmp_path, identity)

@@ -140,6 +140,39 @@ class MemoryManager:
             raise ValueError(f'Invalid assigned world-model run: {path}') from error
         return path, identity
 
+    @classmethod
+    def attach_active_run(cls, root, run_id):
+        """Attach a process to one existing run's active cycle without resuming it.
+
+        Resolve the canonical run identity below the configured memory root and
+        read its latest metadata while holding the run lock. The run must still be
+        running and its next cycle directory must already exist: only the
+        experiment creates cycles or decides their order. Build a fresh manager
+        with an independent metadata snapshot and current cycle. Its invocation
+        method uses the shared reservation state to preserve names and sequence
+        across processes. No metadata, stage record, or lifecycle state is changed.
+        """
+        with locked_run(root, run_id) as directory:
+            metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+            if metadata.get('status') != 'running':
+                raise RuntimeError('Cannot attach to a run that is not running')
+            completed = metadata.get('completed_cycles', 0)
+            if type(completed) is not int or completed < 0:
+                raise ValueError('Run completed_cycles must be a nonnegative integer')
+            cycle = completed + 1
+            if not (directory / 'state' / f'cycle_{cycle:06d}').is_dir():
+                raise RuntimeError('Cannot attach without an active cycle')
+            instance = cls.__new__(cls)
+            instance.directory = directory
+            instance.metadata = metadata
+            instance._metadata_snapshot = deepcopy(metadata)
+            instance.cycle = cycle
+            instance.in_cycle = True
+            instance.counts = {}
+            instance.sequence = 0
+            instance.previous_record = None
+            return instance
+
     def write_metadata(self):
         """Publish this manager's metadata changes without losing another writer's.
 
