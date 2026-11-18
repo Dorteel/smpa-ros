@@ -133,8 +133,9 @@ def open_conversation(root, *, resume=None, configuration=None, models=None):
 def exchange(memory, message, generate, settings, *, agent=None, modelling=None):
     """Sense persists first; Model updates beliefs; Act persists the reply.
 
-    Inference failure leaves the user's message intact and records a failed Act.
-    A later exchange can continue using that same persisted history.
+    The optional modelling callback delegates belief updates to Model after each
+    saved message. Inference failure leaves the user's message intact and records
+    a failed Act. A later exchange can use the same persisted history.
     """
     if not isinstance(message, str) or not message.strip():
         raise ValueError('Message must be nonempty text')
@@ -146,8 +147,7 @@ def exchange(memory, message, generate, settings, *, agent=None, modelling=None)
         with (memory.directory / memory.record_path(name)).open('x') as output:
             json.dump(dict(provenance, stage='sense', status='generated', output=message), output)
         if modelling is not None:
-            from smpa_ros.belief import model_messages
-            model_messages(memory, modelling, read_messages(memory.directory))
+            modelling(memory, read_messages(memory.directory))
         name, provenance = memory.invocation('act', 'conversation', str(memory.record_path(name)))
         record = dict(provenance, stage='act', status='failed', generation=deepcopy(settings))
         if agent is not None:
@@ -207,7 +207,7 @@ def exchange(memory, message, generate, settings, *, agent=None, modelling=None)
             with (memory.directory / memory.record_path(name)).open('x') as output:
                 json.dump(record, output, ensure_ascii=False, indent=2)
         if modelling is not None:
-            model_messages(memory, modelling, read_messages(memory.directory))
+            modelling(memory, read_messages(memory.directory))
         memory.complete_cycle()
         return response
     finally:

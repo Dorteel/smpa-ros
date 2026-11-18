@@ -8,8 +8,10 @@ import pytest
 import yaml
 
 from memory import MemoryManager
-from runner import Runner
-from smpa_ros.smpa import GOAL, run as experiment
+from smpa_ros.smpa import GOAL, run_actions, execute_experiment
+from types import SimpleNamespace
+from copy import deepcopy
+from smpa_ros_interfaces.action import Sense, Model, Plan, Act
 
 
 
@@ -21,13 +23,183 @@ def completed_action(action, record):
     record.update(goal_accepted=True, result_status=4, success=True)
 
 
+def stage_invoker(memory, *, sense=None, model=None, plan=None, act=None):
+    """Deliver requested goals to the four real callbacks with external work mocked.
+
+    Each namespace supplies only the selected node's dependencies. Sensor and
+    backend callables belong to this run, so concurrent runs remain isolated.
+    Preserve original callback errors for the Python regression assertions;
+    separate ROS transport tests check the public aborted-action response.
+    This adapter executes one requested stage and never chooses stage order.
+    """
+    import sys
+    from functools import partial
+    from smpa_ros import sense_node, model_node, plan_node, act_node
+    from smpa_ros.backends.base import stage_generation, generation_arguments
+    from smpa_llm.inference.images import image_to_pil
+    root = str(memory.directory.parent.parent)
+    errors = []
+    def log_error(message):
+        """Retain the callback's current exception for regression diagnostics."""
+        if sys.exception() is not None:
+            errors.append(sys.exception())
+    def parameter(name):
+        """Return the assigned memory root and bounded mock-operation timeout."""
+        return SimpleNamespace(value=1.0 if name == 'timeout' else root)
+    def generate(backend, prompt, *, run_id=None, **settings):
+        """Call the supplied backend without carrying ROS run identity into it."""
+        if backend is None:
+            raise ValueError('Model stage requires a configured local LLM backend')
+        return getattr(backend, 'generate', backend)(prompt, **settings)
+    def dispatch(action, record, **context):
+        """Call the supplied robot mock or the real focused-observation method."""
+        if act is None and action == 'observe':
+            return act_node.ActNode.focus(nodes['act'], record, **context)
+        return (act or completed_action)(action, record)
+    def parameters(names):
+        """Return the authoritative fixture snapshot with its actual run owner."""
+        snapshot = memory.metadata['inference']
+        values = {'experiment_run_id': memory.metadata['run_id'], 'active_model': 'fixture',
+                  'frozen_settings_json': json.dumps(snapshot)}
+        return SimpleNamespace(values=[SimpleNamespace(string_value=values[name]) for name in names])
+    def structured(goal):
+        """Mock structured inference while retaining the existing Sense request."""
+        pipeline = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
+        settings = stage_generation(pipeline, 'sense')
+        options = generation_arguments(dict(settings, response_format='json_schema', output_schema=json.loads(goal.json_schema)))
+        text = generate(model, goal.prompt, **options)
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(
+            status=4, result=SimpleNamespace(json_output=text)))
+    def describe(image, prompt, **context):
+        """Send saved pixels to the supplied fake vision backend and its settings."""
+        settings = stage_generation(context['pipeline'], 'sense')
+        return model.describe(image_to_pil(image), prompt, **generation_arguments(settings))
+    nodes = {name: SimpleNamespace(get_parameter=parameter, get_logger=lambda: SimpleNamespace(error=log_error))
+             for name in ('sense', 'model', 'plan', 'act')}
+    nodes['sense'].test_observe = sense
+    nodes['sense'].describe = describe
+    nodes['sense'].wait = lambda future, timeout: None
+    nodes['sense'].result = lambda future, timeout, operation: future
+    nodes['sense'].parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True, get_parameters=parameters)
+    nodes['sense'].structured_text = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=structured)
+    nodes['sense'].identify_questions = partial(sense_node.SenseNode.identify_questions, nodes['sense'])
+    nodes['model'].get_parameter = lambda name: SimpleNamespace(value='model') if name == 'default_capability' else parameter(name)
+    nodes['model'].generate = partial(generate, model)
+    nodes['plan'].generate = partial(generate, plan)
+    nodes['act'].dispatch = dispatch
+    nodes['act'].describe = describe
+    nodes['act'].parameters = nodes['sense'].parameters
+    nodes['act'].result = nodes['sense'].result
+    def image_request(goal):
+        """Return mocked image inference for the exact schema in the ROS goal."""
+        pipeline = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
+        settings = stage_generation(pipeline, 'sense')
+        if hasattr(goal, 'json_schema'):
+            settings = dict(settings, response_format='json_schema', output_schema=json.loads(goal.json_schema))
+        text = model.describe(image_to_pil(goal.image), goal.prompt, **generation_arguments(settings))
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(status=4,
+            result=SimpleNamespace(json_output=text, description=text)))
+    nodes['act'].image_client = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=image_request)
+    nodes['act'].structured_client = nodes['act'].image_client
+    callbacks = {'sense': sense_node.SenseNode.execute, 'model': model_node.ModelNode.execute,
+                 'plan': plan_node.PlanNode.execute, 'act': act_node.ActNode.execute}
+    def invoke(stage, action_type, goal):
+        """Invoke exactly the requested callback and return only successful output."""
+        errors.clear()
+        succeeded, aborted = MagicMock(), MagicMock()
+        result = callbacks[stage](nodes[stage], SimpleNamespace(request=goal, succeed=succeeded, abort=aborted))
+        if errors:
+            raise errors[-1]
+        succeeded.assert_called_once()
+        aborted.assert_not_called()
+        return result
+    return invoke, nodes
+
+
+def mock_inference(memory, setup=None, runtime=None):
+    """Provide a weight-free freeze service for storage and lifecycle regressions.
+
+    Build the fixture snapshot from this run's settings and retain its identity.
+    Parameter and action transport have dedicated real ROS tests; these service
+    responses let the experiment's actual cleanup and persistence code run here.
+    An optional setup callable can fail acquisition to exercise startup cleanup.
+    Optional runtime values represent device and dtype reported by that server,
+    allowing the actual acquisition path to preserve their provenance.
+    """
+    from smpa_ros.backends.base import stage_generation
+    pipeline = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
+    stages = {stage: stage_generation(pipeline, stage) for stage in ('sense', 'model', 'plan')}
+    identities = {entry.get('model_id') for entry in memory.metadata.get('models', {}).values() if isinstance(entry, dict)}
+    snapshot = dict(run_id=memory.metadata['run_id'], server_instance_id='storage-fixture', active_model='fixture',
+        loading={'model_id': next(iter(identities), 'fixture')}, generation={}, stages={stage: dict(
+            max_new_tokens=value['max_output_tokens'], temperature=value['temperature'],
+            seed=-1 if value['seed'] is None else value['seed'], reasoning_effort=value['reasoning_effort'], top_p=1.0)
+            for stage, value in stages.items()})
+    if runtime is not None:
+        snapshot['runtime'] = dict(runtime)
+    def ready(timeout_sec):
+        """Run the injected startup check before permitting freeze acquisition."""
+        if setup is not None:
+            setup(memory.directory, memory.metadata['run_id'])
+        return True
+    def parameters(names):
+        """Return the selected model or the complete frozen fixture settings."""
+        return SimpleNamespace(values=[SimpleNamespace(string_value='fixture' if name == 'active_model' else json.dumps(snapshot)) for name in names])
+    return SimpleNamespace(wait_for_services=ready, get_parameters=parameters,
+        set_parameters_atomically=lambda values: SimpleNamespace(result=SimpleNamespace(successful=True, reason='')))
+
+
 def run(max_cycles=1, **kwargs):
-    kwargs.setdefault('plan', planned_action)
-    kwargs.setdefault('act', completed_action)
-    goal = kwargs.pop('goal', GOAL)
-    with Runner(max_cycles=max_cycles, **kwargs) as runner:
-        experiment(runner, runner.limit, goal=goal)
-        return runner.memory.directory
+    """Run the real explicit experiment sequence against mocked stage clients.
+
+    Validate the supplied pipeline before creating storage, then construct one
+    run and invoke the independent node callbacks through the experiment's
+    existing action-client boundary. Its normal lifecycle handles startup,
+    failure, interruption and cleanup; this helper never selects stage order.
+    """
+    from smpa_ros.backends.base import stage_generation
+    from smpa_ros.plan import enabled_actions, refinement_settings
+    from smpa_ros.model import validate_settings as validate_model
+    from smpa_ros.plan import validate_settings as validate_plan
+    if type(max_cycles) is not int or max_cycles < 1:
+        raise ValueError('max_cycles must be a positive integer')
+    configuration = deepcopy(kwargs.pop('configuration', {}))
+    pipeline = configuration.get('pipeline', {})
+    enabled_actions(pipeline)
+    refinement_settings(pipeline)
+    validate_model(pipeline.get('modeling', {}))
+    validate_plan(pipeline.get('planning', {}))
+    for stage in ('sense', 'model', 'plan', 'act'):
+        stage_generation(pipeline, stage)
+    models = deepcopy(kwargs.pop('models', {}) or {})
+    for stage, key in (('model', 'model_identifier'), ('plan', 'plan_identifier')):
+        if kwargs.get(key):
+            models[stage] = {'model_id': kwargs.pop(key)}
+    memory = MemoryManager(kwargs.pop('root', Path.cwd() / 'memory'), kwargs.pop('run_name', 'smpa'),
+        models=models, configuration=configuration, goal=kwargs.pop('goal', GOAL))
+    memory.metadata['max_cycles'] = max_cycles
+    memory.write_metadata()
+    prompt_names = kwargs.pop('prompt_names', {})
+    before_stage = kwargs.pop('before_stage', None)
+    invoke, nodes = stage_invoker(memory, sense=kwargs.pop('sense', None), model=kwargs.pop('model', None),
+                              plan=kwargs.pop('plan', planned_action), act=kwargs.pop('act', completed_action))
+    def client(stage, action_type):
+        """Adapt a synchronous mocked callback to the existing action-client API."""
+        def send(goal):
+            """Execute the requested stage and expose its successful terminal result."""
+            if before_stage is not None:
+                before_stage(stage, memory, nodes)
+            goal.prompt_name = prompt_names.get(stage, '')
+            result = invoke(stage, action_type, goal)
+            return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(status=4, result=result))
+        return SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send)
+    clients = {stage: client(stage, kind) for stage, kind in zip(('sense', 'model', 'plan', 'act'), (Sense, Model, Plan, Act))}
+    setup, teardown = kwargs.pop('setup', None), kwargs.pop('teardown', None)
+    runtime = kwargs.pop('runtime', None)
+    assert not kwargs, kwargs
+    execute_experiment(memory, max_cycles, clients, mock_inference(memory, setup, runtime), lambda future, *args: future,
+                       1.0, cleanup=teardown)
+    return memory.directory
 
 
 def model_snapshot(prompt, **settings):
@@ -167,11 +339,17 @@ def test_missing_or_mismatched_assignment(tmp_path):
 
 
 @pytest.mark.parametrize('entrypoint', ['llm', 'speech'])
-def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
+def test_launch_starts_stages_and_forwards_experiment(tmp_path, monkeypatch, entrypoint):
+    """Launch declares independent stages while only the experiment creates a run.
+
+    Replace process execution with the existing mocked action-client harness.
+    Keep the assertions that launch itself creates no storage, forwards cycle
+    and modality arguments, and produces one complete three-cycle experiment.
+    """
     from launch import LaunchDescription, LaunchService
-    from launch.actions import ExecuteProcess, OpaqueFunction
+    from launch.actions import EmitEvent, OpaqueFunction
+    from launch.events import Shutdown
     import launch_ros.actions
-    import sys
     from ament_index_python.packages import get_package_share_directory
     source = Path(get_package_share_directory('smpa_ros')) / f'launch/{entrypoint}.launch.py'
     spec = importlib.util.spec_from_file_location('test_entrypoint', source)
@@ -179,32 +357,37 @@ def test_launch_only_starts_loop(tmp_path, monkeypatch, entrypoint):
     spec.loader.exec_module(module)
     assignments = []
     def fake_node(**kwargs):
-        assert not (tmp_path / 'runs').exists()  # Launcher cannot initialize storage.
+        """Record participant declarations and execute only the experiment request."""
+        assert not (tmp_path / 'runs').exists()
         assignments.append(kwargs)
-        options = kwargs['arguments']
-        root = options[options.index('--world-model-root') + 1]
-        script = ('from runner import Runner; from smpa_ros.smpa import run\n'
-                  f'with Runner(max_cycles=3, root={root!r}, sense=lambda directory, cycle: "observed", model=lambda prompt, **kw: "# World Model", '
-                  f'plan=lambda prompt, **kw: ' + repr('{"action":"look_left"}') + ', '
-                  'act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True)) as runner:\n'
-                  '    run(runner, 3)')
-        return ExecuteProcess(cmd=[sys.executable, '-c', script], on_exit=kwargs['on_exit'])
+        def execute(context):
+            """Use mocked stage clients when launch reaches its experiment action."""
+            if kwargs['executable'] == 'smpa':
+                options = kwargs['arguments']
+                root = options[options.index('--world-model-root') + 1]
+                run(3, root=root, sense=lambda directory, cycle: 'observed', model=model_snapshot)
+                return [EmitEvent(event=Shutdown(reason='Experiment completed'))]
+            return []
+        return OpaqueFunction(function=execute)
     monkeypatch.setattr(launch_ros.actions, 'Node', fake_node)
     if entrypoint == 'llm':
         monkeypatch.setattr(module, 'Node', fake_node)
     def start(context):
+        """Supply the original launcher arguments before expanding its description."""
         context.launch_configurations.update(world_model_root=str(tmp_path), max_cycles='3')
         return list(module.generate_launch_description().entities)
     launch = LaunchService()
     launch.include_launch_description(LaunchDescription([OpaqueFunction(function=start)]))
     launch.run()
-    assert [item['executable'] for item in assignments] == ['smpa']
-    args = assignments[0]['arguments']
+    assert [item['executable'] for item in assignments] == ['sense_stage', 'model_stage', 'plan_stage', 'act_stage', 'smpa']
+    args = assignments[-1]['arguments']
     assert args[args.index('--max-cycles') + 1] == '3'
     assert args[args.index('--service') + 1] == ('speech' if entrypoint == 'speech' else 'vision')
+    assert all(item['parameters'][0]['memory_root'] == str(tmp_path) for item in assignments[:-1])
     directory, = (tmp_path / 'runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['status'] == 'completed' and metadata['completed_cycles'] == 3
+
 
 
 def test_participant_restarts_share_run(assigned_test_run):
@@ -519,7 +702,7 @@ def test_independent_stage_reasoning_effort(tmp_path):
 
 
 @pytest.mark.parametrize('failure', [None, 'setup', 'sense', 'teardown'])
-def test_runner_cleanup_finalizes_run(tmp_path, failure):
+def test_experiment_cleanup_finalizes_run(tmp_path, failure):
     calls = []
 
     def setup(directory, identity):
@@ -552,31 +735,48 @@ def test_runner_cleanup_finalizes_run(tmp_path, failure):
 
 
 def test_experiment_repeats_skips_and_independent_runs(tmp_path):
+    """Choose repetitions and skipped stages explicitly while preserving provenance.
+
+    Create two independent runs and send the same irregular stage sequence to
+    the actual node callbacks. Memory owns cycle boundaries; every source path
+    is passed explicitly instead of inferred by a controller object.
+    """
     calls = []
     def model(prompt, **settings):
+        """Return distinct world models so their source paths can be checked."""
         calls.append(prompt)
         return f'world {len(calls)}'
     cleanup = MagicMock()
-    with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed',
-                model=model, plan=planned_action, act=completed_action,
-                teardown=cleanup) as runner:
-        directories = []
-        for _ in range(2):
-            directories.append(runner.start(goal=GOAL))
-            with runner.cycle():
-                observation = runner.sense(prompt='describe_scene')
-                first = runner.model(observation)
-                second = runner.model(observation)
-                action = runner.plan(first)
-                runner.act(action)
-                runner.act(runner.plan(second))
-                runner.sense(prompt='default')
-            with runner.cycle():
-                # Skip Sense/Model and reuse a previous world model.
-                runner.act(runner.plan(second))
-            with runner.cycle():
-                runner.model('explicit observation')
-            runner.finish()
+    directories = []
+    for _ in range(2):
+        memory = MemoryManager(tmp_path, goal=GOAL)
+        invoke, _ = stage_invoker(memory, sense=lambda directory, cycle: 'observed',
+                                  model=model, plan=planned_action, act=completed_action)
+        identity = memory.metadata['run_id']
+        directories.append(memory.directory)
+        memory.begin_cycle()
+        observation = invoke('sense', Sense, Sense.Goal(run_id=identity, prompt_name='describe_scene'))
+        first = invoke('model', Model, Model.Goal(run_id=identity, observation=observation.observation,
+                       source_record=observation.record_path))
+        second = invoke('model', Model, Model.Goal(run_id=identity, observation=observation.observation,
+                        source_record=observation.record_path, previous_snapshot=first.snapshot_path))
+        for world in (first, second):
+            action = invoke('plan', Plan, Plan.Goal(run_id=identity, world_model=world.world_model, source_record=world.record_path))
+            invoke('act', Act, Act.Goal(run_id=identity, action_json=action.action_json, source_record=action.record_path))
+        invoke('sense', Sense, Sense.Goal(run_id=identity, prompt_name='default'))
+        memory.complete_cycle()
+        memory.in_cycle = False
+        memory.begin_cycle()
+        action = invoke('plan', Plan, Plan.Goal(run_id=identity, world_model=second.world_model, source_record=second.record_path))
+        invoke('act', Act, Act.Goal(run_id=identity, action_json=action.action_json, source_record=action.record_path))
+        memory.complete_cycle()
+        memory.in_cycle = False
+        memory.begin_cycle()
+        invoke('model', Model, Model.Goal(run_id=identity, observation='explicit observation', previous_snapshot=second.snapshot_path))
+        memory.complete_cycle()
+        memory.in_cycle = False
+        cleanup()
+        memory.finalize('completed')
     assert len(set(directories)) == 2 and cleanup.call_count == 2
     for directory in directories:
         records = [json.loads(path.read_text()) for path in directory.glob('state/*/*.json')]
@@ -600,53 +800,56 @@ def test_experiment_repeats_skips_and_independent_runs(tmp_path):
         assert (directory / 'goal.md').read_text() == GOAL
 
 
+
 @pytest.mark.parametrize('stage', ['sense', 'model', 'plan', 'act'])
 def test_explicit_prompt_selection(tmp_path, monkeypatch, stage):
+    """Select a named prompt through a stage action and retain it in its record."""
     import importlib
     module = importlib.import_module('smpa_ros.' + stage)
     resources = tmp_path / 'resources'
     (resources / 'prompts' / stage).mkdir(parents=True)
     (resources / 'prompts' / stage / 'experiment.txt').write_text('Selected experiment: {input}')
     monkeypatch.setattr(module, 'files', lambda package: resources)
-    with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed',
-                model=model_snapshot, plan=planned_action, act=completed_action) as runner:
-        runner.start(goal=GOAL)
-        with runner.cycle():
-            if stage == 'sense':
-                runner.sense(prompt='experiment')
-            else:
-                getattr(runner, stage)('look_left' if stage == 'act' else 'input', prompt='experiment')
-    record = json.loads((runner.memory.directory / f'state/cycle_000001/{stage}.json').read_text())
+    directory = run(root=tmp_path, sense=lambda directory, cycle: 'observed',
+                    model=model_snapshot, prompt_names={stage: 'experiment'})
+    record = json.loads((directory / f'state/cycle_000001/{stage}.json').read_text())
     assert record['prompt'].startswith('Selected experiment:')
     assert record['prompt_name'] == 'experiment'
 
 
+
 @pytest.mark.parametrize('stage', ['sense', 'model', 'plan', 'act'])
 def test_missing_prompt_cleans_up(tmp_path, stage):
+    """A missing stage prompt fails the real experiment and still runs cleanup."""
     cleanup = MagicMock()
     with pytest.raises(FileNotFoundError, match='missing_prompt.txt'):
-        with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed',
-                    model=model_snapshot, plan=planned_action, act=completed_action,
-                    teardown=cleanup) as runner:
-            runner.start(goal=GOAL)
-            with runner.cycle():
-                args = () if stage == 'sense' else ('look_left' if stage == 'act' else 'input',)
-                getattr(runner, stage)(*args, prompt='missing_prompt')
+        run(root=tmp_path, sense=lambda directory, cycle: 'observed', model=model_snapshot,
+            prompt_names={stage: 'missing_prompt'}, teardown=cleanup)
     cleanup.assert_called_once()
-    assert runner.memory.metadata['status'] == 'failed'
-    assert runner.memory.metadata['completed_cycles'] == 0
+    directory, = (tmp_path / 'runs').iterdir()
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert metadata['status'] == 'failed'
+    assert metadata['completed_cycles'] == 0
+
 
 
 def test_error_between_stages_cleans_up(tmp_path):
+    """An interruption after Sense finalizes the run without starting Model."""
     cleanup = MagicMock()
+    def before_stage(stage, memory, nodes):
+        """Interrupt after the persisted Sense result and before Model starts."""
+        if stage == 'model':
+            raise KeyboardInterrupt
     with pytest.raises(KeyboardInterrupt):
-        with Runner(root=tmp_path, sense=lambda directory, cycle: 'observed', teardown=cleanup) as runner:
-            runner.start(goal=GOAL)
-            with runner.cycle():
-                runner.sense()
-                raise KeyboardInterrupt
+        run(root=tmp_path, sense=lambda directory, cycle: 'observed', model=model_snapshot,
+            before_stage=before_stage, teardown=cleanup)
     cleanup.assert_called_once()
-    assert runner.memory.metadata['status'] == 'interrupted'
+    directory, = (tmp_path / 'runs').iterdir()
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert metadata['status'] == 'interrupted'
+    assert (directory / 'state/cycle_000001/sense.json').exists()
+    assert not (directory / 'state/cycle_000001/model.json').exists()
+
 
 
 def test_independent_canonical_generation_snapshot_and_prompts(tmp_path):
@@ -703,29 +906,31 @@ def test_plan_canonical_schema_cannot_bypass_ros_contract(tmp_path, unsafe):
     assert not attempted
 
 
-def test_unregistered_local_paths_survive_runner_snapshot(tmp_path,monkeypatch):
+def test_unregistered_local_paths_survive_experiment_snapshot(tmp_path, monkeypatch):
+    """Freeze an explicit local model path without loading or reconstructing it."""
     from test_cognition import local_model_directory
     from smpa_ros.model import resolve_vision_model
-    text=local_model_directory(tmp_path/'models/llm/new_text')
-    vision=local_model_directory(tmp_path/'models/vlm/new_vision',vision=True)
-    config={'vision':{'backend':'transformers','path':str(vision),'model_id':'custom/vision'},
-            'modeling':{'backend':'transformers','path':str(text),'model_id':'custom/text'}}
-    source=tmp_path/'config.yaml'
+    from smpa_ros.smpa import prepare_experiment
+    text = local_model_directory(tmp_path / 'models/llm/new_text')
+    vision = local_model_directory(tmp_path / 'models/vlm/new_vision', vision=True)
+    config = {'vision': {'backend': 'transformers', 'path': str(vision), 'model_id': 'custom/vision'},
+              'modeling': {'backend': 'transformers', 'path': str(text), 'model_id': 'custom/text'}}
+    source = tmp_path / 'config.yaml'
     source.write_text(yaml.safe_dump(config))
-    constructor=MagicMock()
-    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend',constructor)
-    with Runner(['smpa','--config',str(source),'--world-model-root',str(tmp_path/'memory')]) as runner:
-        runner._setup=runner._teardown=None
-        directory=runner.start(goal=GOAL)
-        saved=yaml.safe_load((directory/'parameters.yaml').read_text())
-        assert saved['model']['path']==str(vision)
-        assert 'modeling' not in saved and 'planning' not in saved
-        assert saved['_run']['stage_models']['sense']['path']==str(vision)
-        assert saved['_run']['stage_models']['model']['path']==str(vision)
-        assert saved['_run']['stage_models']['sense']['model_id']=='custom/vision'
-        source.write_text('vision: {path: /missing}\n')
-        assert resolve_vision_model(saved,tmp_path/'no_registry',tmp_path/'models')['path']==str(vision)
-        constructor.assert_not_called()
+    constructor = MagicMock()
+    monkeypatch.setattr('smpa_ros.backends.transformers.TransformersBackend', constructor)
+    _, memory = prepare_experiment(['smpa', '--config', str(source), '--world-model-root', str(tmp_path / 'memory')], GOAL)
+    directory = memory.directory
+    saved = yaml.safe_load((directory / 'parameters.yaml').read_text())
+    assert saved['model']['path'] == str(vision)
+    assert 'modeling' not in saved and 'planning' not in saved
+    assert saved['_run']['stage_models']['sense']['path'] == str(vision)
+    assert saved['_run']['stage_models']['model']['path'] == str(vision)
+    assert saved['_run']['stage_models']['sense']['model_id'] == 'custom/vision'
+    source.write_text('vision: {path: /missing}\n')
+    assert resolve_vision_model(saved, tmp_path / 'no_registry', tmp_path / 'models')['path'] == str(vision)
+    constructor.assert_not_called()
+
 
 
 def test_action_whitelist_filters_schema_and_rejects_execution(tmp_path):
@@ -739,25 +944,32 @@ def test_action_whitelist_filters_schema_and_rejects_execution(tmp_path):
         run(root=tmp_path, sense=lambda *args: 'scene', model=model_snapshot,
             plan=planned_action, act=executor, configuration={'pipeline': pipeline})
     executor.assert_not_called()
-    with Runner(root=tmp_path / 'direct', sense=lambda *args: 'scene', act=executor,
-                configuration={'pipeline': pipeline}) as runner:
-        runner.start(goal=GOAL)
-        with runner.cycle():
-            with pytest.raises(ValueError, match='enabled whitelist'):
-                runner.act('look_left')
+    memory = MemoryManager(tmp_path / 'direct', goal=GOAL, configuration={'pipeline': pipeline})
+    memory.begin_cycle()
+    invoke, _ = stage_invoker(memory, act=executor)
+    with pytest.raises(ValueError, match='enabled whitelist'):
+        invoke('act', Act, Act.Goal(run_id=memory.metadata['run_id'], action_json='{"action":"look_left"}'))
     executor.assert_not_called()
 
 
 @pytest.mark.parametrize('limit, expected_status, expected_cycles', [(10, 'completed', 4), (2, 'cycle_limit', 2), (1, 'cycle_limit', 1)])
 def test_finite_question_refinement_and_consolidation(tmp_path, monkeypatch, limit, expected_status, expected_cycles):
-    from types import SimpleNamespace
+    """Consolidate finite focused observations through independent stage callbacks.
+
+    The supplied shared backend is the only inference fixture. Sense identifies
+    the queue, Act consumes each question on the saved image, and later Model
+    requests consolidate every answer. Retain cycle-limit, duplicate-protection,
+    pixel, schema, persistence and final no-op assertions from the old path.
+    """
+    import hashlib
     from PIL import Image
-    from smpa_ros.sense import SenseService
     from smpa_ros.plan import refinement_settings
+    from smpa_ros.act_node import ActNode
     pipeline = {'enabled_actions': ['observe'], 'scene_refinement': {
         'enabled': True, 'properties': ['color', 'material', 'texture']}}
     backend = MagicMock()
     def generate(prompt, **options):
+        """Return fixture entities, the next requested question, or a world model."""
         properties = options.get('schema', {}).get('properties', {})
         if 'entities' in properties:
             return '{"entities":[{"id":"cup_1","description":"cup on table"}]}'
@@ -766,51 +978,57 @@ def test_finite_question_refinement_and_consolidation(tmp_path, monkeypatch, lim
                                    question=properties['question']['enum'][0]))
         return '# World Model\n' + prompt
     backend.generate.side_effect = generate
-    backend.describe.side_effect = [json.dumps(dict(status=status, answer=answer)) for status,answer in
-        [('answered','red'), ('visually_indeterminable','Cannot infer material'), ('unanswered','No conclusion')]]
-    view = SimpleNamespace(backend=backend, image=Image.new('RGB',(2,2),'red'),
-        image_sha256='frozen-hash', pipeline=pipeline, refinement=refinement_settings(pipeline), default_prompt='Describe the scene.')
-    view.focus = lambda target,question,**options: SenseService.focus(view,target,question,**options)
+    backend.describe.side_effect = [json.dumps(dict(status=status, answer=answer)) for status, answer in
+        [('answered', 'red'), ('visually_indeterminable', 'Cannot infer material'), ('unanswered', 'No conclusion')]]
+    image = Image.new('RGB', (2, 2), 'red')
+    digest = hashlib.sha256(image.tobytes()).hexdigest()
+    def sense(directory, cycle):
+        """Persist one frozen image for entity identification and later inspection."""
+        image.save(directory / 'observations/vision/frozen_image.png')
+        return 'A cup on a table.'
+    def before_stage(stage, memory, nodes):
+        """Reject an attempted question again while its run is still active."""
+        path = memory.directory / 'state/refinement.json'
+        if stage == 'act' and path.exists():
+            state = json.loads(path.read_text())
+            attempted = [entry for entry in state['questions'] if entry['attempted']]
+            if attempted:
+                record = {'parameters': {key: attempted[0][key] for key in ('target', 'question')}}
+                with pytest.raises(ValueError, match='unattempted'):
+                    ActNode.focus(nodes['act'], record, directory=memory.directory,
+                        run_id=memory.metadata['run_id'], pipeline=pipeline, cycle=memory.cycle)
     constructors = MagicMock(side_effect=AssertionError('No new inference instance is permitted'))
     monkeypatch.setattr('smpa_ros.backends.transformers.TransformersVLM', constructors)
-    with Runner(root=tmp_path, max_cycles=limit, sense=lambda *args:'A cup on a table.',
-                model=backend, plan=backend, configuration={'pipeline':pipeline}) as runner:
-        runner.backend = backend
-        runner.sense_node = view
-        runner._act = runner.dispatch
-        assert runner._model is runner._plan is view.backend
-        experiment(runner, runner.limit)
-        directory = runner.memory.directory
-        state = json.loads((directory/'state/refinement.json').read_text())
-        assert state['status'] == expected_status
-        assert runner.memory.metadata['completed_cycles'] == expected_cycles
-        assert state['image_sha256']=='frozen-hash'
-        attempted = [entry for entry in state['questions'] if entry['attempted']]
-        assert len(attempted)==min(limit-1,3)
-        assert len({entry['question'] for entry in attempted})==len(attempted)
-        assert [entry['status'] for entry in attempted] == ['answered','visually_indeterminable','unanswered'][:len(attempted)]
-        assert backend.describe.call_count == len(attempted)
-        final_model=json.loads((directory/f'state/cycle_{expected_cycles:06d}/model.json').read_text())
-        assert all(entry['answer'] in final_model['prompt'] for entry in attempted)
-        assert json.loads((directory/f'state/cycle_{expected_cycles:06d}/act.json').read_text())['requested_action'] is None
-        for call in backend.describe.call_args_list:
-            assert call.args[0].getpixel((0,0)) == (255,0,0)
-            assert 'cup_1' in call.args[1]
-            assert call.kwargs['response_format']=='json_schema'
-        if expected_status=='completed':
-            last_model=json.loads((directory/'state/cycle_000004/model.json').read_text())
-            assert 'No conclusion' in last_model['prompt']
-            assert json.loads((directory/'state/cycle_000004/act.json').read_text())['requested_action'] is None
-            assert runner.experiment_complete is True
-        if attempted:
-            runner.sense_node = view  # Run cleanup releases it; inspect duplicate protection with the same supplied view.
-            with pytest.raises(ValueError, match='unattempted'):
-                runner.focused_observation({'parameters': {key: attempted[0][key] for key in ('target','question')}})
-        parameters=yaml.safe_load((directory/'parameters.yaml').read_text())
-        assert parameters['_run']['enabled_actions']==['observe']
-        assert parameters['scene_refinement']==refinement_settings(pipeline)
-        assert len(list((directory/'observations/vision').glob('observe_*.json')))==len(attempted)
+    directory = run(limit, root=tmp_path, sense=sense, model=backend, plan=backend, act=None,
+                    configuration={'pipeline': pipeline}, before_stage=before_stage)
+    state = json.loads((directory / 'state/refinement.json').read_text())
+    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
+    assert state['status'] == expected_status
+    assert metadata['completed_cycles'] == expected_cycles
+    assert state['image_sha256'] == digest
+    attempted = [entry for entry in state['questions'] if entry['attempted']]
+    assert len(attempted) == min(limit - 1, 3)
+    assert len({entry['question'] for entry in attempted}) == len(attempted)
+    assert [entry['status'] for entry in attempted] == ['answered', 'visually_indeterminable', 'unanswered'][:len(attempted)]
+    assert backend.describe.call_count == len(attempted)
+    final_model = json.loads((directory / f'state/cycle_{expected_cycles:06d}/model.json').read_text())
+    assert all(entry['answer'] in final_model['prompt'] for entry in attempted)
+    assert json.loads((directory / f'state/cycle_{expected_cycles:06d}/act.json').read_text())['requested_action'] is None
+    for call in backend.describe.call_args_list:
+        assert call.args[0].getpixel((0, 0)) == (255, 0, 0)
+        assert 'cup_1' in call.args[1]
+        assert call.kwargs['response_format'] == 'json_schema'
+    if expected_status == 'completed':
+        last_model = json.loads((directory / 'state/cycle_000004/model.json').read_text())
+        assert 'No conclusion' in last_model['prompt']
+        assert json.loads((directory / 'state/cycle_000004/act.json').read_text())['requested_action'] is None
+        assert state['status'] == 'completed'
+    parameters = yaml.safe_load((directory / 'parameters.yaml').read_text())
+    assert parameters['_run']['enabled_actions'] == ['observe']
+    assert parameters['scene_refinement'] == refinement_settings(pipeline)
+    assert len(list((directory / 'observations/vision').glob('observe_*.json'))) == len(attempted)
     constructors.assert_not_called()
+
 
 
 @pytest.mark.parametrize('decision', [

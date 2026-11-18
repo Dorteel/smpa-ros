@@ -12,7 +12,6 @@ from sense import modalities
 from sense.read import observe
 from smpa_ros.conversation import exchange, open_conversation, append_message
 from smpa_ros.sense import record_observation
-from runner import Runner
 
 
 def reply(history, **settings):
@@ -69,7 +68,7 @@ def test_incremental_roles_order_provenance_and_read_only(sources):
     exchange(source, 'fourth', reply, {})
     assert [x['content'] for x in observe(robot.directory, source.directory)['observations']] == ['fourth']
     for path, content in before.items():
-        if path not in ('conversation.md', 'metadata.yaml'):
+        if path not in ('conversation.md', 'metadata.yaml', 'state/.invocations.json'):
             assert (source.directory / path).read_bytes() == content
 
 
@@ -137,22 +136,21 @@ def test_failed_persistence_does_not_consume(sources, monkeypatch):
 
 
 def test_failed_later_cycle_does_not_replay_successful_sense(sources):
-    """Model failure after persisted sensing does not roll its cursor back."""
+    """Keep an already committed Read cursor after a later Model failure.
+
+    Persist the first observation, fail the existing world-model generator, then
+    make a new Sense record and confirm the committed message is not replayed.
+    """
+    from smpa_ros.model import generate_world_model
     robot, source, config = sources
     exchange(source, 'already observed', reply, {})
-    with Runner(root=robot.directory.parent.parent,
-                configuration={'pipeline': config},
-                sense=partial(collect, session=source.directory),
-                model=MagicMock(generate=MagicMock(side_effect=RuntimeError('model failed'))),
-                plan=MagicMock(), act=MagicMock()) as runner:
-        runner.start(goal='Test failed model cycle.')
-        with pytest.raises(RuntimeError, match='model failed'):
-            with runner.cycle():
-                value = runner.sense()
-                runner.model(value)
-        assert observe(runner.memory.directory, source.directory)['observations'] == []
-        with runner.cycle():
-            assert json.loads(runner.sense())['read']['observations'] == []
+    value, _ = persist(robot, source, config)
+    model = MagicMock(generate=MagicMock(side_effect=RuntimeError('model failed')))
+    with pytest.raises(RuntimeError, match='model failed'):
+        generate_world_model(robot.directory, 1, value, model, observations=[], pipeline=config)
+    assert observe(robot.directory, source.directory)['observations'] == []
+    value, _ = persist(robot, source, config, 2)
+    assert json.loads(value)['read']['observations'] == []
 
 
 def test_session_isolation_and_resumption(sources, tmp_path):
@@ -240,31 +238,34 @@ def test_independent_and_combined_collection(sources, monkeypatch, enabled):
     assert transcript == ('spoken text' if enabled['hear'] else '')
 
 
-def test_run_scoped_nodes_and_shared_backend(sources, monkeypatch):
-    """Create native Runner nodes with unique modality namespaces and one backend."""
-    import yaml
-    import smpa_ros.backends.transformers as transformers
+def test_independent_stage_nodes_do_not_load_backends(sources, tmp_path):
+    """Start four independent stage nodes without constructing model weights.
+
+    Every node owns its own action server and uses the same configured memory
+    root. Model loading remains the inference server's responsibility; stage
+    construction itself must not create a backend or invoke another stage.
+    """
+    import rclpy
+    from rclpy.parameter import Parameter
+    from smpa_ros.sense_node import SenseNode
+    from smpa_ros.model_node import ModelNode
+    from smpa_ros.plan_node import PlanNode
+    from smpa_ros.act_node import ActNode
     robot, source, config = sources
-    original = yaml.safe_load((Path(__file__).resolve().parents[1] / 'config.yaml').read_text())
-    original.update(config)
-    path = robot.directory / 'test-config.yaml'
-    path.write_text(yaml.safe_dump(original))
-    backend = MagicMock()
-    backend.model.device, backend.model.dtype = 'cpu', 'float32'
-    constructor = MagicMock(return_value=backend)
-    monkeypatch.setattr(transformers, 'TransformersVLM', constructor)
-    monkeypatch.setattr('runner.resolve_vision_model', lambda *args, **kwargs:
-                        dict(backend='transformers', path='/mock', model_id='test/shared'))
-    with Runner(args=['test', '--config', str(path), '--vision', 'true',
-                      '--world-model-root', str(robot.directory.parent.parent)]) as runner:
-        runner.start(goal='Inspect sensor namespaces without actions.')
-        prefix = '/run_' + runner.memory.metadata['run_id'].replace('-', '_') + '/sense'
-        assert runner.camera_node.get_namespace() == prefix + '/vision'
-        assert runner.sense_node.get_namespace() == prefix + '/vision'
-        assert runner.read_node.get_namespace() == prefix + '/read'
-        assert runner.sense_node.service.service_name == prefix + '/vision/describe_scene'
-        assert runner._model is runner._plan is runner.backend is runner.sense_node.backend
-        constructor.assert_called_once()
+    root = str(robot.directory.parent.parent)
+    rclpy.init(args=[])
+    nodes = []
+    try:
+        for kind in (SenseNode, ModelNode, PlanNode, ActNode):
+            nodes.append(kind(parameter_overrides=[Parameter('memory_root', value=root)]))
+        assert [node.get_name() for node in nodes] == ['sense_stage', 'model_stage', 'plan_stage', 'act_stage']
+        assert all(node.get_parameter('memory_root').value == root for node in nodes)
+        assert all(not hasattr(node, 'backend') for node in nodes)
+        assert len({id(node.server) for node in nodes}) == 4
+    finally:
+        for node in reversed(nodes):
+            node.destroy_node()
+        rclpy.shutdown()
 
 
 def test_corrupt_committed_robot_record_fails_closed(sources):
@@ -278,17 +279,37 @@ def test_corrupt_committed_robot_record_fails_closed(sources):
 
 
 def test_cached_refinement_does_not_replay_read_batch(sources):
-    """Reuse frozen visual evidence while collecting only newly persisted text."""
+    """Reuse frozen visual evidence while reading only newly persisted text.
+
+    Commit the original visual and Read observation, add another user message,
+    and invoke the actual independent Sense callback with refinement enabled.
+    Confirm the cached image description survives and only the new text appears.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from smpa_ros.sense_node import SenseNode
     robot, source, config = sources
+    pipeline = dict(config, enabled_actions=['observe'],
+                    scene_refinement={'enabled': True, 'properties': ['color']},
+                    stage_prompts={'sense': {'name': 'chosen', 'text': 'Describe.'}})
+    memory = MemoryManager(robot.directory.parent.parent, 'refinement', goal='Read.',
+                           configuration={'pipeline': pipeline})
+    memory.begin_cycle()
     exchange(source, 'first batch', reply, {})
-    value, _ = persist(robot, source, config)
+    name, provenance = memory.invocation('sense', 'chosen')
+    def initial(directory, cycle):
+        """Read the first batch alongside a fixed initial vision observation."""
+        return json.dumps({'vision': 'frozen scene', 'read': observe(directory, source.directory)})
+    record_observation(memory.directory, 1, initial, record_name=name, provenance=provenance,
+                       prompt_name='chosen', configuration=pipeline)
+    memory.write_refinement({'status': 'running', 'questions': []})
     exchange(source, 'new batch', reply, {})
-    runner = Runner.__new__(Runner)
-    runner.participant = None
-    runner.refinement_config = {'enabled': True}
-    runner.initial_observation = json.dumps({'vision': 'frozen scene', 'read': json.loads(value)['read']})
-    runner.modalities = dict(hear=False, vision=True, read=True)
-    runner.config = config
-    result = json.loads(runner.observe(robot.directory, 2))
-    assert result['vision'] == 'frozen scene'
-    assert [item['content'] for item in result['read']['observations']] == ['new batch']
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(
+        value=1.0 if name == 'timeout' else str(robot.directory.parent.parent)),
+        wait=Mock(), describe=Mock(), get_logger=lambda: Mock())
+    handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id']), succeed=Mock(), abort=Mock())
+    result = SenseNode.execute(node, handle)
+    handle.succeed.assert_called_once()
+    output = json.loads(result.observation)
+    assert output['vision'] == 'frozen scene'
+    assert [item['content'] for item in output['read']['observations']] == ['new batch']

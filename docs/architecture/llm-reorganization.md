@@ -4,13 +4,14 @@ Branch: `feature/llm-reorganization`, based on `89462f4`.
 
 ## Responsibilities and dependencies
 
-The robot keeps its explicit Sense → Model → Plan → Act execution. Runner owns
-one shared inference instance. Conversation keeps its independent Sense → Model
-→ Act execution and existing Markdown/RDF persistence. No ROS contracts change.
+The robot keeps its explicit Sense → Model → Plan → Act execution in `smpa.py`.
+Four independent stage nodes share the serialized `smpa_llm` inference server. Conversation keeps its independent Sense → Model
+→ Act execution and existing Markdown/RDF persistence. Existing ROS contracts
+remain available alongside the approved cognitive action definitions.
 
 | Owner | Responsibilities | Dependencies |
 | --- | --- | --- |
-| `smpa_ros` | Runner, sensory ROS adapters, cognition, planning schemas, actions, conversation, beliefs, provenance | `smpa_llm`, interfaces, ROS, external action servers |
+| `smpa_ros` | Explicit experiment script, independent cognitive nodes, sensory ROS adapters, conversation, beliefs, provenance | `smpa_llm`, interfaces, ROS, external action servers |
 | `smpa_llm` | Backend implementations, generation controls, model registry/provisioning, specialized inference, offline training | Inference libraries; training uses its separate environment |
 | `smpa_ros_interfaces` | Existing services and actions only | ROS interface generators |
 | `gui` | Existing independent browser presentation and ROS adapter | Unchanged by this migration |
@@ -31,7 +32,7 @@ this feature branch; retain existing model weights and experiment data unchanged
 Do not reset a source branch or migrate historical records.
 
 1. **Package boundary.** Move root cognitive metadata into `smpa_ros/`, and its
-   Python implementation into `smpa_ros/smpa_ros/`. Keep `runner`, `memory`, `sense`
+   Python implementation into `smpa_ros/smpa_ros/`. Keep `memory`, `sense`
    and `speech` public imports and installed executable names. Update installer,
    colcon test paths, source-path assertions and installed-resource tests. Verify
    automatic discovery, three-package build, imports, resources and unit tests.
@@ -83,7 +84,7 @@ All three ROS packages are siblings and discoverable with
 smpa_ros/                       Cognitive ROS package
   package.xml, setup.py, config.yaml, launch/
   smpa_ros/                     Cognitive Python implementation
-  runner.py, memory.py, sense/, speech/
+  memory.py, sense/, speech/
 smpa_llm/                       Inference/training ROS package
   package.xml, setup.py, config.yaml, models/, requirements-*.txt
   smpa_llm/
@@ -96,7 +97,7 @@ gui/                            Unchanged presentation
 models/                         Existing weight storage; YAML compatibility links
 ```
 
-Root `runner.py`, `memory.py`, `sense/`, `speech/`, and `launch/` retain source
+Root `memory.py`, `sense/`, `speech/`, and `launch/` retain source
 compatibility links. Legacy `smpa_ros.backends.*` and `speech.backends` imports
 alias the actual shared modules, so monkeypatches affect the same objects.
 Cognitive `smpa_ros.model` re-exports shared selection helpers, retaining its own

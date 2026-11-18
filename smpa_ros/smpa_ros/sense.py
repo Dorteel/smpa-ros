@@ -79,14 +79,16 @@ def record_observation(directory, cycle, sense, *, record_name='sense.json',
     return value, observations
 
 
-def observe(node, config, directory, executor, timeout, service, speech=None):
+def observe(node, config, directory, executor, timeout, service, speech=None, *, capture=None):
     """Collect enabled modalities sequentially with independent source timestamps.
 
     Preserve legacy vision/speech output keys and append attributed Read results
     only when explicitly enabled. Vision and Hear own their existing evidence;
     Read only observes the selected conversation and proposes a consumption
     cursor. The stage record commits that cursor after every modality succeeds.
-    No conversational inference or RDF operation is invoked here.
+    An optional capture callable sends vision requests through an independent
+    inference server; the legacy capture is used when none is supplied. No
+    conversational inference or RDF operation is invoked here.
     """
     from sense import modalities
     from sense.hear import observe as hear
@@ -94,7 +96,7 @@ def observe(node, config, directory, executor, timeout, service, speech=None):
     enabled = modalities(config, service)
     outputs, transcript = {}, ''
     if enabled['vision']:
-        outputs['vision'] = capture_once(node, config, directory, executor, timeout).read_text()
+        outputs['vision'] = (capture or capture_once)(node, config, directory, executor, timeout).read_text()
     if enabled['hear']:
         if speech is None:
             raise RuntimeError('Hear requires its assigned Listen action client')
@@ -106,3 +108,89 @@ def observe(node, config, directory, executor, timeout, service, speech=None):
 
 # Preserve established Python and console entry points during the module move.
 from sense.vision import SenseService, image_to_pil, capture_once, main
+
+
+def describe_image(node, image, prompt, *, run_id, directory, pipeline):
+    """Describe camera pixels with the run-owned shared inference server.
+
+    Check the active experiment and generation controls against the frozen
+    Sense configuration. Preserve the original image for refinement and send
+    a bounded RGB copy with the request-specific schema when configured.
+    Return only successful inference output. Never load a model locally.
+    """
+    from sensor_msgs.msg import Image
+    from action_msgs.msg import GoalStatus
+    from smpa_llm.inference.images import image_to_pil
+    from smpa_ros.plan import refinement_settings
+    from smpa_ros_interfaces.action import DescribeImage, DescribeStructuredImage
+
+    timeout = node.get_parameter('timeout').value
+    settings = stage_generation(pipeline, 'sense')
+    if not node.parameters.wait_for_services(timeout_sec=timeout):
+        raise TimeoutError('Inference parameter services are unavailable')
+    response = node.result(node.parameters.get_parameters(['experiment_run_id', 'active_model', 'frozen_settings_json']), timeout, 'inference ownership')
+    if response.values[0].string_value != run_id or not response.values[1].string_value:
+        raise RuntimeError('Inference server is not frozen for this experiment')
+    alias = response.values[1].string_value
+    snapshot = json.loads(response.values[2].string_value)
+    if snapshot.get('run_id') != run_id or snapshot.get('active_model') != alias:
+        raise RuntimeError('Inference snapshot does not match this experiment')
+    saved = yaml.safe_load((directory / 'metadata.yaml').read_text()).get('inference')
+    if snapshot != saved:
+        raise RuntimeError('Inference server or frozen settings changed during this experiment')
+    controls = snapshot.get('stages', {}).get('sense')
+    if not isinstance(controls, dict):
+        raise RuntimeError('Inference snapshot has no frozen Sense settings')
+    actual = tuple(controls.get(field) for field in
+                   ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
+    expected = (settings.get('max_output_tokens'), settings.get('temperature'),
+                settings.get('seed') if settings.get('seed') is not None else -1,
+                1.0, settings.get('reasoning_effort'))
+    if actual != expected:
+        raise ValueError(f'Inference parameters do not match frozen Sense settings: expected {expected}, got {actual}')
+    pixels = image_to_pil(image)
+    if refinement_settings(pipeline)['enabled']:
+        frozen = directory / 'observations/vision/frozen_image.png'
+        if frozen.exists():
+            from PIL import Image as PILImage
+            with PILImage.open(frozen) as stored:
+                pixels = stored.convert('RGB')
+        else:
+            import os
+            from tempfile import NamedTemporaryFile
+            with NamedTemporaryFile(mode='wb', dir=frozen.parent, prefix='.frozen-image-', delete=False) as output:
+                pending = Path(output.name)
+                try:
+                    pixels.save(output, format='PNG')
+                    output.flush()
+                    os.fsync(output.fileno())
+                    try:
+                        os.link(pending, frozen)
+                    except FileExistsError:
+                        from PIL import Image as PILImage
+                        with PILImage.open(frozen) as stored:
+                            pixels = stored.convert('RGB')
+                finally:
+                    pending.unlink(missing_ok=True)
+    pixels.thumbnail((512, 512))
+    message = Image(height=pixels.height, width=pixels.width, encoding='rgb8',
+                    is_bigendian=0, step=pixels.width * 3, data=list(pixels.tobytes()))
+    format_name = settings.get('response_format')
+    if format_name == 'text':
+        client = node.image_client
+        goal = DescribeImage.Goal(image=message, prompt=prompt, run_id=run_id, stage='sense')
+    elif format_name == 'json_schema' and isinstance(settings.get('output_schema'), dict):
+        client = node.structured_client
+        goal = DescribeStructuredImage.Goal(image=message, prompt=prompt,
+                                              json_schema=json.dumps(settings['output_schema']), run_id=run_id, stage='sense')
+    else:
+        raise ValueError('Unsupported Sense response format')
+    if not client.wait_for_server(timeout_sec=timeout):
+        raise TimeoutError('Vision inference action is unavailable')
+    handle = node.result(client.send_goal_async(goal), timeout, 'vision acceptance')
+    if not handle.accepted:
+        raise RuntimeError('Vision inference goal was rejected')
+    response = node.result(handle.get_result_async(), timeout, 'vision result')
+    if response.status != GoalStatus.STATUS_SUCCEEDED:
+        raise RuntimeError('Vision inference action failed')
+    return response.result.description if format_name == 'text' else response.result.json_output

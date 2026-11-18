@@ -39,8 +39,9 @@ source "$ros_setup"
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
 export ROS_LOG_DIR="$work_dir/ros_logs"
+export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 "${colcon_command[@]}" --log-base "$work_dir/log" build --paths "$PWD/smpa_ros" "$PWD/smpa_llm" "$PWD/smpa_ros_interfaces" \
-    --packages-select smpa_ros_interfaces smpa_llm smpa_ros --build-base "$work_dir/build" \
+    --packages-select smpa_ros_interfaces smpa_llm smpa_ros --executor sequential --parallel-workers 1 --build-base "$work_dir/build" \
     --install-base "$work_dir/install"
 source "$work_dir/install/setup.bash"
 # Repository test fixtures include the provisioning script as a namespace module.
@@ -77,10 +78,10 @@ from importlib.metadata import distribution
 import importlib.util
 from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
-from runner import Runner
 from memory import MemoryManager
 import yaml
 
+assert importlib.util.find_spec('runner') is None
 entries = {entry.name: entry for entry in distribution('smpa-ros').entry_points}
 assert entries['conversation'].value == 'smpa_ros.conversation_web:main'
 assert callable(entries['conversation'].load())
@@ -102,8 +103,7 @@ assert callable(entries['segment_image'].load())
 assert entries['smpa'].value == 'smpa_ros.smpa:main'
 assert callable(entries['smpa'].load())
 import inspect
-assert Path(inspect.getfile(Runner)).parent == Path(inspect.getfile(MemoryManager)).parent
-assert Path(inspect.getfile(Runner)).parent != Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).parent
+assert Path(inspect.getfile(MemoryManager)).parent != Path(os.environ['SMPA_TEST_PIPELINE_CONFIG']).parent
 for name, target in {'listen': 'speech.actions:listen_main', 'talk': 'speech.actions:talk_main',
                      'listener_talker': 'speech.demo:main'}.items():
     assert entries[name].value == target
@@ -131,13 +131,27 @@ for name in ('smolvlm2', 'qwen3_vl', 'gemma3'):
     config = yaml.safe_load((registry / (name + '.yaml')).read_text())
     assert config['name'] == name and config['model_id'] and config['vram_gb'] is None
 
-from smpa_ros.smpa import run
-with Runner(root=Path.cwd() / 'memory', sense=lambda directory, cycle: 'observation',
-            model=lambda prompt, **settings: '# World Model',
-            plan=lambda prompt, **settings: '{"action":"look_left"}',
-            act=lambda action, record: record.update(goal_accepted=True, result_status=4, success=True)) as runner:
-    run(runner, 1)
-    assert runner.memory.metadata['completed_cycles'] == 1
+from types import SimpleNamespace
+from smpa_ros.smpa import run_actions
+memory = MemoryManager(Path.cwd() / 'memory', goal='# Goal')
+order = []
+def invoke(stage, action_type, goal):
+    """Record the script's selected stage and return a deterministic result.
+
+    The installed action definitions carry the run identity. Return only the
+    fields needed by the following stage, then verify completion and ordering.
+    """
+    assert goal.run_id == memory.metadata['run_id']
+    order.append(stage)
+    results = {'sense': SimpleNamespace(observation='observation', record_path='sense'),
+               'model': SimpleNamespace(world_model='# World Model', record_path='model', snapshot_path='world'),
+               'plan': SimpleNamespace(action_json='{"action":"look_left"}', record_path='plan'),
+               'act': SimpleNamespace(success=True)}
+    return results[stage]
+run_actions(memory, 1, invoke)
+assert order == ['sense', 'model', 'plan', 'act']
+assert memory.metadata['completed_cycles'] == 1
+memory.finalize('completed')
 
 PY
 timeout --kill-after=2s 10s ros2 run smpa_ros smpa --help > "$work_dir/smpa-help.txt"

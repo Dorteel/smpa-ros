@@ -21,7 +21,8 @@ def start(context):
     selections retain the existing robot loop or assigned participant servers,
     including modality-scoped run remappings and unchanged action execution.
     Place Listen under sense/hear and Talk under act; forward explicit modality
-    switches and the selected Read session only to the native Runner.
+    switches and the selected Read session to the experiment. Unless disabled,
+    start the four independent stage servers with the same run-memory root.
     """
     value = lambda name: LaunchConfiguration(name).perform(context)
     if value('service') == 'visual_jev':
@@ -59,9 +60,17 @@ def start(context):
             arguments.extend(['--' + name.replace('_', '-'), value(name)])
     if value('max_cycles'):
         arguments.extend(['--max-cycles', value('max_cycles')])
-    return [Node(package='smpa_ros', executable='smpa', prefix=[value('python')],
-                 arguments=arguments, output='screen',
-                 on_exit=EmitEvent(event=Shutdown(reason='Loop process exited')))]
+    stages = []
+    if value('start_stage_nodes') == 'true':
+        parameters = {'memory_root': value('world_model_root'),
+                      'timeout': float(value('timeout') or '120.0')}
+        for stage in ('sense', 'model', 'plan', 'act'):
+            stages.append(Node(package='smpa_ros', executable=stage + '_stage',
+                               prefix=[value('python')], parameters=[parameters], output='screen',
+                               on_exit=EmitEvent(event=Shutdown(reason=stage + ' stage exited'))))
+    return stages + [Node(package='smpa_ros', executable='smpa', prefix=[value('python')],
+                          arguments=arguments, output='screen',
+                          on_exit=EmitEvent(event=Shutdown(reason='Loop process exited')))]
 
 
 def generate_launch_description():
@@ -92,6 +101,7 @@ def generate_launch_description():
         DeclareLaunchArgument('input_device', default_value=''),
         DeclareLaunchArgument('output_device', default_value=''),
         DeclareLaunchArgument('demo', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('start_stage_nodes', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('participants_only', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('world_model_dir', default_value=''),
         DeclareLaunchArgument('run_id', default_value=''),

@@ -283,7 +283,7 @@ def test_speech_subprocess_sigint(tmp_path, assigned_test_run, kind, state):
     idle server, an accepted blocking request, or a request explicitly canceled
     before shutdown. Require explicit cancellation to return CANCELED as usual.
 
-    Once the child is ready, send SIGINT as Runner does and require a zero exit
+    Once the child is ready, send SIGINT as the experiment does and require a zero exit
     within three seconds, a stopped backend, a closed ROS context and a released
     audio lease. On failure dump the child's threads before terminating only that
     test process group. Always destroy the parent ROS client and context.

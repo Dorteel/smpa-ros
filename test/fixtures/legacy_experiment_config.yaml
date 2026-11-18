@@ -1,0 +1,367 @@
+action_timeout: 30.0
+config:
+  camera_topic: /tiago/camera/color/image_raw
+  conversation:
+    agent: local:qwen3-4b
+    modelling_agent: local:qwen3-4b
+  enabled_actions:
+  - look_left
+  - look_right
+  execution:
+    action_timeout: 30.0
+    max_cycles: 3
+  goal: '# Goal
+
+
+    Explore the environment to discover previously unobserved objects and relationships.
+
+    '
+  model:
+    backend: transformers
+    device: auto
+    dtype: auto
+    model: qwen3_vl_2b
+    model_id: Qwen/Qwen3-VL-2B-Instruct
+    path: models/vlm/qwen3_vl_2b
+  nebula:
+    api_key_env: NEBULA_API_KEY
+    base_url: https://nebula.cs.vu.nl/api/chat/completions
+    generation_capabilities:
+      text:
+        parameters:
+        - temperature
+        - max_output_tokens
+        - reasoning_effort
+        reasoning_efforts:
+        - low
+        - medium
+        - high
+        response_formats:
+        - text
+        - json_schema
+      vision:
+        parameters:
+        - temperature
+        - max_output_tokens
+        reasoning_efforts: []
+        response_formats:
+        - text
+    models:
+      text: SURF.gpt-oss-120b
+      vision: SURF.Qwen2.5-VL-32B-Instruct-AWQ
+    timeout: 180
+  openai:
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    generation_capabilities:
+      text:
+        parameters:
+        - temperature
+        - max_output_tokens
+        - seed
+        reasoning_efforts: []
+        response_formats:
+        - text
+        - json_object
+        - json_schema
+      vision:
+        parameters:
+        - temperature
+        - max_output_tokens
+        - seed
+        reasoning_efforts: []
+        response_formats:
+        - text
+        - json_object
+        - json_schema
+    models:
+      text: gpt-4.1-mini
+      vision: gpt-4.1-mini
+    timeout: 180
+  prompt: describe_scene
+  sensing:
+    hear: false
+    vision: false
+  stage_prompts:
+    act:
+      name: default
+      text: 'Translate this plan into a proposed command description. Flag missing
+        robot capabilities or parameters. Do not claim execution occurred.
+
+        Plan:
+
+        {input}
+
+        '
+    model:
+      name: default
+      text: 'Create a structured world model from the provided observations. Use the
+        previous world model as context when available. Preserve supported information,
+        update facts when new evidence justifies it, and do not invent observations.
+
+        Return a complete Markdown snapshot with the title "# World Model" and sections
+        "## Entities", "## Properties", "## Relations", and "## Uncertain Information".
+        Preserve stable entity identifiers where possible. Distinguish observed facts
+        from inferences and mark uncertainty explicitly.
+
+
+        Previous world model:
+
+        {previous_world_model}
+
+
+        Observations:
+
+        {input}
+
+        '
+    plan:
+      name: default
+      text: 'Plan the next action to take, given the current world model, the goal,
+        and the available actions. Select exactly one action from the provided list.
+
+        Return a JSON object containing only the action property.
+
+
+        Goal:
+
+        {goal}
+
+
+        Available actions:
+
+        {available_actions}
+
+
+        World state:
+
+        {input}
+
+        '
+    sense:
+      name: describe_scene
+      text: 'Describe the scene.
+
+        '
+  stage_settings:
+    act:
+      max_output_tokens: null
+      reasoning_effort: null
+      response_format: null
+      seed: null
+      temperature: null
+    model:
+      max_output_tokens: 4096
+      reasoning_effort: null
+      response_format: text
+      seed: null
+      temperature: 0.0
+    plan:
+      max_output_tokens: 4096
+      output_schema:
+        additionalProperties: false
+        properties:
+          action:
+            enum:
+            - look_left
+            - look_right
+            type: string
+        required:
+        - action
+        type: object
+      reasoning_effort: null
+      response_format: json_schema
+      seed: null
+      temperature: 0.0
+    sense:
+      max_output_tokens: 4096
+      output_schema:
+        type: object
+      reasoning_effort: null
+      response_format: json_schema
+      seed: null
+      temperature: 0.0
+limit: 3
+modalities:
+  hear: false
+  read: false
+  vision: false
+original_config:
+  camera_topic: /tiago/camera/color/image_raw
+  conversation:
+    agent: local:qwen3-4b
+    modelling_agent: local:qwen3-4b
+  execution:
+    action_timeout: 30.0
+    max_cycles: 3
+  goal: '# Goal
+
+
+    Explore the environment to discover previously unobserved objects and relationships.
+
+    '
+  model:
+    backend: transformers
+    device: auto
+    dtype: auto
+    model: qwen3_vl_2b
+    model_id: Qwen/Qwen3-VL-2B-Instruct
+    path: models/vlm/qwen3_vl_2b
+  nebula:
+    api_key_env: NEBULA_API_KEY
+    base_url: https://nebula.cs.vu.nl/api/chat/completions
+    generation_capabilities:
+      text:
+        parameters:
+        - temperature
+        - max_output_tokens
+        - reasoning_effort
+        reasoning_efforts:
+        - low
+        - medium
+        - high
+        response_formats:
+        - text
+        - json_schema
+      vision:
+        parameters:
+        - temperature
+        - max_output_tokens
+        reasoning_efforts: []
+        response_formats:
+        - text
+    models:
+      text: SURF.gpt-oss-120b
+      vision: SURF.Qwen2.5-VL-32B-Instruct-AWQ
+    timeout: 180
+  openai:
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    generation_capabilities:
+      text:
+        parameters:
+        - temperature
+        - max_output_tokens
+        - seed
+        reasoning_efforts: []
+        response_formats:
+        - text
+        - json_object
+        - json_schema
+      vision:
+        parameters:
+        - temperature
+        - max_output_tokens
+        - seed
+        reasoning_efforts: []
+        response_formats:
+        - text
+        - json_object
+        - json_schema
+    models:
+      text: gpt-4.1-mini
+      vision: gpt-4.1-mini
+    timeout: 180
+  prompt: describe_scene
+  sensing:
+    hear: false
+    vision: false
+  stage_prompts:
+    act:
+      name: default
+      text: 'Translate this plan into a proposed command description. Flag missing
+        robot capabilities or parameters. Do not claim execution occurred.
+
+        Plan:
+
+        {input}
+
+        '
+    model:
+      name: default
+      text: 'Create a structured world model from the provided observations. Use the
+        previous world model as context when available. Preserve supported information,
+        update facts when new evidence justifies it, and do not invent observations.
+
+        Return a complete Markdown snapshot with the title "# World Model" and sections
+        "## Entities", "## Properties", "## Relations", and "## Uncertain Information".
+        Preserve stable entity identifiers where possible. Distinguish observed facts
+        from inferences and mark uncertainty explicitly.
+
+
+        Previous world model:
+
+        {previous_world_model}
+
+
+        Observations:
+
+        {input}
+
+        '
+    plan:
+      name: default
+      text: 'Plan the next action to take, given the current world model, the goal,
+        and the available actions. Select exactly one action from the provided list.
+
+        Return a JSON object containing only the action property.
+
+
+        Goal:
+
+        {goal}
+
+
+        Available actions:
+
+        {available_actions}
+
+
+        World state:
+
+        {input}
+
+        '
+    sense:
+      name: describe_scene
+      text: 'Describe the scene.
+
+        '
+  stage_settings:
+    act:
+      max_output_tokens: null
+      reasoning_effort: null
+      response_format: null
+      seed: null
+      temperature: null
+    model:
+      max_output_tokens: 4096
+      reasoning_effort: null
+      response_format: text
+      seed: null
+      temperature: 0.0
+    plan:
+      max_output_tokens: 4096
+      output_schema:
+        additionalProperties: false
+        properties:
+          action:
+            enum:
+            - look_left
+            - look_right
+            type: string
+        required:
+        - action
+        type: object
+      reasoning_effort: null
+      response_format: json_schema
+      seed: null
+      temperature: 0.0
+    sense:
+      max_output_tokens: 4096
+      output_schema:
+        type: object
+      reasoning_effort: null
+      response_format: json_schema
+      seed: null
+      temperature: 0.0

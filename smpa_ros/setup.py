@@ -6,7 +6,7 @@ package_name = 'smpa_ros'
 setup(
     name=package_name,
     version='0.0.1',
-    py_modules=['runner', 'memory'],
+    py_modules=['memory'],
     packages=find_packages(include=['smpa_ros', 'smpa_ros.*', 'speech', 'speech.*', 'sense', 'sense.*']),
     package_data={'smpa_ros': ['prompts/*/*.txt', 'conversation.html', 'belief-structure.owl']},
     data_files=[
@@ -30,6 +30,10 @@ setup(
         'conversation = smpa_ros.conversation_web:main',
         'smpa = smpa_ros.smpa:main',
         'smpa_control = smpa_ros.run_control:main',
+        'model_stage = smpa_ros.model_node:main',
+        'sense_stage = smpa_ros.sense_node:main',
+        'act_stage = smpa_ros.act_node:main',
+        'plan_stage = smpa_ros.plan_node:main',
         'listen = speech.actions:listen_main',
         'talk = speech.actions:talk_main',
         'listener_talker = speech.demo:main',

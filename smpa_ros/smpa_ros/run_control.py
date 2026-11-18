@@ -1,13 +1,12 @@
-"""Adapt ROS run requests to the existing experiment in an owned child process.
+"""Adapt ROS lifecycle requests to the script's owned experiment process.
 
 Concepts:
     The control node reports lifecycle; it never chooses cognitive stage order.
-    The child calls the existing smpa.run function with the existing Runner. A
-    private pipe carries notifications only; persisted Runner records remain
-    authoritative. Process separation keeps Runner's default ROS context and
-    signals independent of the always-on control node.
+    The child runs the explicit action sequence in smpa.py. A private pipe carries
+    notifications while persisted run records remain authoritative. Process
+    separation keeps the experiment's ROS context and signals independent of the
+    always-on control node.
 """
-from functools import partial
 import json
 import os
 from pathlib import Path
@@ -26,7 +25,7 @@ from smpa_ros_interfaces.msg import SmpaEvent
 from smpa_ros_interfaces.srv import GetSmpaStatus, StartSmpa, StopSmpa
 
 START_TIMEOUT = 30.0
-SHUTDOWN_TIMEOUT = 5.0
+SHUTDOWN_TIMEOUT = 20.0
 
 
 def notify(stream, run_id, stage, event):
@@ -43,76 +42,35 @@ def notify(stream, run_id, stage, event):
         pass
 
 
-def observe_stage(runner, stream, stage, operation, *args, **kwargs):
-    """Notify around one existing script-requested operation without reordering it.
-
-    Relay the operation's return value unchanged. Publish completion only after
-    the existing method has persisted its record. Non-interruption failures emit
-    stage_failed and are re-raised so Runner's existing context finalizes the run.
-    """
-    identity = runner.memory.metadata['run_id']
-    notify(stream, identity, stage, 'stage_started')
-    try:
-        result = operation(*args, **kwargs)
-    except KeyboardInterrupt:
-        raise
-    except BaseException:
-        notify(stream, identity, stage, 'stage_failed')
-        raise
-    notify(stream, identity, stage, 'stage_completed')
-    return result
-
-
 def run_worker(descriptor, goal, runner_arguments):
-    """Run the existing experiment with observation wrappers and normal cleanup.
+    """Run the script's independent action sequence in the owned child process.
 
-    Construct the ordinary Runner and wrap its existing setup callback solely to
-    announce the run identity after MemoryManager has persisted the new run but
-    before model loading. Wrap stage methods for notifications; the unchanged
-    experiment function decides when and how often they run. SIGINT follows the
-    existing KeyboardInterrupt/context-manager path. Publish terminal state only
-    after Runner cleanup has finalized authoritative metadata.
+    Relay lifecycle notifications from the experiment without selecting stages
+    or altering their order. The experiment owns its run, inference freeze and
+    cleanup. Report setup failures even if no run identity was created.
     """
-    from runner import Runner
-    from smpa_ros.smpa import run
-    runner = None
+    from smpa_ros.smpa import run_ros_experiment
     with os.fdopen(descriptor, 'w', buffering=1) as stream:
+        terminal = False
+        def relay(identity, stage, event):
+            """Forward one experiment event and remember a terminal outcome."""
+            nonlocal terminal
+            if event in ('run_completed', 'run_interrupted', 'run_failed'):
+                terminal = True
+            notify(stream, identity, stage, event)
         try:
-            runner = Runner(['smpa', *runner_arguments])
-            setup = runner._setup
-
-            def announce(directory, identity):
-                """Announce the persisted run identity before normal setup loads weights.
-
-                This lets StartSmpa return without waiting for model initialization
-                or experiment completion. Delegate the original setup unchanged.
-                """
-                notify(stream, identity, '', 'run_started')
-                if setup is not None:
-                    return setup(directory, identity)
-
-            runner._setup = announce
-            for stage in ('sense', 'model', 'plan', 'act'):
-                operation = getattr(runner, stage)
-                setattr(runner, stage, partial(observe_stage, runner, stream, stage, operation))
-            with runner:
-                run(runner, runner.limit, goal=goal)
+            run_ros_experiment(['smpa', *runner_arguments], goal=goal, notify=relay)
         except KeyboardInterrupt:
             pass
         except BaseException as error:
             print(f'SMPA worker failed: {error}', file=sys.stderr, flush=True)
         finally:
-            if runner is not None and runner.memory is not None:
-                identity = runner.memory.metadata['run_id']
-                status = runner.memory.metadata['status']
-                event = {'completed': 'run_completed', 'interrupted': 'run_interrupted'}.get(status, 'run_failed')
-                notify(stream, identity, '', event)
-            else:
+            if not terminal:
                 notify(stream, '', '', 'run_failed')
 
 
 class SmpaControl(Node):
-    """Expose start/stop/status while the original experiment owns execution."""
+    """Expose start/stop/status while the experiment owns execution."""
 
     def __init__(self, **node_options):
         """Declare run-launch parameters and begin idle without starting cognition.
@@ -131,6 +89,7 @@ class SmpaControl(Node):
         self.active_stage = ''
         self.state = 'idle'
         self.terminal_seen = False
+        self.started_seen = False
         self.closing = False
         readonly = ParameterDescriptor(read_only=True)
         self.declare_parameter('configuration_file', str(Path(get_package_share_directory('smpa_ros')) / 'config.yaml'), readonly)
@@ -164,6 +123,7 @@ class SmpaControl(Node):
             self.run_id = self.active_stage = ''
             self.state = 'running'
             self.terminal_seen = False
+            self.started_seen = False
             read_descriptor, write_descriptor = os.pipe()
             arguments = ['--config', self.get_parameter('configuration_file').value,
                          '--world-model-root', self.get_parameter('memory_root').value,
@@ -196,8 +156,8 @@ class SmpaControl(Node):
                 self.get_logger().error('Timed out waiting for SMPA startup notification')
                 self.stop_child(self.process)
         with self.lock:
-            response.accepted = bool(self.run_id)
-            response.run_id = self.run_id
+            response.accepted = self.started_seen
+            response.run_id = self.run_id if self.started_seen else ''
         return response
 
     def collect(self, descriptor, process):
@@ -220,6 +180,8 @@ class SmpaControl(Node):
                         self.run_id = record['run_id'] or self.run_id
                         self.active_stage = record['stage'] if record['event'] == 'stage_started' else ''
                         event = record['event']
+                        if event == 'run_started':
+                            self.started_seen = True
                         if event.startswith('run_') and event != 'run_started':
                             self.state = {'run_completed': 'completed', 'run_interrupted': 'interrupted'}.get(event, 'failed')
                             self.terminal_seen = True
@@ -246,7 +208,7 @@ class SmpaControl(Node):
         """Request the existing SIGINT cleanup path without claiming termination.
 
         Accept once for an active child and mark stopping before signaling its
-        main process. Runner remains responsible for canceling actions, tearing
+        main process. The experiment remains responsible for tracking actions, tearing
         down its participants and finalizing records. Repeated stop requests are
         rejected; an already exited child cannot be stopped retroactively. If
         signaling fails, restore running state for a live child or mark an exited
@@ -290,7 +252,7 @@ class SmpaControl(Node):
     def stop_child(self, process, *, interrupt=True):
         """Stop and reap the owned child using bounded escalation.
 
-        Give Runner time to handle SIGINT and finalize its records. If it does
+        Give the experiment time to handle SIGINT and finalize its records. If it does
         not exit, request termination and then a kill, waiting only a bounded
         time at each step. Log signaling or waiting failures and never affect a
         process other than the child supplied by this control node.

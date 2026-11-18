@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import sys
 from threading import RLock
+from uuid import uuid4
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -25,7 +26,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import yaml
 
-from smpa_ros_interfaces.action import (DescribeImage, GenerateStructured, GenerateText,
+from smpa_ros_interfaces.action import (DescribeImage, DescribeStructuredImage, GenerateStructured, GenerateStructuredChat, GenerateText,
                                         LoadModel, SetActiveModel, UnloadModel)
 from smpa_ros_interfaces.msg import InferenceStatus
 from smpa_ros_interfaces.srv import GetModelStatus, ListModels
@@ -33,6 +34,8 @@ from smpa_llm.inference.backends.base import validate_generation, validate_outpu
 
 LOADING_FIELDS = ('model_id', 'path', 'backend', 'device', 'dtype', 'enable_thinking')
 GENERATION_FIELDS = ('max_new_tokens', 'temperature', 'top_p', 'seed')
+STAGES = ('sense', 'model', 'plan', 'act')
+STAGE_INHERIT = {'max_new_tokens': -1, 'temperature': -1.0, 'top_p': -1.0, 'seed': -2, 'reasoning_effort': ''}
 
 
 def registered_models(configuration, registry):
@@ -121,8 +124,14 @@ class InferenceServer(Node):
         self.active_alias = ''
         self.state = 'unloaded'
         self.internal_parameter_update = False
+        self._frozen_settings_json = ''
+        self._instance_id = str(uuid4())
+        self.declare_parameter('frozen_settings_json', '', readonly)
         self.loader = loader or load_registered_backend
         self.declare_parameter('active_model', '')
+        self.declare_parameter('experiment_run_id', '')
+        if self.get_parameter('experiment_run_id').value:
+            raise ValueError('experiment_run_id can only be acquired after the model is ready')
         initial = self.get_parameter('active_model').value
         for alias, entry in self.catalogue.items():
             defaults = dict(model_id=entry.get('model_id', entry.get('base_model', {}).get('model_id', alias)), path=entry.get('path', ''),
@@ -133,6 +142,10 @@ class InferenceServer(Node):
             for field, value in defaults.items():
                 self.declare_parameter(f'models.{alias}.{field}', value)
             self.validate_settings(self.settings(alias))
+            for stage in STAGES:
+                for field, default in STAGE_INHERIT.items():
+                    self.declare_parameter(f'models.{alias}.stages.{stage}.{field}', default)
+                self.validate_stage_settings(alias, stage)
         self.add_on_set_parameters_callback(self.validate_parameters)
         self.group = ReentrantCallbackGroup()
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -146,14 +159,17 @@ class InferenceServer(Node):
                                   (SetActiveModel, 'set_active_model')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
                 partial(self.manage, action_type=action_type, operation=name),
-                goal_callback=self.reserve, cancel_callback=self.cancel,
+                goal_callback=partial(self.reserve, management=True), cancel_callback=self.cancel,
                 callback_group=self.group))
         for action_type, name, field in [(GenerateText, 'generate', 'text'),
                 (GenerateStructured, 'generate_structured', 'json_output'),
-                (DescribeImage, 'describe_image', 'description')]:
+                (GenerateStructuredChat, 'generate_structured_chat', 'json_output'),
+                (DescribeImage, 'describe_image', 'description'),
+                (DescribeStructuredImage, 'describe_structured_image', 'json_output')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
-                partial(self.infer, action_type=action_type, result_field=field),
-                goal_callback=self.reserve, cancel_callback=self.cancel,
+                partial(self.infer, action_type=action_type, result_field=field,
+                        chat=(name == 'generate_structured_chat')),
+                goal_callback=partial(self.reserve, inference=True), cancel_callback=self.cancel,
                 callback_group=self.group))
         self.change_state('unloaded')
         if initial:
@@ -163,6 +179,21 @@ class InferenceServer(Node):
                 self.get_logger().error(str(error))
                 self.set_loaded_alias('')
                 self.change_state('error')
+
+    def get_parameter(self, name):
+        """Return the server-captured snapshot for the read-only snapshot name.
+
+        Other parameters use the normal ROS implementation. The inference lock
+        keeps the returned snapshot consistent with acquisition and release. The
+        snapshot is empty outside an experiment and cannot be set by clients.
+        """
+        if name == 'frozen_settings_json':
+            from rclpy.parameter import Parameter
+            lock = getattr(self, 'lock', None)
+            if lock is not None:
+                with lock:
+                    return Parameter(name, value=self._frozen_settings_json)
+        return super().get_parameter(name)
 
     def set_parameters(self, parameters):
         """Keep each regular ROS parameter update coherent with request snapshots.
@@ -175,20 +206,86 @@ class InferenceServer(Node):
         if lock is None:
             return super().set_parameters(parameters)
         with lock:
-            return super().set_parameters(parameters)
+            return [self.set_parameters_atomically([parameter]) for parameter in parameters]
 
     def set_parameters_atomically(self, parameters):
         """Keep atomic batches indivisible to inference and model-loading snapshots.
 
         Serialize both validation and ROS value installation under the same lock
-        used by snapshots. Fall back to ordinary initialization behavior before
-        server state exists. A rejected batch installs no partial configuration.
+        used by snapshots. An active experiment can be released only with
+        `release:<run_id>`, checked against its current owner under this lock.
+        Normalize a matching command to the empty parameter value, and reject a
+        bare or stale release. Capture the actual model device and dtype in the
+        frozen snapshot when the loaded backend exposes both. During acquisition,
+        stage overrides may be initialized in the same transaction only when they
+        are inherited or already match. Capture the proposed settings in the
+        snapshot. A rejected batch installs no partial configuration.
         """
         lock = getattr(self, 'lock', None)
         if lock is None:
             return super().set_parameters_atomically(parameters)
         with lock:
-            return super().set_parameters_atomically(parameters)
+            from rclpy.parameter import Parameter
+            owner = self.get_parameter('experiment_run_id').value
+            if sum(parameter.name == 'experiment_run_id' for parameter in parameters) > 1:
+                return SetParametersResult(successful=False, reason='Experiment ownership may appear only once in a batch')
+            normalized = []
+            for parameter in parameters:
+                if parameter.name == 'experiment_run_id' and isinstance(parameter.value, str):
+                    value = parameter.value
+                    if value.startswith('release:'):
+                        if not owner or value[8:] != owner:
+                            return SetParametersResult(successful=False, reason='Release does not match the active experiment')
+                        parameter = Parameter('experiment_run_id', value='')
+                    elif not value and owner:
+                        return SetParametersResult(successful=False, reason='Release must name the active experiment')
+                normalized.append(parameter)
+            target = next((parameter.value for parameter in normalized
+                           if parameter.name == 'experiment_run_id'), owner)
+            snapshot = None
+            stage_overrides = {}
+            if target and target != owner:
+                for parameter in normalized:
+                    if not parameter.name.startswith('models.'):
+                        continue
+                    matched = False
+                    for stage in STAGES:
+                        prefix = f'models.{self.active_alias}.stages.{stage}.'
+                        if parameter.name.startswith(prefix):
+                            field = parameter.name[len(prefix):]
+                            if field not in STAGE_INHERIT:
+                                return SetParametersResult(successful=False, reason='Unknown inference parameter')
+                            current = self.get_parameter(parameter.name).value
+                            if current != STAGE_INHERIT[field] and current != parameter.value:
+                                return SetParametersResult(successful=False, reason=f'Explicit stage override conflicts: {parameter.name}')
+                            stage_overrides.setdefault(stage, {})[field] = parameter.value
+                            matched = True
+                            break
+                    if not matched:
+                        return SetParametersResult(successful=False, reason='Only active-model stage overrides can accompany acquisition')
+            if target and target != owner and self.backend is not None:
+                values = self.settings(self.active_alias)
+                snapshot = dict(run_id=target, server_instance_id=self._instance_id, active_model=self.active_alias,
+                    loading=dict(self.loaded_settings),
+                    generation={field: values[field] for field in GENERATION_FIELDS},
+                    stages={stage: {field: self.stage_settings(self.active_alias, stage, stage_overrides.get(stage))[field]
+                                    for field in (*GENERATION_FIELDS, 'reasoning_effort')}
+                            for stage in STAGES}, model_root=self.model_root)
+                loaded_model = getattr(self.backend, 'model', None)
+                device = getattr(loaded_model, 'device', None)
+                dtype = getattr(loaded_model, 'dtype', None)
+                if device is not None and dtype is not None:
+                    snapshot['runtime'] = {'device': str(device), 'dtype': str(dtype)}
+                provider = getattr(self.backend, 'provider_settings', None)
+                if isinstance(provider, dict):
+                    snapshot['provider_settings'] = {key: deepcopy(provider[key]) for key in
+                        ('base_url', 'timeout', 'models', 'generation_capabilities', 'api_key_env')
+                        if key in provider}
+                snapshot = json.dumps(snapshot, sort_keys=True)
+            result = super().set_parameters_atomically(normalized)
+            if result.successful and target != owner:
+                self._frozen_settings_json = snapshot or ''
+            return result
 
     def settings(self, alias):
         """Return a fresh namespace snapshot for one registered alias.
@@ -204,6 +301,43 @@ class InferenceServer(Node):
         values.update({field: self.get_parameter(f'models.{alias}.{field}').value
                        for field in (*LOADING_FIELDS, *GENERATION_FIELDS)})
         return values
+
+    def stage_settings(self, alias, stage, overrides=None):
+        """Resolve one stage's model settings against its shared model defaults.
+
+        Read the model's current base generation controls and the selected
+        stage's declared overrides. Sentinel values inherit the corresponding
+        base control, while an empty reasoning effort means no reasoning option.
+        Apply optional proposed overrides before resolving, then return a new
+        mapping without changing ROS parameters or loading another model.
+        """
+        if stage not in STAGES:
+            raise ValueError('Unknown cognitive inference stage')
+        values = self.settings(alias)
+        proposed = overrides or {}
+        for field, sentinel in STAGE_INHERIT.items():
+            value = proposed.get(field, self.get_parameter(f'models.{alias}.stages.{stage}.{field}').value)
+            if field == 'reasoning_effort':
+                values[field] = None if value == sentinel else value
+            elif value != sentinel:
+                values[field] = value
+        return values
+
+    def validate_stage_settings(self, alias, stage, overrides=None):
+        """Validate one stage's proposed overrides without changing the server.
+
+        Check the override types and inheritance sentinels first, then validate
+        the resolved generation controls and optional reasoning effort. Backend
+        capability restrictions are checked when the selected operation runs.
+        """
+        proposed = overrides or {}
+        for field, sentinel in STAGE_INHERIT.items():
+            value = proposed.get(field, self.get_parameter(f'models.{alias}.stages.{stage}.{field}').value)
+            if type(value) is not type(sentinel):
+                raise ValueError(f'{stage}.{field} has an invalid type')
+        values = self.stage_settings(alias, stage, proposed)
+        self.validate_settings(values)
+        validate_generation(dict(reasoning_effort=values['reasoning_effort']))
 
     def validate_settings(self, values):
         """Reject invalid typed controls without loading or changing a backend.
@@ -242,27 +376,68 @@ class InferenceServer(Node):
         Inspect each affected registered namespace after applying all proposed
         values to its snapshot. Direct active-model changes are rejected because
         only successful management may advertise readiness for a different model.
-        Loading edits do not mutate the live backend. Reject unknown parameters;
+        Loading edits do not mutate the live backend. A run ID freezes the active
+        model and all model settings after an idle, ready server is acquired.
+        Reject unknown parameters and changes that would invalidate the freeze;
         ordinary ROS use_sim_time remains available. Return an actionable reason
         instead of partially applying an invalid batch.
         """
         with self.lock:
             changed = {}
+            changed_stages = {}
             try:
+                frozen = self.get_parameter('experiment_run_id').value
+                transition = next((p.value for p in parameters if p.name == 'experiment_run_id'), frozen)
+                if type(transition) is not str:
+                    raise ValueError('experiment_run_id must be a string')
+                if frozen and transition not in ('', frozen):
+                    raise ValueError('An experiment already owns the inference server')
+                if transition != frozen:
+                    if self.busy:
+                        raise ValueError('Cannot change experiment ownership during an operation')
+                    if transition and (self.backend is None or self.state != 'ready'):
+                        raise ValueError('An experiment requires a ready model')
+                    if transition and any(self.settings(self.active_alias)[key] != self.loaded_settings[key]
+                                          for key in LOADING_FIELDS):
+                        raise ValueError('Reload staged model settings before starting an experiment')
+                    if any(p.name == 'active_model' or (p.name.startswith('models.') and
+                           (not transition or not any(p.name.startswith(f'models.{self.active_alias}.stages.{stage}.')
+                                                      for stage in STAGES))) for p in parameters):
+                        raise ValueError('Change model settings before acquiring or releasing an experiment')
                 for parameter in parameters:
+                    if parameter.name == 'experiment_run_id':
+                        continue
+                    if frozen and (parameter.name.startswith('models.') or parameter.name == 'active_model'):
+                        raise ValueError('Inference settings are frozen for an active experiment')
                     if parameter.name == 'active_model':
                         if not self.internal_parameter_update and parameter.value != self.active_alias:
                             raise ValueError('Use load_model or set_active_model to select a model')
                     elif parameter.name == 'use_sim_time':
                         continue
                     else:
-                        prefix, field = parameter.name.rsplit('.', 1)
-                        alias = prefix.removeprefix('models.')
-                        if prefix != 'models.' + alias or field not in (*LOADING_FIELDS, *GENERATION_FIELDS):
-                            raise ValueError('Unknown inference parameter')
-                        changed.setdefault(alias, self.settings(alias))[field] = parameter.value
+                        matched_stage = False
+                        for alias in self.catalogue:
+                            for stage in STAGES:
+                                prefix = f'models.{alias}.stages.{stage}.'
+                                if parameter.name.startswith(prefix):
+                                    field = parameter.name[len(prefix):]
+                                    if field not in STAGE_INHERIT:
+                                        raise ValueError('Unknown inference parameter')
+                                    changed_stages.setdefault((alias, stage), {})[field] = parameter.value
+                                    matched_stage = True
+                                    break
+                            if matched_stage:
+                                break
+                        if not matched_stage:
+                            prefix, field = parameter.name.rsplit('.', 1)
+                            alias = prefix.removeprefix('models.')
+                            if prefix != 'models.' + alias or field not in (*LOADING_FIELDS, *GENERATION_FIELDS):
+                                raise ValueError('Unknown inference parameter')
+                            changed.setdefault(alias, self.settings(alias))[field] = parameter.value
                 for values in changed.values():
                     self.validate_settings(values)
+                for (alias, stage), overrides in changed_stages.items():
+                    self.validate_stage_settings(alias, stage, overrides)
             except (ValueError, KeyError, TypeError) as error:
                 return SetParametersResult(successful=False, reason=str(error))
         return SetParametersResult(successful=True)
@@ -350,16 +525,26 @@ class InferenceServer(Node):
             self.change_state('error')
             raise
 
-    def reserve(self, goal):
+    def reserve(self, goal, *, management=False, inference=False):
         """Reserve the sole operation slot or promptly reject an overlapping goal.
 
         Keep status and parameter services responsive while exactly one management
-        or inference action owns backend access. The slot is released in execute
+        or inference action owns backend access. Reject model management while
+        an experiment owns the loaded settings. For an inference goal carrying a
+        run ID, require the same active experiment while holding the reservation
+        lock. Empty IDs retain standalone inference only when no run owns the
+        server. The slot is released in execute
         cleanup, including failure. No second goal is queued against stale model
         settings or allowed to unload weights used by an active generation.
         """
         with self.lock:
-            if self.busy:
+            owner = self.get_parameter('experiment_run_id').value
+            if self.busy or (management and owner):
+                return GoalResponse.REJECT
+            requested_run = goal.run_id if inference else ''
+            if inference and getattr(goal, 'stage', '') not in ('', *STAGES):
+                return GoalResponse.REJECT
+            if inference and requested_run != owner:
                 return GoalResponse.REJECT
             self.busy = True
             return GoalResponse.ACCEPT
@@ -401,67 +586,113 @@ class InferenceServer(Node):
                 self.busy = False
         return result
 
-    def infer(self, goal_handle, *, action_type, result_field):
+    def infer(self, goal_handle, *, action_type, result_field, chat=False):
         """Generate through the existing backend using one parameter snapshot.
 
         Require a ready backend, then capture generation controls and the immutable
         loaded identity under the state lock. Require a callable for the requested
         operation before calling the backend. Validate a structured request's schema
-        before passing it to the backend's constrained generation path. Decode images
+        before passing it to the backend's constrained generation path. Structured
+        image requests forward that schema to the existing vision backend. Decode images
         with the same converter used by legacy Sense. Never synthesize feedback.
+        Resolve a named cognitive stage against that model's frozen overrides;
+        an empty stage uses the existing standalone generation settings.
+        For chat, validate the role-preserving message list and allow an empty
+        schema for plain responses. Preserve message roles in supported backends.
         Existing blocking backends reject cancellation; successful completion uses
         the native success state and failures abort with a logged diagnostic because
         the agreed minimal inference results contain no error field. Keep weights
         loaded after a request failure and release the exclusive slot in all cases.
+        Request validation, unsupported operations and invalid returned output
+        preserve the backend's previous readiness. An exception during the backend
+        call marks a genuine generation failure as error. A bad request must not
+        reset an already failed backend to ready.
         """
         result = action_type.Result()
+        recovery_state = 'error'
+        backend_call_active = False
         try:
             with self.lock:
                 if self.backend is None:
                     raise RuntimeError('No active model; use load_model first')
-                values = self.settings(self.active_alias)
+                recovery_state = self.state
+                request = goal_handle.request
+                stage = getattr(request, 'stage', '')
+                values = self.stage_settings(self.active_alias, stage) if stage else self.settings(self.active_alias)
                 backend_kind = self.loaded_settings['backend']
-            request = goal_handle.request
-            if not request.prompt.strip():
-                raise ValueError('prompt must be nonempty')
-            if result_field != 'description' and not callable(getattr(self.backend, 'generate', None)):
+            if chat:
+                prompt = json.loads(request.messages_json)
+                if (not isinstance(prompt, list) or not prompt or any(
+                        not isinstance(message, dict) or set(message) != {'role', 'content'}
+                        or message['role'] not in ('system', 'user', 'assistant')
+                        or not isinstance(message['content'], str)
+                        for message in prompt)):
+                    raise ValueError('messages_json must be a nonempty list of role and content strings')
+                if backend_kind not in ('transformers', 'api'):
+                    raise ValueError('Backend cannot preserve chat roles')
+            else:
+                prompt = request.prompt
+                if not prompt.strip():
+                    raise ValueError('prompt must be nonempty')
+            is_image = action_type in (DescribeImage, DescribeStructuredImage)
+            if not is_image and not callable(getattr(self.backend, 'generate', None)):
                 raise ValueError('The active model does not support text generation')
-            schema = json.loads(request.json_schema) if result_field == 'json_output' else None
-            if result_field == 'json_output':
+            schema = (json.loads(request.json_schema) if result_field == 'json_output'
+                      and (not chat or request.json_schema.strip()) else None)
+            if result_field == 'json_output' and (not chat or request.json_schema.strip()):
                 validate_generation(dict(response_format='json_schema', output_schema=schema))
                 if backend_kind not in ('transformers', 'api'):
                     raise ValueError('Backend cannot enforce the requested schema')
             options = dict(max_new_tokens=values['max_new_tokens'], temperature=values['temperature'])
+            effort = values.get('reasoning_effort')
+            if effort is not None:
+                if backend_kind != 'api':
+                    raise ValueError('Backend does not support reasoning_effort')
+                options['reasoning_effort'] = effort
             if values['seed'] != -1:
                 options['seed'] = values['seed']
             if schema is not None:
                 options.update(schema=schema, response_format='json_schema')
             self.change_state('generating')
-            if result_field == 'description':
+            if is_image:
                 if not callable(getattr(self.backend, 'describe', None)) or (
                         backend_kind == 'api' and getattr(self.backend, 'modality', '') != 'vision'):
                     raise ValueError('The active model does not support images')
                 if values['top_p'] != 1.0:
                     raise ValueError('The existing image backend does not expose top_p')
                 from smpa_llm.inference.images import image_to_pil
-                output = self.backend.describe(image_to_pil(request.image), request.prompt, **options)
+                pixels = image_to_pil(request.image)
+                backend_call_active = True
+                output = self.backend.describe(pixels, request.prompt, **options)
+            elif chat and backend_kind == 'api':
+                backend_call_active = True
+                output = self.backend.generate_conversation(prompt,
+                    max_new_tokens=values['max_new_tokens'], schema=schema,
+                    temperature=values['temperature'], top_p=values['top_p'],
+                    **({'reasoning_effort': effort} if effort is not None else {}),
+                    **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
             elif values['top_p'] != 1.0:
                 if backend_kind == 'transformers':
                     controls = dict(temperature=values['temperature'], top_p=values['top_p'],
                                     do_sample=values['temperature'] > 0)
                     if values['seed'] != -1:
                         controls['seed'] = values['seed']
-                    output = self.backend.generate(request.prompt, **options,
+                    backend_call_active = True
+                    output = self.backend.generate(prompt, **options,
                                                    _conversation_settings=controls)
                 elif backend_kind == 'api':
-                    output = self.backend.generate_conversation(request.prompt,
+                    backend_call_active = True
+                    output = self.backend.generate_conversation(prompt,
                         max_new_tokens=values['max_new_tokens'], schema=schema,
                         temperature=values['temperature'], top_p=values['top_p'],
+                        **({'reasoning_effort': effort} if effort is not None else {}),
                         **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
                 else:
                     raise ValueError('Backend does not expose top_p')
             else:
-                output = self.backend.generate(request.prompt, **options)
+                backend_call_active = True
+                output = self.backend.generate(prompt, **options)
+            backend_call_active = False
             output = validate_output(output, 'json_schema' if schema is not None else 'text', schema)
             setattr(result, result_field, output)
             goal_handle.succeed()
@@ -469,7 +700,7 @@ class InferenceServer(Node):
         except Exception as error:
             self.get_logger().error(str(error))
             goal_handle.abort()
-            self.change_state('error')
+            self.change_state('error' if backend_call_active else recovery_state)
         finally:
             with self.lock:
                 self.busy = False
@@ -515,10 +746,18 @@ class InferenceServer(Node):
     def destroy_node(self):
         """Release idle model resources after the executor has drained callbacks.
 
-        Callers must stop and join the executor before destruction. Then unload
-        the sole backend, destroy action servers and let ROS release node handles.
-        This never unloads weights concurrently with a running inference callback.
+        Callers must stop and join the executor before destruction. Release an
+        existing experiment freeze using its owner-checked command, then unload
+        the sole backend, destroy action servers and release ROS node handles.
+        Reject cleanup if an operation is still active rather than unloading its
+        backend. Restarting the server always starts without an experiment owner.
         """
+        from rclpy.parameter import Parameter
+        owner = self.get_parameter('experiment_run_id').value
+        if owner:
+            result = self.set_parameters_atomically([Parameter('experiment_run_id', value='release:' + owner)])
+            if not result.successful:
+                raise RuntimeError(f'Cannot release experiment during shutdown: {result.reason}')
         if self.backend is not None:
             self.release_model()
         for action in self.actions:
@@ -532,7 +771,7 @@ def main(args=None):
     Initialize ROS, construct one server and use multiple executor threads so
     discovery, parameters and status remain responsive during blocking actions.
     On interruption, drain active work before releasing the backend and context.
-    Legacy Runner execution does not import or require this executable.
+    Cognitive nodes use this server through its independent ROS endpoints.
     """
     from rclpy.signals import SignalHandlerOptions
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
