@@ -178,3 +178,102 @@ def test_explicit_initial_selection_and_overrides(server):
         assert node.settings('llama3_8b')['temperature'] == 0.0
     finally:
         node.destroy_node()
+
+
+def test_generation_schema_and_image_contracts(server):
+    """Exercise minimal requests against backend methods that record actual controls.
+
+    Reuse one loaded fixture for plain text, constrained JSON and image inference.
+    Require schema forwarding, output validation, original RGB pixels and no fake
+    streaming. Invalid schemas, unsupported images and malformed generated JSON
+    must abort rather than return successful unconstrained output.
+    """
+    from smpa_ros_interfaces.action import GenerateText, GenerateStructured, DescribeImage
+    from sensor_msgs.msg import Image
+    calls = []
+
+    def generate(prompt, **options):
+        """Record text controls and return fixture text or schema-compliant JSON.
+
+        The adapter must pass the schema to this callable instead of performing
+        an unconstrained call and merely validating after completion.
+        """
+        calls.append((prompt, options))
+        return '{"answer": "yes"}' if 'schema' in options else 'fixture answer'
+
+    def describe(image, prompt, **options):
+        """Require preserved image pixels and record delegated vision controls.
+
+        Return a fixture description without loading a second model instance.
+        """
+        assert image.getpixel((0, 0)) == (255, 0, 0)
+        calls.append((prompt, options))
+        return 'red pixel'
+
+    server.replace_model('qwen3_4b')
+    server.backend.generate = generate
+    server.backend.describe = describe
+    goal = FakeGoal(prompt='hello')
+    assert server.reserve(None) == GoalResponse.ACCEPT
+    assert server.infer(goal, action_type=GenerateText, result_field='text').text == 'fixture answer'
+    assert goal.outcome == 'succeeded' and not goal.feedback
+    schema = '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}'
+    goal = FakeGoal(prompt='answer', json_schema=schema)
+    assert server.infer(goal, action_type=GenerateStructured, result_field='json_output').json_output
+    assert calls[-1][1]['schema']['required'] == ['answer']
+    image = Image(width=1, height=1, encoding='rgb8', step=3, data=[255, 0, 0])
+    goal = FakeGoal(prompt='describe', image=image)
+    assert server.infer(goal, action_type=DescribeImage, result_field='description').description == 'red pixel'
+    goal = FakeGoal(prompt='bad', json_schema='{"type":"made_up"}')
+    before = len(calls)
+    server.infer(goal, action_type=GenerateStructured, result_field='json_output')
+    assert goal.outcome == 'aborted' and len(calls) == before
+    del server.backend.describe
+    goal = FakeGoal(prompt='describe', image=image)
+    server.infer(goal, action_type=DescribeImage, result_field='description')
+    assert goal.outcome == 'aborted'
+    assert len(server.load_calls) == 1
+
+
+def test_request_snapshot_and_busy_switch_safety(server):
+    """Update sampling while generation is blocked without changing that request.
+
+    An actual worker thread holds backend access. Verify status remains readable,
+    loading edits remain staged, switching is rejected and the current request
+    retains its original controls. A later request can use the new values.
+    """
+    from smpa_ros_interfaces.action import GenerateText
+    entered, finish = Event(), Event()
+    calls = []
+
+    def generate(prompt, **settings):
+        """Record the captured request and wait for the test to release inference.
+
+        Do not return until concurrent parameter/status checks have completed.
+        This models a blocking backend without permitting simultaneous loading.
+        """
+        calls.append(settings)
+        entered.set()
+        assert finish.wait(5)
+        return 'done'
+
+    server.replace_model('qwen3_4b')
+    server.backend.generate = generate
+    goal = FakeGoal(prompt='snapshot')
+    server.reserve(None)
+    worker = Thread(target=server.infer, args=(goal,), kwargs={'action_type': GenerateText, 'result_field': 'text'})
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert server.get_status(GetModelStatus.Request(), GetModelStatus.Response()).state == 'generating'
+        assert server.reserve(None) == GoalResponse.REJECT
+        assert server.set_parameters_atomically([
+            Parameter('models.qwen3_4b.temperature', value=0.8),
+            Parameter('models.qwen3_4b.model_id', value='staged')]).successful
+        assert calls[0]['temperature'] == 0.0
+        assert server.loaded_settings['model_id'] == 'fixture/qwen'
+    finally:
+        finish.set()
+        worker.join(5)
+    assert not worker.is_alive() and goal.outcome == 'succeeded'
+    assert len(server.load_calls) == 1

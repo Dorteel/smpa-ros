@@ -25,10 +25,11 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import yaml
 
-from smpa_ros_interfaces.action import LoadModel, SetActiveModel, UnloadModel
+from smpa_ros_interfaces.action import (DescribeImage, GenerateStructured, GenerateText,
+                                        LoadModel, SetActiveModel, UnloadModel)
 from smpa_ros_interfaces.msg import InferenceStatus
 from smpa_ros_interfaces.srv import GetModelStatus, ListModels
-from smpa_llm.inference.backends.base import validate_generation
+from smpa_llm.inference.backends.base import validate_generation, validate_output
 
 LOADING_FIELDS = ('model_id', 'path', 'backend', 'device', 'dtype', 'enable_thinking')
 GENERATION_FIELDS = ('max_new_tokens', 'temperature', 'top_p', 'seed')
@@ -144,6 +145,13 @@ class InferenceServer(Node):
                                   (SetActiveModel, 'set_active_model')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
                 partial(self.manage, action_type=action_type, operation=name),
+                goal_callback=self.reserve, cancel_callback=self.cancel,
+                callback_group=self.group))
+        for action_type, name, field in [(GenerateText, 'generate', 'text'),
+                (GenerateStructured, 'generate_structured', 'json_output'),
+                (DescribeImage, 'describe_image', 'description')]:
+            self.actions.append(ActionServer(self, action_type, 'llm/' + name,
+                partial(self.infer, action_type=action_type, result_field=field),
                 goal_callback=self.reserve, cancel_callback=self.cancel,
                 callback_group=self.group))
         self.change_state('unloaded')
@@ -385,6 +393,77 @@ class InferenceServer(Node):
             result.error_message = str(error)
             self.get_logger().error(str(error))
             goal_handle.abort()
+        finally:
+            with self.lock:
+                self.busy = False
+        return result
+
+    def infer(self, goal_handle, *, action_type, result_field):
+        """Generate through the existing backend using one parameter snapshot.
+
+        Require a ready backend, then capture generation controls and the immutable
+        loaded identity under the state lock. Validate a structured request's schema
+        before passing it to the backend's constrained generation path. Decode images
+        with the same converter used by legacy Sense. Never synthesize feedback.
+        Existing blocking backends reject cancellation; successful completion uses
+        the native success state and failures abort with a logged diagnostic because
+        the agreed minimal inference results contain no error field. Keep weights
+        loaded after a request failure and release the exclusive slot in all cases.
+        """
+        result = action_type.Result()
+        try:
+            with self.lock:
+                if self.backend is None:
+                    raise RuntimeError('No active model; use load_model first')
+                values = self.settings(self.active_alias)
+                backend_kind = self.loaded_settings['backend']
+            request = goal_handle.request
+            if not request.prompt.strip():
+                raise ValueError('prompt must be nonempty')
+            schema = json.loads(request.json_schema) if result_field == 'json_output' else None
+            if result_field == 'json_output':
+                validate_generation(dict(response_format='json_schema', output_schema=schema))
+                if backend_kind not in ('transformers', 'api'):
+                    raise ValueError('Backend cannot enforce the requested schema')
+            options = dict(max_new_tokens=values['max_new_tokens'], temperature=values['temperature'])
+            if values['seed'] != -1:
+                options['seed'] = values['seed']
+            if schema is not None:
+                options.update(schema=schema, response_format='json_schema')
+            self.change_state('generating')
+            if result_field == 'description':
+                if not callable(getattr(self.backend, 'describe', None)) or (
+                        backend_kind == 'api' and getattr(self.backend, 'modality', '') != 'vision'):
+                    raise ValueError('The active model does not support images')
+                if values['top_p'] != 1.0:
+                    raise ValueError('The existing image backend does not expose top_p')
+                from smpa_llm.inference.images import image_to_pil
+                output = self.backend.describe(image_to_pil(request.image), request.prompt, **options)
+            elif values['top_p'] != 1.0:
+                if backend_kind == 'transformers':
+                    controls = dict(temperature=values['temperature'], top_p=values['top_p'],
+                                    do_sample=values['temperature'] > 0)
+                    if values['seed'] != -1:
+                        controls['seed'] = values['seed']
+                    output = self.backend.generate(request.prompt, **options,
+                                                   _conversation_settings=controls)
+                elif backend_kind == 'api':
+                    output = self.backend.generate_conversation(request.prompt,
+                        max_new_tokens=values['max_new_tokens'], schema=schema,
+                        temperature=values['temperature'], top_p=values['top_p'],
+                        **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
+                else:
+                    raise ValueError('Backend does not expose top_p')
+            else:
+                output = self.backend.generate(request.prompt, **options)
+            output = validate_output(output, 'json_schema' if schema is not None else 'text', schema)
+            setattr(result, result_field, output)
+            goal_handle.succeed()
+            self.change_state('ready')
+        except Exception as error:
+            self.get_logger().error(str(error))
+            goal_handle.abort()
+            self.change_state('error')
         finally:
             with self.lock:
                 self.busy = False
