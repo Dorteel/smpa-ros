@@ -282,12 +282,26 @@ class MemoryManager:
             self._refinement_snapshot = deepcopy(state)
 
     def begin_cycle(self):
+        """Start the next cycle or retry this manager's unfinished cycle.
+
+        The run must be active and cannot already have an open cycle. Its next
+        cycle is one beyond the durable completed count. Create that directory
+        when advancing normally; if this manager already opened the same cycle
+        and it failed, retain its existing records and reuse that directory.
+        Shared invocation allocation chooses fresh record names for the retry.
+        Reject inconsistent cycle state rather than replacing persisted evidence.
+        """
         if self.metadata['status'] != 'running' or self.in_cycle:
             raise RuntimeError('A cycle requires an active run and cannot be nested')
-        self.cycle += 1
+        next_cycle = self.metadata['completed_cycles'] + 1
+        destination = self.directory / 'state' / f'cycle_{next_cycle:06d}'
+        if self.cycle == next_cycle - 1:
+            destination.mkdir()
+        elif self.cycle != next_cycle or not destination.is_dir():
+            raise RuntimeError('Run cycle state is inconsistent with completed cycles')
+        self.cycle = next_cycle
         self.counts = {}
         self.in_cycle = True
-        (self.directory / 'state' / f'cycle_{self.cycle:06d}').mkdir()
 
     def record_path(self, name):
         return Path('state') / f'cycle_{self.cycle:06d}' / name

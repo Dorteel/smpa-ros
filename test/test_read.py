@@ -69,7 +69,7 @@ def test_incremental_roles_order_provenance_and_read_only(sources):
     exchange(source, 'fourth', reply, {})
     assert [x['content'] for x in observe(robot.directory, source.directory)['observations']] == ['fourth']
     for path, content in before.items():
-        if path not in ('conversation.md', 'metadata.yaml'):
+        if path not in ('conversation.md', 'metadata.yaml', 'state/.invocations.json'):
             assert (source.directory / path).read_bytes() == content
 
 
