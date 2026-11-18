@@ -82,7 +82,8 @@ class PlanNode(Node):
         Require the inference server to match this run's saved snapshot. Check that the
         selected server's active model has the same generation
         controls as the frozen planning request; otherwise fail instead of
-        silently recording settings that were not used. Send the actual schema
+        silently recording settings that were not used. The server also applies
+        its recorded top-p setting, which the stage configuration does not specify. Send the actual schema
         and prompt through the existing structured-generation action. Return its
         text only on a successful ROS action result.
         """
@@ -111,10 +112,10 @@ class PlanNode(Node):
         if not isinstance(controls, dict):
             raise RuntimeError('Inference snapshot has no frozen Plan settings')
         actual = tuple(controls.get(field) for field in
-                       ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
+                       ('max_new_tokens', 'temperature', 'seed', 'reasoning_effort'))
         expected = (settings.get('max_new_tokens'), settings.get('temperature'),
                     settings.get('seed') if settings.get('seed') is not None else -1,
-                    1.0, settings.get('reasoning_effort'))
+                    settings.get('reasoning_effort'))
         if actual != expected:
             raise ValueError(f'Inference parameters do not match frozen Plan settings: expected {expected}, got {actual}')
         if not self.client.wait_for_server(timeout_sec=timeout):

@@ -132,7 +132,7 @@ def test_plan_uses_its_saved_stage_settings(plan_node_class, tmp_path, monkeypat
     from action_msgs.msg import GoalStatus
     memory = MemoryManager(tmp_path, goal='Find cup')
     memory.begin_cycle()
-    controls = dict(max_new_tokens=83, temperature=0.3, seed=-1, top_p=1.0, reasoning_effort='high')
+    controls = dict(max_new_tokens=83, temperature=0.3, seed=-1, top_p=0.9, reasoning_effort='high')
     snapshot = dict(run_id=memory.metadata['run_id'], active_model='fixture',
                     stages={'plan': controls, 'model': dict(controls, max_new_tokens=41)})
     memory.metadata['inference'] = snapshot

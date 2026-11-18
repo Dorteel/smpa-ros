@@ -82,8 +82,9 @@ class ModelNode(Node):
         """Send the existing Model prompt to the shared inference action.
 
         Compare the server's frozen Model controls with the run configuration.
-        Select text or
-        schema-constrained generation as requested, then return successful output.
+        The server also applies its recorded top-p setting, which the stage
+        configuration does not specify. Select text or schema-constrained
+        generation as requested, then return successful output.
         Require the server freeze and saved snapshot to match this run before
         comparing its stage settings and sending the request.
         """
@@ -109,10 +110,10 @@ class ModelNode(Node):
         if not isinstance(controls, dict):
             raise RuntimeError('Inference snapshot has no frozen Model settings')
         actual = tuple(controls.get(field) for field in
-                       ('max_new_tokens', 'temperature', 'seed', 'top_p', 'reasoning_effort'))
+                       ('max_new_tokens', 'temperature', 'seed', 'reasoning_effort'))
         expected = (settings.get('max_new_tokens'), settings.get('temperature'),
                     settings.get('seed') if settings.get('seed') is not None else -1,
-                    1.0, settings.get('reasoning_effort'))
+                    settings.get('reasoning_effort'))
         if actual != expected:
             raise ValueError(f'Inference parameters do not match frozen Model settings: expected {expected}, got {actual}')
         format_name = settings.get('response_format')
