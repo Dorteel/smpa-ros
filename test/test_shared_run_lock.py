@@ -95,3 +95,149 @@ def test_locked_run_serializes_a_separate_process(tmp_path):
     stdout, stderr = child.communicate(timeout=2)
     assert child.returncode == 0, stderr
     assert stdout.strip() == 'acquired'
+
+
+def test_metadata_writers_merge_independent_fields_and_detect_conflicts(tmp_path):
+    """Preserve independent edits from stale managers and reject conflicting edits.
+
+    Give two manager instances the same previously read metadata snapshot. Write
+    distinct nested fields in turn and check that both survive. Then attempt two
+    different updates to the same field and require the second writer to fail
+    without replacing the first writer's durable value.
+    """
+    from copy import deepcopy
+    import yaml
+
+    first = MemoryManager(tmp_path, goal='Observe the scene')
+    second = MemoryManager.__new__(MemoryManager)
+    second.directory = first.directory
+    second.metadata = deepcopy(first.metadata)
+    second._metadata_snapshot = deepcopy(first.metadata)
+    first.metadata['configuration']['first'] = 'one'
+    second.metadata['configuration']['second'] = 'two'
+    first.write_metadata()
+    second.write_metadata()
+    stored = yaml.safe_load((first.directory / 'metadata.yaml').read_text())
+    assert stored['configuration'] == {'first': 'one', 'second': 'two'}
+    first.metadata['status'] = 'failed'
+    second.metadata['status'] = 'completed'
+    first.write_metadata()
+    with pytest.raises(RuntimeError, match='Concurrent run metadata'):
+        second.write_metadata()
+    stored = yaml.safe_load((first.directory / 'metadata.yaml').read_text())
+    assert stored['status'] == 'failed'
+    assert stored['configuration'] == {'first': 'one', 'second': 'two'}
+
+
+def test_metadata_writers_in_separate_processes_preserve_both_updates(tmp_path):
+    """Combine separate process updates derived from the same old metadata.
+
+    Each child loads the same snapshot and prepares a distinct configuration
+    field. Release both writers together, then verify neither update was lost
+    and that the metadata remains valid YAML with the original run identity.
+    """
+    import subprocess
+    import sys
+    import time
+    import yaml
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    start = tmp_path / 'start'
+    code = (
+        'from pathlib import Path\n'
+        'from copy import deepcopy\n'
+        'from time import monotonic, sleep\n'
+        'import sys, yaml\n'
+        'from memory import MemoryManager\n'
+        'directory, key, start, ready = map(Path, sys.argv[1:])\n'
+        'metadata = yaml.safe_load((directory / "metadata.yaml").read_text())\n'
+        'manager = MemoryManager.__new__(MemoryManager)\n'
+        'manager.directory, manager.metadata = directory, metadata\n'
+        'manager._metadata_snapshot = deepcopy(metadata)\n'
+        'manager.metadata["configuration"][key.name] = key.name\n'
+        'ready.touch()\n'
+        'deadline = monotonic() + 5\n'
+        'while not start.exists() and monotonic() < deadline: sleep(0.01)\n'
+        'assert start.exists()\n'
+        'manager.write_metadata()\n'
+    )
+    children = [subprocess.Popen([sys.executable, '-c', code, str(memory.directory),
+                                  name, str(start), str(tmp_path / (name + '.ready'))],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for name in ('first', 'second')]
+    try:
+        deadline = time.monotonic() + 5
+        while not all((tmp_path / (name + '.ready')).exists() for name in ('first', 'second')):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        start.touch()
+        for child in children:
+            _, error = child.communicate(timeout=5)
+            assert child.returncode == 0, error
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=2)
+    stored = yaml.safe_load((memory.directory / 'metadata.yaml').read_text())
+    assert stored['run_id'] == memory.metadata['run_id']
+    assert stored['configuration'] == {'first': 'first', 'second': 'second'}
+
+
+def test_dead_process_does_not_keep_run_locked(tmp_path):
+    """Recover the run lock after a process dies while holding it.
+
+    Wait until a child has acquired the run lock, terminate that child, and then
+    acquire the same lock in the parent. Advisory locks must not leave a stale
+    lock that prevents later writers from accessing the original run.
+    """
+    import subprocess
+    import sys
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    code = ('import sys, time\nfrom memory import locked_run\n'
+            'with locked_run(sys.argv[1], sys.argv[2]):\n'
+            '    print("locked", flush=True)\n    time.sleep(30)\n')
+    child = subprocess.Popen([sys.executable, '-c', code, str(tmp_path), memory.metadata['run_id']],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'locked'
+    finally:
+        child.kill()
+        child.wait(timeout=2)
+    with locked_run(tmp_path, memory.metadata['run_id']) as directory:
+        assert directory == memory.directory
+
+
+def test_nested_metadata_write_uses_outer_run_lock(tmp_path):
+    """Allow a run transaction to publish metadata without reacquiring its lock.
+
+    Hold the public lock while the same thread updates metadata. The update must
+    complete within the outer transaction and be visible to a later acquisition.
+    """
+    import yaml
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    with locked_run(tmp_path, memory.metadata['run_id']):
+        memory.metadata['configuration']['owner'] = 'model'
+        memory.write_metadata()
+    with locked_run(tmp_path, memory.metadata['run_id']) as directory:
+        assert yaml.safe_load((directory / 'metadata.yaml').read_text())['configuration']['owner'] == 'model'
+
+
+def test_metadata_updates_work_for_an_assigned_run_outside_runs_directory(tmp_path):
+    """Preserve the existing ability to update an assigned run at another path.
+
+    Move a newly created run to a directory without a runs parent, as an existing
+    assigned conversation may be stored elsewhere. A metadata update must still
+    use its actual directory and retain its identity and historical files.
+    """
+    import yaml
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    memory.directory = memory.directory.rename(tmp_path / 'assigned-run')
+    memory.metadata['configuration']['assigned'] = True
+    memory.write_metadata()
+    stored = yaml.safe_load((memory.directory / 'metadata.yaml').read_text())
+    assert stored['run_id'] == memory.metadata['run_id']
+    assert stored['configuration']['assigned'] is True

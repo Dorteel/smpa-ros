@@ -1,12 +1,13 @@
 """Run directories, assignment validation, and lifecycle metadata."""
 from datetime import datetime
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from urllib.parse import urlsplit
 import os
 from pathlib import Path
 import re
 from tempfile import NamedTemporaryFile
+from threading import local
 from uuid import uuid4
 
 import yaml
@@ -107,6 +108,7 @@ class MemoryManager:
             raise ValueError('Only conversational runs can be resumed here')
         instance = cls.__new__(cls)
         instance.directory, instance.metadata = path, metadata
+        instance._metadata_snapshot = deepcopy(metadata)
         cycles = sorted((path / 'state').glob('cycle_*'))
         instance.cycle = max((int(item.name.split('_')[1]) for item in cycles), default=0)
         instance.in_cycle = False
@@ -139,31 +141,83 @@ class MemoryManager:
         return path, identity
 
     def write_metadata(self):
-        # Runner supplies measured execution details; persistence stays here.
-        runtime = self.metadata.get('configuration', {}).get('runtime')
-        if runtime is not None:
-            parameters = self.directory / 'parameters.yaml'
-            frozen = yaml.safe_load(parameters.read_text())
-            if frozen.get('_run', {}).get('runtime') != runtime:
-                frozen['_run']['runtime'] = deepcopy(runtime)
-                with NamedTemporaryFile(mode='w', dir=self.directory, prefix='.parameters-', delete=False) as output:
-                    pending = Path(output.name)
-                    try:
-                        yaml.safe_dump(frozen, output, sort_keys=False)
-                        output.flush()
-                        os.fsync(output.fileno())
-                        pending.replace(parameters)
-                    finally:
-                        pending.unlink(missing_ok=True)
-        with NamedTemporaryFile(mode='w', dir=self.directory, prefix='.metadata-', delete=False) as output:
-            pending = Path(output.name)
-            try:
-                yaml.safe_dump(self.metadata, output, sort_keys=False)
-                output.flush()
-                os.fsync(output.fileno())
-                pending.replace(self.directory / 'metadata.yaml')
-            finally:
-                pending.unlink(missing_ok=True)
+        """Publish this manager's metadata changes without losing another writer's.
+
+        A new run is private until its first metadata file is published. For an
+        existing run, hold its cooperative lock while reading the latest file and
+        comparing it with this manager's last successful snapshot. Combine edits
+        to different dictionary keys, including nested keys. If two writers change
+        the same value differently, reject the stale write and retain the existing
+        file; callers can reload and decide how to proceed.
+
+        Preserve atomic replacement and the existing runtime entry in the frozen
+        parameters. Once the metadata file is durable, refresh this manager's
+        snapshot and its visible dictionary to include other completed edits.
+        """
+        missing = object()
+
+        def combine(previous, desired, current):
+            """Merge independent changes and reject incompatible concurrent edits.
+
+            Recurse through dictionaries to preserve changes to separate fields.
+            Treat lists and other values as indivisible. A deleted field remains
+            deleted only if another writer did not change it since the snapshot.
+            """
+            if previous == desired:
+                return current
+            if current == previous or desired == current:
+                return desired
+            if all(isinstance(value, dict) for value in (previous, desired, current)):
+                merged = dict(current)
+                for key in set(previous) | set(desired):
+                    value = combine(previous.get(key, missing), desired.get(key, missing),
+                                    current.get(key, missing))
+                    if value is missing:
+                        merged.pop(key, None)
+                    else:
+                        merged[key] = value
+                return merged
+            raise RuntimeError('Concurrent run metadata update conflicts with this write')
+
+        destination = self.directory / 'metadata.yaml'
+        lock = (locked_assigned_run(self.directory, self.metadata['run_id'])
+                if destination.exists() else nullcontext())
+        with lock:
+            if destination.exists():
+                current = yaml.safe_load(destination.read_text())
+                if not isinstance(current, dict) or current.get('run_id') != self.metadata['run_id']:
+                    raise ValueError('Run metadata identity changed during update')
+                previous = getattr(self, '_metadata_snapshot', current)
+                merged = deepcopy(combine(previous, self.metadata, current))
+            else:
+                merged = deepcopy(self.metadata)
+            runtime = merged.get('configuration', {}).get('runtime')
+            if runtime is not None:
+                parameters = self.directory / 'parameters.yaml'
+                frozen = yaml.safe_load(parameters.read_text())
+                if frozen.get('_run', {}).get('runtime') != runtime:
+                    frozen['_run']['runtime'] = deepcopy(runtime)
+                    with NamedTemporaryFile(mode='w', dir=self.directory, prefix='.parameters-', delete=False) as output:
+                        pending = Path(output.name)
+                        try:
+                            yaml.safe_dump(frozen, output, sort_keys=False)
+                            output.flush()
+                            os.fsync(output.fileno())
+                            pending.replace(parameters)
+                        finally:
+                            pending.unlink(missing_ok=True)
+            with NamedTemporaryFile(mode='w', dir=self.directory, prefix='.metadata-', delete=False) as output:
+                pending = Path(output.name)
+                try:
+                    yaml.safe_dump(merged, output, sort_keys=False)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    pending.replace(destination)
+                finally:
+                    pending.unlink(missing_ok=True)
+            self.metadata.clear()
+            self.metadata.update(deepcopy(merged))
+            self._metadata_snapshot = deepcopy(merged)
 
     def write_refinement(self, state):
         """Persist the current finite question queue and its answer provenance."""
@@ -215,6 +269,9 @@ class MemoryManager:
             self.write_metadata()
 
 
+_held_run_locks = local()
+
+
 @contextmanager
 def locked_run(root, run_id):
     """Resolve one run identity and hold its cooperative filesystem write lock.
@@ -230,10 +287,11 @@ def locked_run(root, run_id):
     the caller reads or updates its records. Release the lock and close its file
     descriptor even if the caller raises. All writers that share mutable files
     must use this same lock; atomic replacement alone does not serialize them.
-    The lock does not create a run, resume an experiment, or change metadata.
+    Reentering the same lock on the same thread reuses its outer acquisition;
+    other threads and processes must wait. The lock does not create a run,
+    resume an experiment, or change metadata.
     """
     from uuid import UUID
-    import fcntl
 
     try:
         identity = str(UUID(run_id))
@@ -247,11 +305,40 @@ def locked_run(root, run_id):
     if len(matches) != 1:
         raise ValueError('run_id must identify exactly one existing run')
     directory, _ = MemoryManager.assigned_run(str(matches[0].resolve()), identity)
+    with locked_assigned_run(directory, identity):
+        yield directory
+
+
+@contextmanager
+def locked_assigned_run(directory, run_id):
+    """Lock an already assigned run without changing where it is stored.
+
+    Validate the absolute directory and its run identity using the existing
+    assignment contract. Acquire its advisory lock, then validate it again so
+    waiting writers cannot proceed using a mismatched run. The same thread may
+    enter the lock again; other threads and processes wait for the outer context.
+    Release the descriptor on exit, including when validation or a caller fails.
+    """
+    import fcntl
+
+    directory, identity = MemoryManager.assigned_run(str(directory), run_id)
+    directory = directory.resolve()
+    held = getattr(_held_run_locks, 'directories', None)
+    if held is None:
+        held = _held_run_locks.directories = set()
+    if directory in held:
+        yield directory
+        return
     descriptor = os.open(directory / '.run.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        acquired = True
+        held.add(directory)
         MemoryManager.assigned_run(str(directory), identity)
         yield directory
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        if acquired:
+            held.remove(directory)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
