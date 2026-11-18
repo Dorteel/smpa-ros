@@ -103,3 +103,19 @@ def test_plan_goal_capability_selection(plan_node_class):
     assert plan_node_class.accept_goal(node, SimpleNamespace(capability='')) == GoalResponse.ACCEPT
     assert plan_node_class.accept_goal(node, SimpleNamespace(capability='plan')) == GoalResponse.ACCEPT
     assert plan_node_class.accept_goal(node, SimpleNamespace(capability='sense')) == GoalResponse.REJECT
+
+
+def test_plan_requires_matching_inference_freeze(plan_node_class):
+    """Reject an inference server frozen for a different experiment.
+
+    Supply fake parameter responses and deliberately avoid providing an action
+    client. The real generation method must fail before it sends any inference
+    goal, even if the other server settings could otherwise match.
+    """
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True,
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value='other-run'),
+                                                               SimpleNamespace(string_value='qwen3_4b')]))
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0), parameters=parameters,
+                           wait=lambda future, timeout, operation: future)
+    with pytest.raises(RuntimeError, match='not frozen for this experiment'):
+        plan_node_class.generate(node, 'prompt', run_id='run-a', response_format='json_schema', schema={})

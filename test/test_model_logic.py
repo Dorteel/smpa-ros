@@ -86,3 +86,18 @@ def test_model_failure_and_capability(model_node_class, tmp_path):
     handle.abort.assert_called_once()
     record = json.loads((memory.directory / 'state/cycle_000001/model.json').read_text())
     assert record['status'] == 'failed' and 'inference unavailable' in record['error']
+
+
+def test_model_requires_matching_inference_freeze(model_node_class):
+    """Reject a shared inference server owned by another experiment.
+
+    A fake parameter response identifies the other run. The Model adapter must
+    fail before it can send a generation goal or claim matching provenance.
+    """
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True,
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value='other-run'),
+                                                               SimpleNamespace(string_value='qwen3_4b')]))
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0), parameters=parameters,
+                           wait=lambda future, timeout, operation: future)
+    with pytest.raises(RuntimeError, match='not frozen for this experiment'):
+        model_node_class.generate(node, 'prompt', run_id='run-a', response_format='text')

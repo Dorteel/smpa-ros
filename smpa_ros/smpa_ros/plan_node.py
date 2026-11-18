@@ -75,10 +75,11 @@ class PlanNode(Node):
             raise TimeoutError(f'Timed out waiting for {operation}')
         return future.result()
 
-    def generate(self, prompt, **settings):
+    def generate(self, prompt, *, run_id, **settings):
         """Request schema-constrained generation from the configured LLM node.
 
-        Check that the selected server's active model has the same generation
+        Require the inference server to be frozen for this run. Check that the
+        selected server's active model has the same generation
         controls as the frozen planning request; otherwise fail instead of
         silently recording settings that were not used. Send the actual schema
         and prompt through the existing structured-generation action. Return its
@@ -94,8 +95,10 @@ class PlanNode(Node):
             raise ValueError('Planning requires a JSON Schema')
         if not self.parameters.wait_for_services(timeout_sec=timeout):
             raise TimeoutError('Inference parameter services are unavailable')
-        response = self.wait(self.parameters.get_parameters(['active_model']), timeout, 'active model')
-        alias = response.values[0].string_value
+        response = self.wait(self.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'experiment and active model')
+        if response.values[0].string_value != run_id:
+            raise RuntimeError('The inference server is not frozen for this experiment')
+        alias = response.values[1].string_value
         if not alias:
             raise RuntimeError('The inference server has no active model')
         names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
@@ -159,7 +162,8 @@ class PlanNode(Node):
                     if pending is None:
                         raise ValueError('No unattempted refinement question is available')
                     pipeline = dict(pipeline, _pending_question=dict(target=pending['target'], question=pending['question']))
-                select_action(directory, cycle, request.world_model, self.generate,
+                select_action(directory, cycle, request.world_model,
+                              lambda prompt, **settings: self.generate(prompt, run_id=request.run_id, **settings),
                               pipeline=pipeline, prompt_name=prompt_name,
                               record_name=name, provenance=provenance)
                 record = json.loads((directory / 'state' / f'cycle_{cycle:06d}' / name).read_text())

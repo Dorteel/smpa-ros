@@ -73,14 +73,14 @@ class ModelNode(Node):
             raise TimeoutError(f'Timed out waiting for {operation}')
         return future.result()
 
-    def generate(self, prompt, **settings):
+    def generate(self, prompt, *, run_id, **settings):
         """Send the existing Model prompt to the shared inference action.
 
         Compare the active model's generation controls with the frozen run
         configuration and reject unsupported reasoning settings. Select text or
         schema-constrained generation as requested, then return successful output.
-        This comparison requires the run lifecycle to freeze server settings;
-        without that enforcement an intervening parameter update can race it.
+        Require the server freeze to belong to this run before comparing the
+        server settings with the run configuration and sending the request.
         """
         timeout = self.get_parameter('timeout').value
         if timeout <= 0:
@@ -89,8 +89,10 @@ class ModelNode(Node):
             raise ValueError('The shared inference server does not expose reasoning_effort')
         if not self.parameters.wait_for_services(timeout_sec=timeout):
             raise TimeoutError('Inference parameter services are unavailable')
-        response = self.wait(self.parameters.get_parameters(['active_model']), timeout, 'active model')
-        alias = response.values[0].string_value
+        response = self.wait(self.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'experiment and active model')
+        if response.values[0].string_value != run_id:
+            raise RuntimeError('The inference server is not frozen for this experiment')
+        alias = response.values[1].string_value
         if not alias:
             raise RuntimeError('The inference server has no active model')
         names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
@@ -151,7 +153,8 @@ class ModelNode(Node):
                 cycle, name, provenance = reserve_invocation(directory, request.run_id, 'model', prompt_name,
                                                               request.source_record or None)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name
-            result.world_model = generate_world_model(directory, cycle, request.observation, self.generate,
+            result.world_model = generate_world_model(directory, cycle, request.observation,
+                                                       lambda prompt, **settings: self.generate(prompt, run_id=request.run_id, **settings),
                                                        observations=observations, pipeline=pipeline,
                                                        models=pipeline.get('_run', {}).get('models', {}),
                                                        prompt_name=prompt_name,
