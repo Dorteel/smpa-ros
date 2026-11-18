@@ -23,10 +23,59 @@ def wait_future(future, timeout=10):
     goal acceptance, or an action result.
     """
     done = Event()
-    future.add_done_callback(lambda _: done.set())
+    def mark_complete(completed):
+        """Wake the waiting test when this response finishes."""
+        done.set()
+    future.add_done_callback(mark_complete)
     if not done.wait(timeout):
         raise TimeoutError('ROS action response did not arrive')
     return future.result()
+
+
+def fake_observation(*args, **kwargs):
+    """Return one fixed observation without opening a sensor.
+
+    Ignore the stage's operation context and return the same text and empty
+    source path expected by the existing observation pipeline.
+    """
+    return '{"vision":"cup"}', ''
+
+
+def fake_world_generation(*args, **kwargs):
+    """Return a fixed world model without loading an inference model.
+
+    Ignore generation controls because this fixture checks transport and
+    persistence rather than model behavior.
+    """
+    return 'world with cup'
+
+
+def fake_plan_generation(*args, **kwargs):
+    """Return a valid robot decision without invoking model inference.
+
+    The existing Plan implementation validates and persists this JSON before
+    sending it to Act through the normal experiment sequence.
+    """
+    return '{"action":"look_left"}'
+
+
+def fake_inference(*args, **kwargs):
+    """Return fixed text for an accepted inference request without model weights.
+
+    Keep the backend call deterministic so the test can check action ownership
+    and result delivery without executing real inference.
+    """
+    return 'fixture output'
+
+
+def fake_backend_loader(*args):
+    """Create a weight-free backend for the actual inference server.
+
+    The server still owns the backend and serializes its operations; this
+    fixture only replaces the computational implementation.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(generate=fake_inference)
 
 
 def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
@@ -43,9 +92,9 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
     import smpa_ros.model_node as model
     import smpa_ros.plan_node as plan
     import smpa_ros.act_node as act
-    monkeypatch.setattr(sense, 'observe', lambda *a, **k: ('{"vision":"cup"}', ''))
-    monkeypatch.setattr(model.ModelNode, 'generate', lambda *a, **k: 'world with cup')
-    monkeypatch.setattr(plan.PlanNode, 'generate', lambda *a, **k: '{"action":"look_left"}')
+    monkeypatch.setattr(sense, 'observe', fake_observation)
+    monkeypatch.setattr(model.ModelNode, 'generate', fake_world_generation)
+    monkeypatch.setattr(plan.PlanNode, 'generate', fake_plan_generation)
     def dispatch(self, name, record, **context):
         """Report one successful robot action without accessing hardware."""
         record.update(goal_accepted=True, result_status=4, success=True)
@@ -125,9 +174,9 @@ def stage_process(stage, root, stop):
     import smpa_ros.model_node as model
     import smpa_ros.plan_node as plan
     import smpa_ros.act_node as act
-    sense.observe = lambda *a, **k: ('{"vision":"cup"}', '')
-    model.ModelNode.generate = lambda *a, **k: 'world with cup'
-    plan.PlanNode.generate = lambda *a, **k: '{"action":"look_left"}'
+    sense.observe = fake_observation
+    model.ModelNode.generate = fake_world_generation
+    plan.PlanNode.generate = fake_plan_generation
     def dispatch(self, name, record, **context):
         """Return a successful robot result without sending a physical command."""
         record.update(goal_accepted=True, result_status=4, success=True)
@@ -153,7 +202,6 @@ def test_separate_stage_processes_and_script_sequence(tmp_path):
     """
     import multiprocessing
     import yaml
-    from types import SimpleNamespace
     from rclpy.parameter_client import AsyncParameterClient
     from smpa_llm.server import InferenceServer
     from smpa_ros.smpa import execute_experiment
@@ -172,7 +220,7 @@ def test_separate_stage_processes_and_script_sequence(tmp_path):
     registry = tmp_path / 'models.yaml'
     registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
     rclpy.init(args=[])
-    server = InferenceServer(loader=lambda *args: SimpleNamespace(generate=lambda *a, **k: 'fixture output'),
+    server = InferenceServer(loader=fake_backend_loader,
                              parameter_overrides=[Parameter('registry_file', value=str(registry))])
     server.replace_model('fixture')
     node = Node('cognitive_process_transport_test')
@@ -231,7 +279,6 @@ def test_real_inference_freeze_and_standalone_rejection(tmp_path):
     release the exact owner and shut down the ROS nodes.
     """
     import yaml
-    from types import SimpleNamespace
     from rclpy.parameter_client import AsyncParameterClient
     from smpa_llm.server import InferenceServer
     from smpa_ros.smpa import acquire_inference, release_inference, verify_inference
@@ -240,7 +287,7 @@ def test_real_inference_freeze_and_standalone_rejection(tmp_path):
     registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
     memory = MemoryManager(tmp_path, goal='Find cup')
     rclpy.init(args=[])
-    server = InferenceServer(loader=lambda *args: SimpleNamespace(generate=lambda *a, **k: 'fixture output'),
+    server = InferenceServer(loader=fake_backend_loader,
                              parameter_overrides=[Parameter('registry_file', value=str(registry))])
     server.replace_model('fixture')
     node = Node('inference_freeze_transport_test')
