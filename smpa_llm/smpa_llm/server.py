@@ -160,6 +160,7 @@ class InferenceServer(Node):
                 self.replace_model(initial)
             except Exception as error:
                 self.get_logger().error(str(error))
+                self.set_loaded_alias('')
                 self.change_state('error')
 
     def set_parameters(self, parameters):
@@ -391,6 +392,7 @@ class InferenceServer(Node):
             goal_handle.succeed()
         except Exception as error:
             result.error_message = str(error)
+            self.change_state('error')
             self.get_logger().error(str(error))
             goal_handle.abort()
         finally:
@@ -510,7 +512,8 @@ def main(args=None):
     On interruption, drain active work before releasing the backend and context.
     Legacy Runner execution does not import or require this executable.
     """
-    rclpy.init(args=args)
+    from rclpy.signals import SignalHandlerOptions
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = None
     executor = MultiThreadedExecutor(num_threads=4)
     try:
