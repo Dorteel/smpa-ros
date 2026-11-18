@@ -468,3 +468,46 @@ def test_shutdown_releases_owned_freeze_after_callbacks_drain(server):
     assert other.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
     other.destroy_node()
     assert other.backend is None
+
+def test_server_captures_read_only_experiment_snapshot(server):
+    """Expose the actual loaded settings while an experiment owns the server.
+
+    Acquire a mock backend after configuring its generation controls. The
+    read-only snapshot must match the loaded identity and frozen generation;
+    release clears it. Clients cannot replace the snapshot themselves.
+    """
+    import json
+    server.replace_model('qwen3_4b')
+    assert server.set_parameters_atomically([Parameter('models.qwen3_4b.temperature', value=0.4)]).successful
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+    snapshot = json.loads(server.get_parameter('frozen_settings_json').value)
+    assert snapshot['run_id'] == 'run-a' and snapshot['active_model'] == 'qwen3_4b'
+    assert snapshot['server_instance_id']
+    assert snapshot['loading']['model_id'] == 'fixture/qwen'
+    assert snapshot['generation']['temperature'] == 0.4
+    assert not server.set_parameters_atomically([Parameter('frozen_settings_json', value='{}')]).successful
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+    assert server.get_parameter('frozen_settings_json').value == ''
+
+
+def test_snapshot_distinguishes_server_restart(server):
+    """Give each server instance a distinct identity in its frozen snapshot.
+
+    Freeze two mocked servers using the same run ID and loading configuration.
+    Their instance IDs must differ, allowing the experiment to detect that the
+    original server restarted even when the visible model settings match.
+    """
+    import json
+    registry = server.get_parameter('registry_file').value
+    other = InferenceServer(loader=lambda values, root, config: SimpleNamespace(),
+                            parameter_overrides=[Parameter('registry_file', value=registry)])
+    try:
+        for node in (server, other):
+            node.replace_model('qwen3_4b')
+            assert node.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+        first = json.loads(server.get_parameter('frozen_settings_json').value)
+        second = json.loads(other.get_parameter('frozen_settings_json').value)
+        assert first['server_instance_id'] != second['server_instance_id']
+        assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
+    finally:
+        other.destroy_node()

@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 import sys
 from threading import RLock
+from uuid import uuid4
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
@@ -121,6 +122,9 @@ class InferenceServer(Node):
         self.active_alias = ''
         self.state = 'unloaded'
         self.internal_parameter_update = False
+        self._frozen_settings_json = ''
+        self._instance_id = str(uuid4())
+        self.declare_parameter('frozen_settings_json', '', readonly)
         self.loader = loader or load_registered_backend
         self.declare_parameter('active_model', '')
         self.declare_parameter('experiment_run_id', '')
@@ -168,6 +172,21 @@ class InferenceServer(Node):
                 self.set_loaded_alias('')
                 self.change_state('error')
 
+    def get_parameter(self, name):
+        """Return the server-captured snapshot for the read-only snapshot name.
+
+        Other parameters use the normal ROS implementation. The inference lock
+        keeps the returned snapshot consistent with acquisition and release. The
+        snapshot is empty outside an experiment and cannot be set by clients.
+        """
+        if name == 'frozen_settings_json':
+            from rclpy.parameter import Parameter
+            lock = getattr(self, 'lock', None)
+            if lock is not None:
+                with lock:
+                    return Parameter(name, value=self._frozen_settings_json)
+        return super().get_parameter(name)
+
     def set_parameters(self, parameters):
         """Keep each regular ROS parameter update coherent with request snapshots.
 
@@ -209,7 +228,25 @@ class InferenceServer(Node):
                     elif not value and owner:
                         return SetParametersResult(successful=False, reason='Release must name the active experiment')
                 normalized.append(parameter)
-            return super().set_parameters_atomically(normalized)
+            target = next((parameter.value for parameter in normalized
+                           if parameter.name == 'experiment_run_id'), owner)
+            snapshot = None
+            if target and target != owner and self.backend is not None:
+                values = self.settings(self.active_alias)
+                snapshot = dict(run_id=target, server_instance_id=self._instance_id, active_model=self.active_alias,
+                    loading=dict(self.loaded_settings),
+                    generation={field: values[field] for field in GENERATION_FIELDS},
+                    model_root=self.model_root)
+                provider = getattr(self.backend, 'provider_settings', None)
+                if isinstance(provider, dict):
+                    snapshot['provider_settings'] = {key: deepcopy(provider[key]) for key in
+                        ('base_url', 'timeout', 'models', 'generation_capabilities', 'api_key_env')
+                        if key in provider}
+                snapshot = json.dumps(snapshot, sort_keys=True)
+            result = super().set_parameters_atomically(normalized)
+            if result.successful and target != owner:
+                self._frozen_settings_json = snapshot or ''
+            return result
 
     def settings(self, alias):
         """Return a fresh namespace snapshot for one registered alias.
