@@ -110,9 +110,13 @@ remains unchanged. The legacy Runner and compatibility entry points remain in th
 repository until their remaining regression coverage has been migrated. Some
 legacy tests require different per-stage generation controls within one run;
 the server source now supports separate frozen settings for each stage. The
-inference action definitions changed and must be regenerated before ROS transport
-verification; the last regeneration attempt was stopped when the machine reported
-new thermal throttling. The existing installed overlay is therefore stale.
+inference action definitions were regenerated in the isolated overlay after the
+host cooled, using one build worker without new throttle events. A full four-stage
+ROS sequence now sends Model and Plan inference actions to one fake backend and
+checks their distinct frozen controls and persistence links. The installed command
+also passed completion, interruption, and camera-evidence tests after the Python
+packages were refreshed. Legacy Runner regression coverage still requires migration
+before the Runner can be removed without dropping assertions.
 
 To reproduce the generated interface build on a stable authorized host:
 
@@ -186,5 +190,6 @@ fails rather than recording settings that were not used. Unit tests with
 mocked backends cover isolation, inheritance, freezing, ownership and forwarding.
 A local ROS parameter-service test also verifies atomic stage initialization and
 conflict rejection with a fake backend.
-Generated action types and end-to-end ROS behavior for the new selector remain
-unverified until the isolated interface build can be completed without throttling.
+Generated action contracts and end-to-end local ROS behavior for the new selector
+have been verified with a fake backend. Real model and hardware behavior remain
+outside these tests.

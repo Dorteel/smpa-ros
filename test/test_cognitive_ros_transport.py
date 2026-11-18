@@ -207,12 +207,13 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
         rclpy.shutdown()
 
 
-def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None, camera=False):
+def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None, camera=False, real_inference=False):
     """Serve one stage in its own process with only external operations mocked.
 
     Select the named existing node, replace its external work with deterministic
-    responses, and spin until the parent signals shutdown. Destroy the node and
-    context so the parent can verify that each process terminates cleanly.
+    responses, and spin until the parent signals shutdown. When real inference
+    transport is requested, keep the Model and Plan clients intact while using a
+    fake backend in the parent. Destroy the node and context on shutdown.
     """
     import smpa_ros.sense_node as sense
     import smpa_ros.model_node as model
@@ -237,8 +238,9 @@ def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None, c
                 raise TimeoutError('Test did not release the mocked sensor')
             return fake_observation(*args, **kwargs)
         sense.observe = delayed_observation
-    model.ModelNode.generate = fake_world_generation
-    plan.PlanNode.generate = fake_plan_generation
+    if not real_inference:
+        model.ModelNode.generate = fake_world_generation
+        plan.PlanNode.generate = fake_plan_generation
     def dispatch(self, name, record, **context):
         """Return a successful robot result without sending a physical command."""
         record.update(goal_accepted=True, result_status=4, success=True)
@@ -250,7 +252,7 @@ def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None, c
     executor = None
     thread = None
     try:
-        if camera and stage == 'sense':
+        if (camera and stage == 'sense') or (real_inference and stage in ('model', 'plan')):
             executor = MultiThreadedExecutor(num_threads=2)
             executor.add_node(node)
             thread = Thread(target=executor.spin, daemon=True)
@@ -752,3 +754,92 @@ def test_frozen_stage_settings_reach_backend_over_ros_actions(tmp_path):
         node.destroy_node()
         server.destroy_node()
         rclpy.shutdown()
+
+
+def test_script_sequence_uses_stage_nodes_and_shared_inference(tmp_path):
+    """Run all four stage processes while Model and Plan call the shared server.
+
+    The server uses one recording, weight-free backend. Sense and robot movement
+    are mocked, but the generated stage and inference actions travel over ROS.
+    Verify distinct frozen controls reach that backend, all stage records link
+    to their predecessors, and the experiment releases its inference ownership.
+    """
+    import multiprocessing
+    import yaml
+    from types import SimpleNamespace
+    from rclpy.parameter_client import AsyncParameterClient
+    from smpa_llm.server import InferenceServer
+    from smpa_ros.smpa import execute_experiment
+    from smpa_ros.backends.base import stage_generation
+    context = multiprocessing.get_context('spawn')
+    stop = context.Event()
+    names = ('sense', 'model', 'plan', 'act')
+    pipeline = {'enabled_actions': ['look_left'], 'sensing': {'vision': False},
+        'stage_settings': {'sense': {'max_output_tokens': 30, 'temperature': 0.0},
+                           'model': {'max_output_tokens': 40, 'temperature': 0.2},
+                           'plan': {'max_output_tokens': 50, 'temperature': 0.7}},
+        'stage_prompts': {'sense': {'name': 'chosen', 'text': 'Sense.'},
+            'model': {'name': 'chosen', 'text': '{input} {previous_world_model}'},
+            'plan': {'name': 'chosen', 'text': '{goal} {input} {available_actions}'},
+            'act': {'name': 'chosen', 'text': '{input}'}}}
+    effective = {stage: stage_generation(pipeline, stage) for stage in names}
+    pipeline['stage_settings'] = effective
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'pipeline': pipeline, 'stage_settings': effective})
+    processes = [context.Process(target=stage_process, args=(name, str(tmp_path), stop),
+                                 kwargs={'real_inference': True}) for name in names]
+    for process in processes:
+        process.start()
+    registry = tmp_path / 'models.yaml'
+    registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
+    calls = []
+    def generate(prompt, **settings):
+        """Return a valid decision for schema calls and a fixed world otherwise."""
+        calls.append(settings)
+        return '{"action":"look_left"}' if 'schema' in settings else 'world with cup'
+    def loader(*args):
+        """Provide one recording backend without loading any model weights."""
+        return SimpleNamespace(generate=generate)
+    rclpy.init(args=[])
+    server = InferenceServer(loader=loader, parameter_overrides=[Parameter('registry_file', value=str(registry))])
+    server.replace_model('fixture')
+    node = Node('shared_inference_sequence_test')
+    clients = {name: ActionClient(node, kind, '/smpa/' + name) for name, kind in
+               zip(names, (Sense, Model, Plan, Act))}
+    parameters = AsyncParameterClient(node, '/llm')
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(server)
+    executor.add_node(node)
+    thread = Thread(target=executor.spin, daemon=True)
+    thread.start()
+    def wait(future, timeout, operation):
+        """Wait for a ROS response within the experiment's requested deadline."""
+        return wait_future(future, timeout)
+    try:
+        for client in clients.values():
+            assert client.wait_for_server(timeout_sec=15)
+        execute_experiment(memory, 1, clients, parameters, wait, 10)
+        assert [(call['max_new_tokens'], call['temperature']) for call in calls] == [(40, 0.2), (50, 0.7)]
+        assert 'schema' in calls[1]
+        assert memory.metadata['status'] == 'completed'
+        assert memory.metadata['inference']['stages']['model']['max_new_tokens'] == 40
+        assert memory.metadata['inference']['stages']['plan']['max_new_tokens'] == 50
+        assert server.get_parameter('experiment_run_id').value == ''
+        directory = memory.directory / 'state/cycle_000001'
+        for previous, stage in zip(names, names[1:]):
+            record = json.loads((directory / f'{stage}.json').read_text())
+            assert record['source_record'].endswith('/' + previous + '.json')
+    finally:
+        executor.shutdown(timeout_sec=10)
+        thread.join(timeout=10)
+        for client in clients.values():
+            client.destroy()
+        node.destroy_node()
+        server.destroy_node()
+        rclpy.shutdown()
+        stop.set()
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        assert all(process.exitcode == 0 for process in processes)
