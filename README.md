@@ -25,7 +25,8 @@ flowchart LR
   and goal. The default action set is `look_left` / `look_right`.
 - **Act** validates and dispatches the selected action, then records its outcome.
   The explicit stage order is in [smpa_ros/smpa_ros/smpa.py](smpa_ros/smpa_ros/smpa.py);
-  [runner.py](runner.py) supplies the runtime and persistence wiring.
+  four independent ROS action nodes perform the stages and shared Python memory
+  preserves run records. The legacy [runner.py](runner.py) remains for compatibility.
 
 The independent conversational application follows **Sense → Model → Act**:
 receive a message, update attributed RDF beliefs, and generate a response.
@@ -208,7 +209,7 @@ it shows ROS communication, not Python calls inside Runner or file-backed Read.
 ```text
 smpa_ros/                   Cognitive ROS package: metadata, config and launch/
   smpa_ros/                 Model, Plan, Act, conversation, RDF and sensory service
-  runner.py, memory.py      Orchestration and provenance; legacy imports retained
+  runner.py, memory.py      Legacy Runner and shared run persistence
   sense/, speech/           Hear/Read/Vision and speech ROS adapters
 smpa_llm/                   Shared inference ROS package; no inference server
   config.yaml, models/      Inference defaults and pinned model definitions
@@ -228,8 +229,8 @@ test/, tests_rlhf/, test.sh Package, robot, conversation and training verificati
   audio/transcript persistence, and recoverable per-run conversation consumption.
 - Local Transformers inference and API-backed text/vision inference through
   configured OpenAI or Nebula endpoints. API use requires credentials and endpoint
-  access; advertised response formats depend on the provider. The default robot
-  loop shares one inference backend across its cognitive stages.
+  access; advertised response formats depend on the provider. The robot stages
+  delegate to one independently running inference server.
 - Markdown world snapshots, schema-constrained planning, action validation,
   ROS goal/result handling, and persistent stage provenance.
 - Role-preserving conversations, resumption, validated atomic RDF belief updates,
@@ -302,6 +303,10 @@ implemented by `smpa_llm` and the SMPA endpoints by `smpa_ros`.
 | `/llm/list_models` | service `ListModels` | empty | `string[] model_ids` | List supported configured aliases |
 | `/llm/get_model_status` | service `GetModelStatus` | empty | `string active_model`, `string state` | Return the current backend status |
 | `/llm/inference_status` | topic `InferenceStatus` | — | `string state`, `string active_model` | Retained status published on transitions |
+| `/smpa/sense` | action `Sense` | `string run_id`, `string capability` | `string observation`, `string record_path` | Empty feedback; collect configured sensory modalities |
+| `/smpa/model` | action `Model` | `string run_id`, `string capability`, `string observation`, `string source_record`, `string previous_snapshot` | `string world_model`, `string record_path`, `string snapshot_path` | Empty feedback; persist a world-model snapshot |
+| `/smpa/plan` | action `Plan` | `string run_id`, `string capability`, `string world_model`, `string source_record` | `string action_json`, `string record_path` | Empty feedback; select a schema-constrained decision |
+| `/smpa/act` | action `Act` | `string run_id`, `string capability`, `string action_json`, `string source_record` | `bool success`, `string record_path` | Empty feedback; execute a decision or focused observation |
 | `/smpa/start` | service `StartSmpa` | `string goal` | `bool accepted`, `string run_id` | Start one experiment child |
 | `/smpa/stop` | service `StopSmpa` | empty | `bool accepted` | Request interruption of the child |
 | `/smpa/get_status` | service `GetSmpaStatus` | empty | `string state`, `string run_id`, `string active_stage` | Return the latest observed lifecycle state |
@@ -312,10 +317,18 @@ the inference server's `experiment_run_id` at goal acceptance. Setting that
 parameter on an idle server with a ready model freezes model configuration and
 rejects model-management and standalone inference goals until the owner releases it.
 Set `experiment_run_id` to `release:<run_id>` to release that same owner; a
-stale release or bare clear is rejected. Experiment
-lifecycle acquisition and recording of the frozen settings are not yet wired up.
-These goal fields change the ROS wire definitions: rebuild the interfaces and
+stale release or bare clear is rejected. The experiment acquires the freeze before
+its first stage and persists the server's read-only `frozen_settings_json` snapshot
+in run metadata. The snapshot includes a server-instance identity, loaded model
+settings and generation controls. A restarted or changed server fails the next
+ownership check. If an outstanding stage cannot be confirmed finished, cleanup
+leaves the freeze in place for recovery. Rebuild the changed ROS interfaces and
 all clients before using this branch.
+
+An empty stage `capability` selects its configured default; the explicit supported
+values are `sense`, `model`, `plan`, and `act` respectively. Stage goals identify
+an existing active run. The record paths refer to that run and preserve provenance.
+No stage automatically calls another cognitive stage.
 
 The legacy `Listen`, `Talk`, `DescribeScene`, `EvaluateVisualDecision`, and
 `SegmentImage` definitions remain registered.
@@ -372,8 +385,9 @@ an identical load reuses it. Switching releases the old backend before loading a
 load fails, the server enters `error` with no active model. An unknown alias
 is rejected before releasing the old model. An unload
 releases the owned backend. Management and inference share one exclusive slot;
-an overlapping action goal is rejected. The separate Runner still owns its
-existing in-process inference path, so starting this server does not redirect it.
+an overlapping action goal is rejected. The experiment's four independent stage
+nodes send inference requests to this shared server; the legacy Runner remains
+available for older callers and is not used by the new command entry point.
 
 The adapter reuses existing Transformers text and vision implementations and
 configured API providers. Specialized speech, segmentation, VisualJEV, and
@@ -392,8 +406,8 @@ emitted. Model status values include `unloaded`, `loading`, `ready`,
 `generating`, `unloading`, and `error`.
 
 The lifecycle node reports `idle`, `running`, `stopping`, `completed`,
-`interrupted`, or `failed`. It delegates to the existing Runner and experiment;
-the experiment retains stage ordering and persisted records remain authoritative.
+`interrupted`, or `failed`. It launches the experiment in a child process;
+`smpa.py` controls stage ordering and persisted records remain authoritative.
 A start can fail while initializing; the service waits at most 30 seconds for
 its initial notification before bounded child cleanup. Stop requests SIGINT and
 then escalates if the child does not exit. Forced termination can prevent normal
@@ -432,4 +446,10 @@ ros2 action send_goal /llm/unload_model smpa_ros_interfaces/action/UnloadModel '
 
 `ros2 topic echo` continues until interrupted; run it separately if the unload
 command should run while observing status. Start lifecycle services separately
-with `ros2 run smpa_ros smpa_control` when an experiment is required.
+with `ros2 run smpa_ros smpa_control` when an experiment is required. Start the
+stage servers independently with `ros2 launch smpa_ros cognitive_stages.launch.py`;
+set `memory_root` on that launch and on `smpa_control` to the same directory.
+The existing `ros2 launch smpa_ros llm.launch.py` starts its own stage servers by
+default; set `start_stage_nodes:=false` when they are already running. Start and
+load the shared `/llm` server separately. Its selected model identity and generation
+settings must match the experiment's frozen stage settings before the run starts.
