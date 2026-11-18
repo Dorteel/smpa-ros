@@ -1,4 +1,5 @@
 """Expose the existing schema-constrained planner as an independent ROS action."""
+from functools import partial
 import json
 from pathlib import Path
 from threading import Event
@@ -163,7 +164,7 @@ class PlanNode(Node):
                         raise ValueError('No unattempted refinement question is available')
                     pipeline = dict(pipeline, _pending_question=dict(target=pending['target'], question=pending['question']))
                 select_action(directory, cycle, request.world_model,
-                              lambda prompt, **settings: self.generate(prompt, run_id=request.run_id, **settings),
+                              partial(self.generate, run_id=request.run_id),
                               pipeline=pipeline, prompt_name=prompt_name,
                               record_name=name, provenance=provenance)
                 record = json.loads((directory / 'state' / f'cycle_{cycle:06d}' / name).read_text())

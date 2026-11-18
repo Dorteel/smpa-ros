@@ -1,4 +1,5 @@
 """Expose the existing world-model generator as an independent ROS action."""
+from functools import partial
 import json
 from pathlib import Path
 from threading import Event
@@ -154,7 +155,7 @@ class ModelNode(Node):
                                                               request.source_record or None)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name
             result.world_model = generate_world_model(directory, cycle, request.observation,
-                                                       lambda prompt, **settings: self.generate(prompt, run_id=request.run_id, **settings),
+                                                       partial(self.generate, run_id=request.run_id),
                                                        observations=observations, pipeline=pipeline,
                                                        models=pipeline.get('_run', {}).get('models', {}),
                                                        prompt_name=prompt_name,

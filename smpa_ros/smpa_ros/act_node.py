@@ -1,4 +1,5 @@
 """Expose existing action execution as an independent cognitive stage."""
+from functools import partial
 import json
 from pathlib import Path
 from threading import Event
@@ -120,7 +121,7 @@ class ActNode(Node):
             else:
                 action = decision['action']
                 provenance['parameters'] = {key: value for key, value in decision.items() if key != 'action'}
-                perform_action(directory, cycle, action, lambda action, record: self.dispatch(action, record, pipeline),
+                perform_action(directory, cycle, action, partial(self.dispatch, pipeline=pipeline),
                                prompt_name=prompt_name, record_name=name, provenance=provenance, configuration=pipeline)
             result.success = True
             result.record_path = str(record_path.relative_to(directory))
