@@ -77,7 +77,7 @@ def test_observations_and_files(server):
     """Observations come in time order; recorded images and audio are served with their media types."""
     result = fetch(server + f'{API}/sessions/{ROBOT}/observations')
     entries = result['observations']
-    assert len(entries) == 7 and result['contract_version'] == '1.6' and result['revision']
+    assert len(entries) == 7 and result['contract_version'] == '1.7' and result['revision']
     image = next(entry for entry in entries if entry['kind'] == 'scene_description')['image']
     with urlopen(server + image, timeout=5) as response:
         assert response.headers['Content-Type'] == 'image/png' and response.read()[:4] == b'\x89PNG'
@@ -112,7 +112,9 @@ def test_reading_through_the_server_changes_nothing(server):
     """Every SMPA read route is read-only: the memory directory is identical before and after use.
 
     The only other SMPA routes are the conversation routes, which relay to
-    SMPA's own conversation server (tested in test_conversation.py).
+    SMPA's own conversation server (tested in test_conversation.py), and the
+    Dialogue routes, which call SMPA's ROS 2 stage nodes (tested in
+    test_dialogue_ros.py) and never write the memory directory themselves.
     """
     before = tree_fingerprint(smpa_memory())
     for item in fetch(server + API + '/sessions')['sessions']:
@@ -123,7 +125,8 @@ def test_reading_through_the_server_changes_nothing(server):
     assert tree_fingerprint(smpa_memory()) == before
     routes = fetch(server + '/api/openapi.json')['paths']
     assert all(set(methods) == {'get'} for path, methods in routes.items()
-               if path.startswith('/api/v1/smpa') and not path.startswith('/api/v1/smpa/conversation/'))
+               if path.startswith('/api/v1/smpa') and not path.startswith(('/api/v1/smpa/conversation/',
+                                                                              '/api/v1/smpa/dialogue/')))
 
 
 def test_unconfigured_and_demonstration_memory(ros_environment, tmp_path):

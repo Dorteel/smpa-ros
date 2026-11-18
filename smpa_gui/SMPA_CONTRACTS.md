@@ -1,4 +1,4 @@
-# SMPA integration contracts (Sense workspace and Dashboard)
+# SMPA integration contracts (Sense workspace and Dialogue)
 
 This document is the boundary between the GUI (owned by the GUI work in `smpa_gui/`, formerly `gui/`) and SMPA
 (owned by Codex). It lists, separately:
@@ -11,7 +11,7 @@ This document is the boundary between the GUI (owned by the GUI work in `smpa_gu
    correctly today. The GUI does not implement substitutes for them.
 
 The GUI never writes into SMPA's memory directory itself, imports no SMPA module and takes
-no file locks. Since version 4 the Dashboard starts SMPA's own conversation server
+no file locks. Since version 4 the Dialogue starts SMPA's own conversation server
 (§1.5) and relays conversation requests to it; that server, not the GUI, creates runs and
 writes transcripts. The GUI offers no observation writing and writes no Turtle file.
 
@@ -63,7 +63,24 @@ read-only archive session.
 - The run's `camera_topic` provides the live picture. It is labelled live: it is not what
   SMPA recorded.
 
-### 1.5 Conversation server (`smpa_ros/smpa_ros/conversation_web.py`), used by the Dashboard
+### 1.4a Tier 1 ROS interfaces (`smpa_ros_interfaces`, main 2efae36), used by the Dialogue backend
+
+| Endpoint (default name) | Type | Node | Used by the GUI for |
+|---|---|---|---|
+| `/smpa/get_status` | `srv/GetSmpaStatus` → `state`, `run_id`, `active_stage` | `smpa_control` (`smpa_ros/run_control.py`) | robot run state; the shared belief context's run |
+| `/smpa/events` | `msg/SmpaEvent` (`run_id`, `stage`, `event`) | `smpa_control` | relayed on the Dialogue stream |
+| `/llm/list_models` | `srv/ListModels` → `model_ids` | `llm` (`smpa_llm/server.py`) | status (`GET /smpa/ros`) |
+| `/llm/get_model_status` | `srv/GetModelStatus` → `active_model`, `state` | `llm` | status |
+| `/llm/inference_status` | `msg/InferenceStatus` (`state`, `active_model`), transient local | `llm` | relayed on the Dialogue stream |
+| `/smpa/start`, `/smpa/stop` | `srv/StartSmpa`, `srv/StopSmpa` | `smpa_control` | not used (the GUI does not start or stop robot runs) |
+| `/llm/generate`, `/llm/generate_structured`, `/llm/describe_image`, `/llm/load_model`, … | actions | `llm` | not used by the Dialogue (inference belongs to the stage nodes); the client layer is tested against `GenerateText` |
+
+Names are relative in SMPA's nodes, so a launch namespace prefixes them; the GUI's names
+are configurable (`ros.endpoints`). The inference server rejects a goal while another runs
+and does not honour cancellation; the GUI reports `rejected` and, after its own timeout,
+`timed_out` (outcome unknown).
+
+### 1.5 Conversation server (`smpa_ros/smpa_ros/conversation_web.py`), used by the Dialogue
 
 Verified against SMPA's source on `main` 717094b (after the ROS 2 package restructuring,
 `feature/llm-reorganization`) and by running it in the cloud with a test configuration and
@@ -101,10 +118,10 @@ recognised.
   optional `<!-- smpa-agent {json} -->`, `<a id="message-<n>"></a>`, `## <Role>`, body,
   blank line. Belief modelling writes `<run>/belief-state.ttl` and `conversation-sds.md`.
 
-### 1.6 Per-run files read by the Dashboard
+### 1.6 Per-run files read by the Dialogue
 
 Configurable lists of candidates relative to a run directory (`files.*` in the GUI
-layout); the first existing candidate is used and the Dashboard says when it is a fallback:
+layout); the first existing candidate is used and the Dialogue says when it is a fallback:
 
 | View | Target location (preferred) | Where SMPA writes today (fallback) |
 |---|---|---|
@@ -126,7 +143,7 @@ images (Movie File In TOP with a URL) without access to SMPA's disk or ROS.
 The normalized observation record is the same shape requested in C2 below, so a native
 SMPA index could replace the file adapter without changing any frontend.
 
-The Dashboard's routes (`/api/v1/smpa/models`, `/conversation…`, `/graphs/…`) are the same
+The Dialogue's routes (`/api/v1/smpa/models`, `/conversation…`, `/graphs/…`) are the same
 kind of adapter: a frontend can hold a conversation and draw the graphs without knowing
 SMPA's files, process or server protocol.
 
@@ -259,6 +276,32 @@ would let it use an installed SMPA without knowing the source layout, for exampl
    progress in the state (C9).
 6. Optional model descriptions in the registry (C8); observation index (C2); recorded
    times for refinement evidence (C3); robot-run lifecycle control (C5).
+7. The four cognitive stage interfaces for the Dialogue (C12).
+
+### C12. Cognitive stage interfaces for the Dialogue (pending, Codex)
+
+The Dialogue backend is ready to call Sense, Model, Plan and Act as independent ROS 2
+endpoints (`smpa_adapter/dialogue.py`). Their names and fields are Codex's decision; the
+GUI has not assumed any. To be connected by configuration, each stage needs:
+
+1. **An endpoint** (service or action; an action if it can take longer than a few
+   seconds) with an installed type in `smpa_ros_interfaces`.
+2. **Context fields in the request**: at least the belief-context identifier, and the
+   run/session identifiers where the stage persists something, so shared and
+   independent contexts work. Sense also needs the user message; Model the Sense
+   observation's identifier (or content); Plan the belief context (and, if useful, the
+   Model invocation); Act the response text.
+3. **Identifiers in the result**: Sense → observation id; Model → invocation id and,
+   ideally, the committed belief revision or file; Plan → response text; Act → delivery
+   outcome. A boolean success field with an error text, or abort with a logged reason,
+   both work.
+4. **Commit before success**: Model reports success only after the belief file is written
+   (atomically, see C7), because the GUI reads the snapshot right after.
+5. **Persistence by the stages**: who writes the user message and the response into
+   the transcript (C6) when the ROS path is used. The GUI does not write transcripts.
+
+Until then all four stages are `pending`, turns over ROS are refused, and the Dialogue
+uses the conversation server (§1.5).
 
 ### Not requested
 

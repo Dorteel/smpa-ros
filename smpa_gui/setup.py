@@ -3,7 +3,7 @@
 Concepts:
     Python code is installed as the ``smpa_gui`` package. The browser
     frontend (HTML, JavaScript, CSS and the vendored Cytoscape library) and
-    the mock Turtle graphs of the Dashboard are installed as package data
+    the mock Turtle graphs of the Dialogue are installed as package data
     inside it, so the server finds them beside its own code in a source
     checkout and in an install space alike. Example SMPA layout files go to
     ``share/smpa_gui/layouts``.
@@ -31,7 +31,7 @@ def package_files(*folders):
 
 setup(
     name=PACKAGE,
-    version='0.7.0',
+    version='0.8.0',
     packages=find_packages(include=[PACKAGE, PACKAGE + '.*']),
     package_data={PACKAGE: package_files('frontend', 'mock_graphs')},
     data_files=[

@@ -1,4 +1,4 @@
-"""Unit tests of the Dashboard's adapters: layout, Turtle reader, transcript reader, model catalogue, mock graphs."""
+"""Unit tests of the Dialogue's adapters: layout, Turtle reader, transcript reader, model catalogue, mock graphs."""
 import json
 import os
 from pathlib import Path

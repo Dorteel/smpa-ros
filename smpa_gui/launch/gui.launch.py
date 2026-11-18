@@ -14,9 +14,9 @@ Concepts:
         smpa                 false disables the optional SMPA integration (SMPA tab shows "disabled")
         smpa_memory_root     SMPA's memory directory for the SMPA tab (read-only); empty means
                              "<smpa_root>/memory"
-        smpa_root            SMPA checkout whose conversation server the Dashboard starts on demand;
+        smpa_root            SMPA checkout whose conversation server the Dialogue starts on demand;
                              empty means "the repository containing this source checkout, if any"
-        smpa_layout          YAML file with further SMPA paths for the Dashboard (see README.md)
+        smpa_layout          YAML file with further SMPA paths for the Dialogue (see README.md)
 
 Usage:
     ros2 launch smpa_gui gui.launch.py
@@ -34,8 +34,8 @@ ARGUMENTS = (
     ('keep_goals_on_exit', 'false', 'true leaves active action goals running when the GUI stops.'),
     ('smpa', 'true', 'false disables the optional SMPA integration.'),
     ('smpa_memory_root', '', "SMPA's memory directory for the SMPA tab (read-only); empty for the default."),
-    ('smpa_root', '', 'SMPA checkout for the Dashboard\'s conversation server; empty for the default.'),
-    ('smpa_layout', '', 'YAML file with SMPA paths for the Dashboard; empty for none.'),
+    ('smpa_root', '', 'SMPA checkout for the Dialogue\'s conversation server; empty for the default.'),
+    ('smpa_layout', '', 'YAML file with SMPA paths for the Dialogue; empty for none.'),
 )
 
 

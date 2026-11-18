@@ -8,7 +8,7 @@
    in `smpa_gui.ros_adapter`; the optional SMPA functionality lives in
    `smpa_gui.smpa_adapter` (since version 3: SMPA's recorded run directories, read-only;
    the interface it relies on is listed in SMPA_CONTRACTS.md) and can be switched off.
-   Since version 6 the Dashboard starts SMPA's own conversation server as a child process
+   Since version 6 the Dialogue starts SMPA's own conversation server as a child process
    (with SMPA's interpreter and configuration) and relays to it over HTTP; the GUI still
    imports nothing from SMPA and implements no inference.
 2. **Observational, with confirmed changes.** The gateway creates subscriptions and
@@ -62,12 +62,15 @@ All rclpy calls happen on the ROS thread. Web handlers pass small functions to
 | `ros_adapter/sensors.py` | Sensor registry and one encoder per sensor type |
 | `ros_adapter/ros_interfaces.py` | Action class lookup; schema of any message type from its definition; validation of JSON values; message construction |
 | `ros_adapter/action_goals.py` | Action clients, goal records, cancel, tidy timer, shutdown policy |
+| `ros_adapter/ros_clients.py` | Programmatic, awaitable service calls and action goals for the backend's own use (Dialogue, SMPA status), short-lived clients, failure states, topic relays |
 | `smpa_adapter/smpa_runs.py` | Optional, read-only adapter for SMPA's memory directory: sessions, activity, normalized observations, confined file access |
 | `smpa_adapter/smpa_layout.py` | The configurable paths: SMPA checkout (packages or flat layout), interpreter, configuration, memory, conversation server, per-run file candidates (confined to the run) |
 | `smpa_adapter/smpa_models.py` | Conversation model choices from SMPA's effective configuration (`inference_config` overlay) and model registry, with the same selection rule as SMPA and availability prechecks |
 | `smpa_adapter/conversation_service.py` | Starts/stops SMPA's `conversation_web` (or uses an external one), relays requests one at a time, deduplicates request ids, keeps the server's output |
 | `smpa_adapter/conversation_transcript.py` | Read-only reader of SMPA's length-delimited `conversation.md`, tolerant of a partially written last entry |
 | `smpa_adapter/rdf_graphs.py` | Turtle file to generic nodes/edges (rdflib), with file state and content revision |
+| `smpa_adapter/smpa_services.py` | Endpoint names and read-only calls of SMPA's existing ROS interfaces: run control (`GetSmpaStatus`, `SmpaEvent`) and inference server (`ListModels`, `GetModelStatus`, `InferenceStatus`) |
+| `smpa_adapter/dialogue.py` | Dialogue coordinator: stage adapters (pending or ROS), belief context, turn records, retry, events |
 
 ### Process life cycle
 
@@ -109,8 +112,8 @@ browser never causes a queue. Silence is explained with status messages.
 | `tabs/actions/index.js` | Actions tab: server list, editor, confirmation dialog, monitor, history |
 | `tabs/actions/form.js` | Schema-driven goal form and client-side validation |
 | `tabs/actions/store.js` | Saved goal configurations in browser storage |
-| `tabs/smpa/index.js` | SMPA shell: session selector, activity, banners, section registry (Dashboard, Sense, Model, Plan, Act) |
-| `tabs/smpa/dashboard.js` | Dashboard section: model selector, conversation, Sense/Belief/Plan graph views |
+| `tabs/smpa/index.js` | SMPA shell: session selector, activity, banners, section registry (Dialogue, Sense, Model, Plan, Act) |
+| `tabs/smpa/dialogue.js` | Dialogue section: model selector, conversation, Sense/Belief/Plan graph views |
 | `tabs/smpa/rdf_view.js` | Generic interactive RDF drawing (Cytoscape) with incremental updates and node inspector |
 | `tabs/smpa/sense.js` | Sense section: See, Hear, Read panels and observation timeline |
 | `vendor/cytoscape.min.js` | Cytoscape.js 3.35.0 (MIT), unmodified |
@@ -246,10 +249,10 @@ ROS camera topic, Listen status topic ──► existing sensor / echo streams �
 - **Safety.** Files are opened read-only, no locks are taken (SMPA's conversation server
   locks its transcript), file downloads are confined to recorded media inside a session.
 - **Sections.** A section is a module with `mount(container, session)`, `unmount()` and an
-  optional `update(session)`. The Dashboard (versions 4 and 6) was added this way; Model, Plan and
+  optional `update(session)`. The Dialogue (versions 4 and 6) was added this way; Model, Plan and
   Act will be too.
 
-## SMPA Dashboard (version 4, integrated into the package in version 6)
+## SMPA Dialogue (version 4, integrated into the package in version 6)
 
 ```
 browser ─► /api/v1/smpa/conversation/* ─► conversation_service.py ─HTTP (loopback, no Origin)─►
@@ -279,16 +282,59 @@ browser ─► /api/v1/smpa/sessions/<id>/conversation ─► conversation_trans
   Per-run files are candidate lists: the requested `world_model/…` location first, then
   where SMPA writes today, so moving SMPA's files (SMPA_CONTRACTS.md C6, C7) needs no GUI
   change. Both SMPA checkout layouts (ROS 2 packages and flat) are recognised.
-- **Optional.** With `--no-smpa` no conversation service is used and every Dashboard
-  route answers that SMPA is disabled; the page shows a note instead of the Dashboard.
+- **Optional.** With `--no-smpa` no conversation service is used and every Dialogue
+  route answers that SMPA is disabled; the page shows a note instead of the Dialogue.
 - **Graph drawing.** `tabs/smpa/rdf_view.js` merges each new revision into the
   Cytoscape drawing (add/remove/update), lays out only when nodes were added and never
   refits after the first drawing, so the viewport is kept. Malformed or unreadable files
   keep the last valid drawing of that view. Tapping a node shows its IRI, literal values
   and links; tapping an edge shows its triple.
-- **Frontend.** `tabs/smpa/dashboard.js` is a section like Sense. It polls the
+- **Frontend.** `tabs/smpa/dialogue.js` is a section like Sense. It polls the
   conversation status every 1.5 s, the graph every 1.5 s and the models every 15 s.
   Starting a conversation selects the new run in the shell (`chooseSession`).
+
+## Dialogue over ROS 2 (version 8, backend prepared)
+
+The SMPA section formerly called Dashboard is the **Dialogue**. Its backend can now act
+as a ROS 2 client of SMPA's independent cognitive nodes:
+
+```
+browser ─► POST /api/v1/smpa/dialogue/turns ─► dialogue.DialogueCoordinator (asyncio task)
+             Sense ─► Model ─► [belief snapshot read: rdf_graphs on the belief context's run] ─► Plan ─► Act
+             each stage: adapter ─► ros_clients.RosClients ─► gateway node (single executor thread)
+browser ◄─ WS /api/v1/smpa/dialogue/stream ◄─ coordinator events + relayed /smpa/events, /llm/inference_status
+browser ─► GET /api/v1/smpa/ros ─► smpa_services ─► /smpa/get_status, /llm/list_models, /llm/get_model_status
+```
+
+- **Order belongs to the Dialogue.** The coordinator calls the four stages one after the
+  other and passes values between them. It implements no cognition, inference or belief
+  update; Model alone changes beliefs. It holds one turn at a time.
+- **Non-blocking.** ROS entities are still created only on the gateway's executor thread.
+  `ros_clients.bridge` turns each ROS future into an asyncio future of the web server's
+  event loop, so waiting for a long action blocks neither the loop nor other requests.
+  Clients exist only during a call; relays only while a stream is open.
+- **Adapter boundary.** `PendingStage` (today, for all four stages) is never called and
+  says why. `RosStage` calls a configured service or action: the layout's
+  `dialogue.stages.<stage>` gives the endpoint, the installed type, a request template
+  over the turn values and the result fields that become outputs (`observation_id`,
+  `model_invocation_id`, `belief_revision`, `response`, `delivery`). When Codex's stage
+  interfaces exist, connecting them is configuration, or one adapter class per stage if a
+  contract needs more than templates and field paths. No stage contract is invented.
+- **Belief context.** Independent: the Dialogue's session (a run in SMPA's memory) is the
+  belief context. Shared: the robot's run, from `GetSmpaStatus` or chosen explicitly.
+  The identifiers (`context_mode`, `run_id`, `session_id`, `belief_context_id`) are turn
+  values every stage request can carry.
+- **Snapshots, not predictions.** The belief graph of the belief context is read before
+  Model and again after Model succeeded, with the same reader as the graph view; the
+  `belief_snapshot` event carries the revision the graph view will show. Nothing is
+  published when Model fails.
+- **Association.** The turn record keeps message, observation id, Model invocation id,
+  belief snapshot and response together; a retry starts at the failed stage and reuses
+  the earlier outputs instead of calling Sense or Model again.
+- **Existing behaviour kept.** While any stage is pending the turn route answers 409 and
+  the page keeps using SMPA's conversation server; the page only shows which path
+  answers. No LLM setting is duplicated: model settings stay ROS parameters of
+  `smpa_llm`'s `llm` node.
 
 ## Deviations from GUI_ARCHITECTURE_REPORT.md
 
@@ -302,7 +348,7 @@ browser ─► /api/v1/smpa/sessions/<id>/conversation ─► conversation_trans
 - Version 2 adds action execution, which the report had excluded from version 1.
   Goal monitoring uses polling of gateway-held records instead of a WebSocket, so that
   a broken connection can never be mistaken for, or cause, a resend.
-- Version 6 merges the version 4 Dashboard into the package; the report had no
+- Version 6 merges the version 4 Dialogue into the package; the report had no
   conversational interface.
 - Version 5 turns `gui/` into the ROS 2 package `smpa_gui` (the report had planned a
   standalone folder outside colcon) and adds parameter changes and service calls, which

@@ -1,4 +1,4 @@
-"""Drive the SMPA Dashboard in a headless browser: models, a real SMPA conversation, and live graph views."""
+"""Drive the SMPA Dialogue in a headless browser: models, a real SMPA conversation, and live graph views."""
 from pathlib import Path
 import time
 
@@ -22,7 +22,7 @@ def wait_for(condition, timeout=30.0, message='condition was not reached'):
 
 @pytest.fixture(scope='module')
 def page(conversation_server, browser):
-    """Open the SMPA tab (Dashboard by default) and fail on any page error."""
+    """Open the SMPA tab (Dialogue by default) and fail on any page error."""
     errors = []
     context = browser.new_context(viewport={'width': 1500, 'height': 950})
     page = context.new_page()
@@ -44,9 +44,9 @@ def node_labels(page):
     return sorted(page.evaluate("window.__rdf.nodes().map((node) => node.data('label'))"))
 
 
-def test_dashboard_is_the_default_section_and_lists_models(page):
-    """The SMPA tab opens on the Dashboard; models show provider, description and availability."""
-    assert page.locator('nav[aria-label="SMPA sections"] button').all_inner_texts() == ['Dashboard', 'Sense', 'Model', 'Plan', 'Act']
+def test_dialogue_is_the_default_section_and_lists_models(page):
+    """The SMPA tab opens on the Dialogue; models show provider, description and availability."""
+    assert page.locator('nav[aria-label="SMPA sections"] button').all_inner_texts() == ['Dialogue', 'Sense', 'Model', 'Plan', 'Act']
     options = page.locator('#model-select option').all_inner_texts()
     assert any('stub · stub · default' in text for text in options) and any('absent-local-model' in text and 'unavailable' in text for text in options)
     assert page.input_value('#model-select') == 'api:stub'
@@ -58,6 +58,17 @@ def test_dashboard_is_the_default_section_and_lists_models(page):
     page.select_option('#model-select', 'api:stub')
     assert page.get_attribute('#conversation-phase', 'data-phase') == 'stopped'
     assert page.is_disabled('#message-input')
+    page.wait_for_selector('#dialogue-path[data-path="conversation_server"]')
+    assert 'ROS 2 stage path pending (sense, model, plan, act)' in page.inner_text('#dialogue-path')
+
+
+def test_old_dashboard_address_opens_the_dialogue(page):
+    """An address or bookmark from before the rename (#smpa/dashboard) opens the Dialogue."""
+    page.goto(page.url.split('#')[0] + '#smpa/dashboard')
+    page.wait_for_selector('nav[aria-label="SMPA sections"] button[data-section="dialogue"][aria-selected="true"]')
+    page.wait_for_selector('#model-select')
+    page.goto(page.url.split('#')[0] + '#smpa/dialogue')
+    page.wait_for_selector('#model-select')
 
 
 def test_start_conversation_send_and_reload(page, conversation_server):
@@ -67,7 +78,7 @@ def test_start_conversation_send_and_reload(page, conversation_server):
     run_id = fetch(conversation_server['base'] + '/api/v1/smpa/conversation')['conversation']['run_id']
     conversation_server['browser_run'] = run_id
     page.wait_for_function(f"document.getElementById('session-id') && document.getElementById('session-id').textContent === '{run_id}'")
-    assert page.url.endswith(f'#smpa/dashboard/{run_id}')
+    assert page.url.endswith(f'#smpa/dialogue/{run_id}')
     assert 'Active conversation' in page.inner_text('#conversation-heading')
     page.fill('#message-input', 'Hello from the browser')
     page.press('#message-input', 'Enter')
@@ -76,7 +87,7 @@ def test_start_conversation_send_and_reload(page, conversation_server):
     assert page.inner_text('.message-assistant .message-text').endswith('to: Hello from the browser')
     assert page.input_value('#message-input') == ''
     assert 'Hello from the browser' in (run_directory(conversation_server, run_id) / 'conversation.md').read_text()
-    page.screenshot(path=str(ARTIFACTS / 'dashboard-conversation.png'))
+    page.screenshot(path=str(ARTIFACTS / 'dialogue-conversation.png'))
     page.reload()
     page.wait_for_selector('.message-assistant')
     assert page.locator('.message').count() == 2 and 'Active conversation' in page.inner_text('#conversation-heading')
@@ -170,7 +181,7 @@ def test_graph_views_follow_turtle_file_changes(page, conversation_server):
     (folder / 'belief.ttl').write_text('# nothing yet\n')
     page.wait_for_selector('#graph-state[data-state="empty"]')
     assert 'no triples' in page.inner_text('#graph-overlay')
-    page.screenshot(path=str(ARTIFACTS / 'dashboard-graph-empty.png'))
+    page.screenshot(path=str(ARTIFACTS / 'dialogue-graph-empty.png'))
 
 
 def test_mock_graphs_are_bannered_and_switch_back_to_real(page, conversation_server):
@@ -181,7 +192,7 @@ def test_mock_graphs_are_bannered_and_switch_back_to_real(page, conversation_ser
     page.wait_for_selector('#graph-mock', state='visible')
     wait_for(lambda: 'mock:place_room' in node_labels(page), message='mock belief not drawn')
     assert 'MOCK DATA' in page.inner_text('#graph-mock') and 'mock_graphs/belief.ttl' in page.inner_text('#graph-path')
-    page.screenshot(path=str(ARTIFACTS / 'dashboard-mock.png'))
+    page.screenshot(path=str(ARTIFACTS / 'dialogue-mock.png'))
     page.click('[data-source="real"]')
     page.wait_for_selector('#graph-mock', state='hidden')
     page.wait_for_selector('#graph-state[data-state="empty"]')
@@ -189,7 +200,7 @@ def test_mock_graphs_are_bannered_and_switch_back_to_real(page, conversation_ser
     assert (run / 'world_model' / 'belief.ttl').read_text() == '# nothing yet\n'
 
 
-def test_stopping_the_server_from_the_dashboard(page):
+def test_stopping_the_server_from_the_dialogue(page):
     """The Stop button stops SMPA's server; the conversation becomes a recorded one."""
     page.click('#conversation-stop')
     page.wait_for_selector('#conversation-phase[data-phase="stopped"]')

@@ -93,7 +93,7 @@ def test_health_reports_ros_environment(server, ros_environment):
     health = get(server, '/health')
     assert health['status'] == 'ok' and health['ros']['ok'] and health['ros']['node'] == '/smpa_gui'
     assert health['ros']['domain_id'] == int(ros_environment['ROS_DOMAIN_ID'])
-    assert health['contract_version'] == '1.6'
+    assert health['contract_version'] == '1.7'
 
 
 def test_graph_contains_fixture_nodes_topics_and_connections(server):
@@ -212,7 +212,7 @@ def test_unresponsive_and_unknown_nodes_are_states_not_errors(server):
     """A node that never spins is 'not_responding'; a node without services is 'unavailable'."""
     started = time.monotonic()
     silent = get(server, '/ros/nodes/parameters', node='/fixture_silent', timeout=1)
-    assert silent == dict(contract_version='1.6', node='/fixture_silent', state='not_responding', parameters=[])
+    assert silent == dict(contract_version='1.7', node='/fixture_silent', state='not_responding', parameters=[])
     assert time.monotonic() - started < 4
     assert get(server, '/ros/nodes/parameters', node='/no_such_node')['state'] == 'unavailable'
     assert get(server, '/ros/nodes/parameters', node='/smpa_gui')['state'] == 'unavailable'
@@ -392,14 +392,15 @@ def test_foreign_browser_origins_cannot_open_streams(server):
 
 
 def test_only_the_confirmed_change_routes_can_change_anything(server):
-    """Every route is read-only except goals, their cancellation, parameter changes, service calls and conversation routes."""
+    """Every route is read-only except goals, their cancellation, parameter changes, service calls, conversation and Dialogue routes."""
     routes = fetch(server + '/api/openapi.json')['paths']
     writable = {path: sorted(methods) for path, methods in routes.items() if set(methods) != {'get'}}
     assert writable == {'/api/v1/actions/goals': ['get', 'post'],
                         '/api/v1/actions/goals/{goal_id}/cancel': ['post'],
                         '/api/v1/ros/parameters/set': ['post'],
                         '/api/v1/ros/services/call': ['post'],
-                        **{f'/api/v1/smpa/conversation/{name}': ['post'] for name in ('start', 'resume', 'model', 'messages', 'stop')}}
+                        **{f'/api/v1/smpa/conversation/{name}': ['post'] for name in ('start', 'resume', 'model', 'messages', 'stop')},
+                        **{f'/api/v1/smpa/dialogue/{name}': ['post'] for name in ('context', 'turns', 'turns/{turn_id}/retry')}}
 
 
 def test_gateway_node_offers_nothing_to_the_ros_graph(server):

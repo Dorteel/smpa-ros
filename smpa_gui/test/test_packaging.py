@@ -89,7 +89,7 @@ def test_frontend_assets_are_installed_completely(workspace):
         source, installed = GUI / 'smpa_gui' / folder, package / folder
         expected = sorted(str(path.relative_to(source)) for path in source.rglob('*') if path.is_file())
         assert sorted(str(path.relative_to(installed)) for path in installed.rglob('*') if path.is_file()) == expected
-    assert (package / 'frontend' / 'tabs' / 'smpa' / 'dashboard.js').is_file()
+    assert (package / 'frontend' / 'tabs' / 'smpa' / 'dialogue.js').is_file()
     assert (package / 'frontend' / 'vendor' / 'cytoscape.min.js').stat().st_size == \
         (GUI / 'smpa_gui' / 'frontend' / 'vendor' / 'cytoscape.min.js').stat().st_size
     share = workspace['path'] / 'install' / 'smpa_gui' / 'share' / 'smpa_gui'
@@ -181,8 +181,8 @@ def generate_launch_description():
     assert 'node left the ROS graph' in output, output
 
 
-def test_installed_gui_runs_the_dashboard_against_an_smpa_checkout(workspace, tmp_path):
-    """The installed package, launched with smpa_root, serves the Dashboard: models, mock graphs, a real conversation.
+def test_installed_gui_runs_the_dialogue_against_an_smpa_checkout(workspace, tmp_path):
+    """The installed package, launched with smpa_root, serves the Dialogue: models, mock graphs, a real conversation.
 
     Uses SMPA's real conversation server from the checkout named by
     SMPA_GUI_TEST_SMPA_ROOT with the test configuration and the inference stub.

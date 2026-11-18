@@ -117,3 +117,29 @@ Workspace.
 To move a version 6 worktree to version 7, apply `smpa-ros-gui-v7-workspace.patch` on the
 `gui/v6-conversation` branch and rebuild the package (`./install_gui.sh --build ~/ros2_ws`,
 no new Python packages).
+
+## 4. From version 7 to version 8 (Dashboard renamed Dialogue; Dialogue backend over ROS 2)
+
+- **Rename.** The SMPA section *Dashboard* is now *Dialogue*: `tabs/smpa/dashboard.js` →
+  `tabs/smpa/dialogue.js`, section id `dashboard` → `dialogue` (the old address
+  `#smpa/dashboard` still opens it), CSS classes `.dashboard*` → `.dialogue*`, tests
+  `test_dashboard_units.py` → `test_dialogue_units.py` and `test_browser_dashboard.py` →
+  `test_browser_dialogue.py`. HTTP routes did not change name (they were never called
+  "dashboard"). The history above keeps the old name.
+- **Added:** `ros_adapter/ros_clients.py`, `smpa_adapter/smpa_services.py`,
+  `smpa_adapter/dialogue.py`, routes `GET /smpa/ros`, `GET /smpa/dialogue`,
+  `POST /smpa/dialogue/context`, `POST /smpa/dialogue/turns`, `GET /smpa/dialogue/turns/{id}`,
+  `POST /smpa/dialogue/turns/{id}/retry`, `WS /smpa/dialogue/stream` (contract 1.7);
+  layout sections `ros` and `dialogue` and the example `layouts/dialogue-ros.yaml`;
+  tests `test_dialogue_coordinator.py`, `test_ros_clients.py`, `test_dialogue_ros.py` with
+  `test/fixtures/cognitive_nodes.py`.
+- **Unchanged behaviour.** Messages still go through SMPA's conversation server; nothing
+  else in the GUI changed. `smpa_ros_interfaces` is optional at run time (not a package
+  dependency): source SMPA's workspace to use the ROS status and Dialogue routes.
+- **When Codex's stage interfaces exist:** describe each stage in the layout's
+  `dialogue.stages` (endpoint, type, request template, outputs; SMPA_CONTRACTS.md C12),
+  or add a small adapter class in `dialogue.py` if a contract needs more, then switch
+  the page's send path to `POST /smpa/dialogue/turns` and the stream.
+
+To move a version 7 worktree to version 8, apply `smpa-ros-gui-v8-dialogue-ros.patch` on
+`gui/v7-workspace` and rebuild (`./install_gui.sh --build ~/ros2_ws`, no new Python packages).

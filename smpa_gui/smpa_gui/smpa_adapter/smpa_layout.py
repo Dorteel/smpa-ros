@@ -52,7 +52,7 @@ DEFAULT_FILES = {'conversation': ['world_model/conversation.md', 'conversation.m
                  'belief': ['world_model/belief.ttl', 'belief-state.ttl'],
                  'plan': ['world_model/plan.ttl']}
 KNOWN_KEYS = {'smpa_root', 'config', 'python', 'model_root', 'memory_root', 'conversation_port',
-              'conversation_url', 'mock_graphs', 'files'}
+              'conversation_url', 'mock_graphs', 'files', 'ros', 'dialogue'}
 
 
 class LayoutError(ValueError):
@@ -104,7 +104,10 @@ def load(path=None, environment=None):
     Later sources win: defaults, then the layout file, then individual
     environment variables. Paths are made absolute. Unknown keys in the file
     are refused so that a misspelt setting is not silently ignored. A
-    per-run file may be given as one path or as a list of candidates.
+    per-run file may be given as one path or as a list of candidates. The
+    ``ros`` section (ROS endpoint names of SMPA's existing interfaces) and
+    the ``dialogue`` section (belief context and stage adapters) are kept
+    as given after they have been checked.
     """
     environment = os.environ if environment is None else environment
     path = path or environment.get('SMPA_GUI_LAYOUT')
@@ -145,6 +148,14 @@ def load(path=None, environment=None):
         if not values:
             raise LayoutError(f'files.{name} needs at least one path')
         layout['files'][name] = [check_relative(name, item) for item in values]
+    layout['ros'] = supplied.get('ros') or {}
+    layout['dialogue'] = supplied.get('dialogue') or {}
+    from smpa_gui.smpa_adapter import dialogue, smpa_services
+    try:
+        smpa_services.endpoints(layout['ros'])
+        dialogue.configuration(layout['dialogue'])
+    except ValueError as error:
+        raise LayoutError(str(error)) from error
     return layout
 
 

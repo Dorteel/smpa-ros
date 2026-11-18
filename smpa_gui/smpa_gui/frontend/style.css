@@ -126,10 +126,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .proposal-input { flex: 1; min-width: 140px; }
 #parameter-table td { vertical-align: middle; }
 dialog table { margin: 8px 0; }
-/* SMPA Dashboard: conversation (left) and graph views (right). */
-.dashboard { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(340px, 34%) 1fr; }
-.dashboard-left { min-height: 0; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line); }
-.dashboard-right { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+/* SMPA Dialogue: conversation (left) and graph views (right). */
+.dialogue { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(340px, 34%) 1fr; }
+.dialogue-left { min-height: 0; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line); }
+.dialogue-right { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .stack { display: flex; flex-direction: column; gap: 4px; } .stack select { width: 100%; }
 .messages { flex: 1; min-height: 120px; overflow: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--bg); }
 .message { max-width: 92%; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: var(--panel); }
@@ -151,7 +151,7 @@ dialog table { margin: 8px 0; }
 .graph-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 30px;
                  text-align: center; color: var(--muted); pointer-events: none; }
 .link-list { padding-left: 16px; margin: 4px 0; font-size: 12.5px; } .link-list a { color: var(--accent); }
-@media (max-width: 900px) { .dashboard { grid-template-columns: 1fr; grid-template-rows: minmax(420px, auto) minmax(420px, 1fr); overflow: auto; } }
+@media (max-width: 900px) { .dialogue { grid-template-columns: 1fr; grid-template-rows: minmax(420px, auto) minmax(420px, 1fr); overflow: auto; } }
 /* ROS 2 Workspace: interface panels around an empty canvas. */
 :root { --topic: #1f6feb; --service: #1a7f37; --action: #8250df; --parameter: #bc4c00; --grid-line: rgba(102, 112, 133, .16); }
 @media (prefers-color-scheme: dark) {

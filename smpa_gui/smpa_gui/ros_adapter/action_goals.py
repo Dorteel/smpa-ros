@@ -15,8 +15,9 @@ Concepts:
     last goal of an action finishes, its client is removed again, so an idle
     gateway offers and uses nothing on the ROS graph.
 
-    This is the only module that makes the gateway act on ROS. It can send
-    and cancel action goals and nothing else.
+    This module sends and cancels the action goals a user confirms, and
+    nothing else. Goals the backend sends for itself (Dialogue stages) go
+    through ``ros_clients``.
 """
 import threading
 import time

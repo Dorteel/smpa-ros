@@ -64,7 +64,7 @@ def select(page, identity):
 
 def test_sections_and_session_selector(page):
     """Five sections are offered; Model, Plan and Act are placeholders; the selector lists every session with its state."""
-    assert page.locator('nav[aria-label="SMPA sections"] button').all_inner_texts() == ['Dashboard', 'Sense', 'Model', 'Plan', 'Act']
+    assert page.locator('nav[aria-label="SMPA sections"] button').all_inner_texts() == ['Dialogue', 'Sense', 'Model', 'Plan', 'Act']
     for section in ('model', 'plan', 'act'):
         page.click(f'button[data-section="{section}"]')
         assert 'not implemented in this iteration' in page.inner_text(f'[data-placeholder="{section}"]')

@@ -1,5 +1,5 @@
 /**
- * The Dashboard section: a conversation with SMPA on the left, its Sense, Belief and Plan graphs on the right.
+ * The Dialogue section: a conversation with SMPA on the left, its Sense, Belief and Plan graphs on the right.
  *
  * Concepts: a conversation is an SMPA conversation run. It is served by
  * SMPA's own conversation server, which the GUI server starts on demand and
@@ -356,23 +356,39 @@ function choose(change) {
 }
 
 /**
- * Replace the Dashboard with a note when SMPA integration is disabled in this GUI.
+ * Replace the Dialogue with a note when SMPA integration is disabled in this GUI.
  *
- * Polling stops, because every Dashboard route then answers that SMPA is
+ * Polling stops, because every Dialogue route then answers that SMPA is
  * disabled. The rest of the GUI is unaffected.
  */
 function showDisabled(container) {
   for (const stop of stops) stop();
   stops = [];
   if (rdf) { rdf.destroy(); rdf = null; }
-  container.replaceChildren(h('div', {class: 'empty', id: 'dashboard-disabled'},
+  container.replaceChildren(h('div', {class: 'empty', id: 'dialogue-disabled'},
     h('p', {}, 'SMPA integration is disabled in this GUI (started with --no-smpa or smpa:=false).'),
     h('p', {}, 'The conversation and the Sense, Belief and Plan graphs are not available. The ROS 2, Sensors and Actions tabs are unaffected.')));
 }
 
+/**
+ * Say which path answers messages: SMPA's conversation server, or the ROS 2 stages Sense, Model, Plan and Act.
+ *
+ * The GUI server reports which stage interfaces are still pending. This
+ * page keeps sending messages through the conversation server, as before,
+ * until the stage interfaces exist and the page is switched over.
+ */
+async function refreshPath() {
+  const answer = (await getJSON('/smpa/dialogue')).dialogue;
+  dom.path.dataset.path = answer.path;
+  dom.path.textContent = answer.ros_path_ready
+    ? 'Replies: SMPA\'s conversation server. The ROS 2 stage path (Sense → Model → Plan → Act) is configured; '
+      + 'turns over it are started through the API (POST /api/v1/smpa/dialogue/turns).'
+    : `Replies: SMPA's conversation server. ROS 2 stage path pending (${answer.pending_stages.join(', ')}).`;
+}
+
 export default {
-  id: 'dashboard',
-  title: 'Dashboard',
+  id: 'dialogue',
+  title: 'Dialogue',
 
   /** Build both columns and start refreshing the conversation, the models and the graph. */
   mount(container, selected) {
@@ -387,6 +403,7 @@ export default {
       serverError: h('p', {class: 'warning', id: 'conversation-error', style: 'display:none'}),
       prerequisites: h('p', {class: 'warning', id: 'conversation-prerequisites', style: 'display:none'}),
       log: h('pre', {id: 'conversation-log', style: 'max-height:180px;margin:4px 0'}),
+      path: h('p', {class: 'muted', id: 'dialogue-path', style: 'font-size:12px;margin:4px 0'}),
       controls: h('div', {class: 'row', id: 'conversation-controls', style: 'margin:6px 0'}),
       heading: h('div', {class: 'muted', id: 'conversation-heading', style: 'font-size:12.5px;padding:6px 12px;border-bottom:1px solid var(--line)'}),
       messages: h('div', {class: 'messages', id: 'messages'}),
@@ -406,20 +423,20 @@ export default {
       overlay: h('div', {class: 'graph-overlay', id: 'graph-overlay'}),
       inspector: h('aside', {class: 'graph-side', id: 'graph-inspector'}),
     };
-    const left = h('section', {class: 'dashboard-left'},
+    const left = h('section', {class: 'dialogue-left'},
       h('div', {class: 'pad', style: 'border-bottom:1px solid var(--line)'},
         h('label', {class: 'stack'}, h('strong', {}, 'Model'), dom.model), dom.modelInfo, dom.controls, dom.server,
-        dom.serverError, dom.prerequisites,
+        dom.serverError, dom.prerequisites, dom.path,
         h('details', {}, h('summary', {class: 'muted', style: 'font-size:12px'}, 'Server output'), dom.log)),
       dom.heading, dom.messages,
       h('div', {class: 'composer'}, dom.input, dom.send));
-    const right = h('section', {class: 'dashboard-right'},
+    const right = h('section', {class: 'dialogue-right'},
       h('div', {class: 'toolbar'}, dom.views, dom.sources,
         h('button', {class: 'action', onclick: () => rdf.fit()}, 'Fit'),
         h('button', {class: 'action', onclick: () => rdf.arrange()}, 'Re-arrange'), dom.graphState),
       dom.mock,
       h('div', {class: 'graph-area'}, h('div', {class: 'graph-stage'}, dom.canvas, dom.overlay), dom.inspector));
-    container.append(h('div', {class: 'dashboard'}, left, right));
+    container.append(h('div', {class: 'dialogue'}, left, right));
     rdf = createRdfView(dom.canvas, inspect);
     window.__rdf = rdf.cy;
     inspect(null);
@@ -430,7 +447,7 @@ export default {
       if (error.message.includes('SMPA integration is disabled')) { showDisabled(container); return; }
       dom.serverError.style.display = '';
       dom.serverError.textContent = 'The GUI server cannot be reached.';
-    }), poll(refreshModels, 15000, () => {}), poll(refreshGraph, 1500, () => {})];
+    }), poll(refreshModels, 15000, () => {}), poll(refreshGraph, 1500, () => {}), poll(refreshPath, 15000, () => {})];
   },
 
   /** Follow the shell's session list: the selected session's details may have changed. */

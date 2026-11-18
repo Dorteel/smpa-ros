@@ -1,4 +1,45 @@
-# Verification results (GUI version 7, 2026-11-18)
+# Verification results (GUI version 8, 2026-11-18)
+
+## Version 8: Dashboard renamed Dialogue; Dialogue backend prepared for SMPA's ROS 2 nodes
+
+### Where it ran
+
+**Cloud container only**; nothing was run on the workstation. SMPA's interface package
+was built in the cloud from the workstation's `main` 2efae36 sources of
+`smpa_ros_interfaces` (colcon, RoboStack Jazzy) and sourced; `smpa_ros` and `smpa_llm`
+nodes were **not** run: the tests use lightweight stand-ins with SMPA's real types
+(`test/fixtures/cognitive_nodes.py`). No inference, GPU, training or simulation ran.
+
+Command: `SMPA_GUI_TEST_SMPA_ROOT=<copy> ./test_gui.sh --browser` with the copy's
+`smpa_llm` workspace and the built `smpa_ros_interfaces` sourced: **203 passed**
+(backend, ROS integration, packaging) and **67 passed** (browser), none skipped. The two
+ROS Dialogue suites were run three more times on their own without a failure. Without
+`smpa_ros_interfaces` sourced, their 19 tests are skipped and the coordinator's 7 pass.
+
+| Suite | Tests | Kind |
+|---|---|---|
+| `test/test_dialogue_coordinator.py` | 7 | unit, no ROS: configuration checks, templates, stage order and value flow, snapshot after Model only, failure and retry from the failed stage, busy/duplicate, contexts, pending refusal, shutdown |
+| `test/test_ros_clients.py` | 5 | in-process gateway + stand-ins: `ListModels`/`GetSmpaStatus` calls, `GenerateText` goal with acceptance and feedback events, `interface_missing`/`invalid_request`/`unavailable`/`aborted`/`timed_out`, concurrent goals with a free event loop and the server's `rejected`, topic relay and release; no client left behind |
+| `test/test_dialogue_ros.py` | 14 | GUI process + stand-ins: `GET /smpa/ros`; absent nodes; four stages in order with filled requests; belief snapshot equal to the graph view's revision; shared/independent/chosen contexts; failed Plan and retry; failed Model publishes no snapshot; Act's own failure reason; unavailable stage; shared context without run control; token, duplicate and busy rules; other requests answer in < 0.5 s during a turn; WebSocket events in order with relayed `SmpaEvent`/`InferenceStatus`; relay released; read-only and `--no-smpa` |
+| `test/test_browser_dialogue.py` | +1 | path note; old `#smpa/dashboard` address opens the Dialogue |
+| all earlier suites | 177 + 66 | regression (renamed files; route inventory, contract 1.7) |
+
+Requested checks: (1) service and action communication → `test_ros_clients.py`,
+`test_existing_run_control_and_inference_interfaces_are_read`; (2) nonblocking →
+`test_actions_run_concurrently_and_overlap_is_rejected`,
+`test_a_running_turn_does_not_block_other_requests`; (3) sequencing →
+`test_turn_runs_the_four_stages_in_order_and_associates_their_outputs`; (4) failures and
+recovery → the failure, retry, unavailable and Act tests; (5) context propagation →
+`test_shared_and_independent_contexts_carry_the_right_identifiers`; (6) snapshot refresh
+→ `test_belief_snapshot_is_read_after_model_commits`,
+`test_model_failure_publishes_no_belief_snapshot`; (7) WebSocket →
+`test_stream_carries_turn_events_and_relays_smpa_topics`; (8) existing behaviour → all
+earlier suites.
+
+Not verified: SMPA's real `smpa_control` and `llm` nodes, the cognitive-node branch, the
+real stage interfaces (they do not exist yet), the workstation.
+
+---
 
 ## Fix: NaN and infinity in JSON answers (on version 7)
 

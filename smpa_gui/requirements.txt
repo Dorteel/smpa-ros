@@ -4,5 +4,5 @@
 fastapi==0.163.0
 uvicorn==0.54.0
 websockets==17.4
-# RDF Turtle parsing for the SMPA Dashboard's graph views; the same version as SMPA pins.
+# RDF Turtle parsing for the SMPA Dialogue's graph views; the same version as SMPA pins.
 rdflib==7.1.4

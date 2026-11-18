@@ -10,9 +10,11 @@ Concepts:
     Everything is read-only except four groups of change routes: sending and
     cancelling action goals (``/api/v1/actions/goals``), setting parameters
     (``/api/v1/ros/parameters/set``), calling services
-    (``/api/v1/ros/services/call``) and the SMPA conversation routes
+    (``/api/v1/ros/services/call``), the SMPA conversation routes
     (``/api/v1/smpa/conversation/...``, which relay to SMPA's own
-    conversation server). Each is made only after an explicit
+    conversation server) and the Dialogue routes
+    (``/api/v1/smpa/dialogue/...``, which choose the belief context and
+    run turns through SMPA's cognitive stage nodes). Each is made only after an explicit
     confirmation in the page, accepted only from this computer, only with the
     session token of this gateway process, never repeated for the same
     request id, and all of them can be switched off together (read-only
@@ -20,6 +22,7 @@ Concepts:
 """
 import asyncio
 import ipaddress
+import json
 import logging
 import math
 from contextlib import asynccontextmanager
@@ -40,7 +43,9 @@ from pydantic import BaseModel, Field
 
 from smpa_gui import CONTRACT_VERSION
 from smpa_gui.ros_adapter import ros_graph, ros_interfaces, ros_parameters, ros_services, ros_topics, sensors
-from smpa_gui.smpa_adapter import conversation_transcript, rdf_graphs, smpa_layout, smpa_models, smpa_runs
+from smpa_gui.smpa_adapter import (conversation_transcript, dialogue, rdf_graphs, smpa_layout, smpa_models, smpa_runs,
+                                    smpa_services)
+from smpa_gui.ros_adapter.ros_clients import RosClients
 from smpa_gui.smpa_adapter.conversation_service import ConversationError, ConversationService
 from smpa_gui.ros_adapter.action_goals import GoalManager, GoalRefused
 from smpa_gui.ros_adapter.gateway import Gateway, GatewayError
@@ -180,6 +185,27 @@ class ConversationMessage(BaseModel):
     request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
 
 
+class DialogueContextChoice(BaseModel):
+    """Which beliefs the Dialogue works on: the robot's (shared) or its own (independent), optionally named."""
+
+    mode: str = Field(pattern=r'^(shared|independent)$')
+    run_id: str | None = Field(default=None, max_length=200)
+    session_id: str | None = Field(default=None, max_length=200)
+
+
+class DialogueTurnRequest(BaseModel):
+    """One user message for a Dialogue turn over ROS 2."""
+
+    text: str = Field(min_length=1, max_length=32000)
+    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+class DialogueRetryRequest(BaseModel):
+    """A request to run a failed Dialogue turn again from its failed stage."""
+
+    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+
+
 class GoalSubmission(BaseModel):
     """The body of a goal submission: which action, its type, the goal values and a request identifier."""
 
@@ -215,6 +241,8 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
     elif smpa_enabled and layout['smpa_root'] is not None:
         memory_root = layout['memory_root']
     conversation = conversation or ConversationService(layout)
+    ros_endpoints = smpa_services.endpoints(layout.get('ros'))
+    dialogue_settings = dialogue.configuration(layout.get('dialogue'))
     gateway = gateway or Gateway()
     session_token = secrets.token_urlsafe(32)
 
@@ -225,9 +253,15 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
         app.state.goals = GoalManager(gateway)
         app.state.parameter_writer = ros_parameters.ParameterWriter(gateway)
         app.state.service_caller = ros_services.ServiceCaller(gateway)
+        app.state.ros_clients = RosClients(gateway)
+        app.state.dialogue = dialogue.DialogueCoordinator(
+            app.state.ros_clients, dialogue_settings['adapters'], dialogue_settings['context'], read_belief,
+            lambda: smpa_services.robot_run(app.state.ros_clients, ros_endpoints), dialogue_session)
         try:
             yield
         finally:
+            await app.state.dialogue.shutdown()
+            await asyncio.to_thread(app.state.ros_clients.shutdown)
             await asyncio.to_thread(app.state.goals.shutdown, cancel_on_exit)
             await asyncio.to_thread(conversation.shutdown)
             gateway.stop()
@@ -892,6 +926,148 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
         """Stop the GUI-managed conversation server; SMPA finalizes its run."""
         conversation_change(request)
         return conversation_reply(conversation.stop)
+
+    def read_belief(run_id):
+        """Read the belief graph of one run with the existing graph reader, for the Dialogue's snapshots."""
+        directory = smpa_runs.find_session(smpa_root(), run_id)
+        if directory is None:
+            raise LookupError(f'No SMPA run {run_id} in the memory directory')
+        path, _, _ = smpa_layout.run_file(directory, layout, 'belief')
+        return rdf_graphs.read(path)
+
+    def dialogue_session():
+        """Return the session of the conversation the Dialogue currently holds, or None."""
+        return conversation.status(refresh=False).get('run_id')
+
+    def dialogue_reply(work):
+        """Answer a Dialogue operation's result, or its explained refusal with the right status."""
+        try:
+            return work()
+        except dialogue.DialogueError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
+
+    @app.get('/api/v1/smpa/ros')
+    async def get_smpa_ros():
+        """Report SMPA's existing ROS 2 interfaces: the robot's run (run control) and the inference server.
+
+        Each service is asked once with a short timeout; one that is missing
+        is reported with its reason. The endpoint names are the configured
+        ones. Nothing is started, stopped or loaded.
+        """
+        smpa_available()
+        robot, inference = await asyncio.gather(smpa_services.robot_status(app.state.ros_clients, ros_endpoints),
+                                                smpa_services.inference_status(app.state.ros_clients, ros_endpoints))
+        return envelope(endpoints=ros_endpoints, robot=robot, inference=inference)
+
+    @app.get('/api/v1/smpa/dialogue')
+    def get_dialogue():
+        """Describe the Dialogue backend: answering path, stage adapters, belief context and recent turns."""
+        smpa_available()
+        return envelope(dialogue=app.state.dialogue.status())
+
+    @app.post('/api/v1/smpa/dialogue/context')
+    def post_dialogue_context(body: DialogueContextChoice, request: Request):
+        """Choose the shared or the independent belief context for the next Dialogue turns."""
+        smpa_available()
+        authorised(request)
+        return envelope(context=dialogue_reply(lambda: app.state.dialogue.choose_context(
+            body.mode, body.run_id, body.session_id)))
+
+    @app.post('/api/v1/smpa/dialogue/turns', status_code=202)
+    async def post_dialogue_turn(body: DialogueTurnRequest, request: Request):
+        """Start a Dialogue turn over ROS 2 (Sense, Model, Plan, Act) and answer at once with its record.
+
+        The turn runs in the background; its progress is published on the
+        Dialogue stream and kept in the record. While a stage interface is
+        pending the answer is 409 and messages go through SMPA's conversation
+        server instead.
+        """
+        smpa_available()
+        authorised(request)
+        try:
+            turn = await app.state.dialogue.submit(body.text, body.request_id)
+        except dialogue.DialogueError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
+        return envelope(turn=turn)
+
+    @app.get('/api/v1/smpa/dialogue/turns/{turn_id}')
+    def get_dialogue_turn(turn_id: str):
+        """Return one Dialogue turn with its stages, identifiers, belief snapshot and response."""
+        smpa_available()
+        return envelope(turn=dialogue_reply(lambda: app.state.dialogue.get(turn_id)))
+
+    @app.post('/api/v1/smpa/dialogue/turns/{turn_id}/retry', status_code=202)
+    async def post_dialogue_retry(turn_id: str, body: DialogueRetryRequest, request: Request):
+        """Run a failed Dialogue turn again from the stage that failed."""
+        smpa_available()
+        authorised(request)
+        try:
+            turn = await app.state.dialogue.retry(turn_id, body.request_id)
+        except dialogue.DialogueError as error:
+            raise HTTPException(status_code=error.status, detail=str(error)) from error
+        return envelope(turn=turn)
+
+    @app.websocket('/api/v1/smpa/dialogue/stream')
+    async def dialogue_stream(websocket: WebSocket):
+        """Send the Dialogue's events and SMPA's run and inference status messages until the client leaves.
+
+        Refuse pages from other origins and a GUI without SMPA. Start with a
+        status message, then the recent Dialogue events. While the stream is
+        open, SMPA's ``SmpaEvent`` and ``InferenceStatus`` topics are relayed
+        too (when their interface package is installed); their subscriptions
+        end with the stream. Every message is a JSON object with ``kind``
+        "data" (``event`` names it) or "status", as on the other streams.
+        """
+        if not local_origin(websocket.headers.get('origin')):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        if not smpa_enabled:
+            await websocket.send_json(dict(kind='status', state='disabled', detail='SMPA integration is disabled'))
+            await websocket.close()
+            return
+        loop = asyncio.get_running_loop()
+        queue = app.state.dialogue.listen()
+        releases, relay_problems = [], []
+
+        def relayed(event):
+            """Return a ROS-thread callback that queues one relayed message as a Dialogue stream event."""
+            def receive(data):
+                """Queue the message on the event loop, dropping the oldest when the client is slow."""
+                def put():
+                    if queue.full():
+                        queue.get_nowait()
+                    queue.put_nowait(dict(event=event, at=time.time(), message=data))
+                loop.call_soon_threadsafe(put)
+            return receive
+
+        for key, event in smpa_services.RELAYS:
+            try:
+                releases.append(await asyncio.to_thread(app.state.ros_clients.relay, ros_endpoints[key],
+                                                        smpa_services.TYPES[key], relayed(event)))
+            except GatewayError as error:
+                relay_problems.append(dict(topic=ros_endpoints[key], detail=str(error)))
+        receiver = asyncio.ensure_future(websocket.receive())
+        try:
+            await websocket.send_text(json.dumps(json_safe(dict(kind='status', state='ok', relays_unavailable=relay_problems,
+                                                                dialogue=app.state.dialogue.status()))))
+            while True:
+                getter = asyncio.ensure_future(queue.get())
+                done, _ = await asyncio.wait({receiver, getter}, return_when=asyncio.FIRST_COMPLETED)
+                if receiver in done:
+                    getter.cancel()
+                    if receiver.result().get('type') == 'websocket.disconnect':
+                        break
+                    receiver = asyncio.ensure_future(websocket.receive())
+                    continue
+                await websocket.send_text(json.dumps(json_safe(dict(kind='data', **getter.result()))))
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            receiver.cancel()
+            app.state.dialogue.unlisten(queue)
+            for release in releases:
+                await asyncio.to_thread(release)
 
     @app.get('/api/v1/smpa/sessions/{session_id}/conversation')
     def get_session_conversation(session_id: str):

@@ -10,7 +10,7 @@
  * recorded.
  *
  * This section only reads. It offers no way to submit text or create
- * sessions; conversational input is entered on the Dashboard (SMPA's conversation server).
+ * sessions; conversational input is entered on the Dialogue (SMPA's conversation server).
  */
 import {fmt, getJSON, h, openStream, poll} from '../../api.js';
 import * as imageViewer from '../sensors/viewers/image.js';
@@ -322,7 +322,7 @@ export default {
         panel('hear', 'Hear', dom.hearLive, dom.hearRecorded),
         panel('read', 'Read', null, dom.readRecorded, h('div', {}, dom.readBinding,
           h('p', {class: 'muted', style: 'font-size:12px;margin:4px 0'},
-            'Read-only. Text is entered on the Dashboard; SMPA records it, and it appears here.')))),
+            'Read-only. Text is entered on the Dialogue; SMPA records it, and it appears here.')))),
       h('section', {class: 'panel', id: 'timeline-panel'},
         h('div', {class: 'toolbar'}, h('strong', {}, 'Observation timeline'),
           filterBox('vision', 'See'), filterBox('hear', 'Hear'), filterBox('read', 'Read'), filterBox('sense', 'Sense records'),

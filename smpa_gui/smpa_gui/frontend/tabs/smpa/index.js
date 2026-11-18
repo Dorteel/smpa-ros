@@ -1,19 +1,19 @@
 /**
- * The SMPA tab: a session selector above five sections, Dashboard, Sense, Model, Plan and Act.
+ * The SMPA tab: a session selector above five sections, Dialogue, Sense, Model, Plan and Act.
  *
  * Concepts: a session is one SMPA run, recorded by SMPA in its memory
  * directory and read (never written) by the GUI server. The shell lists the
  * sessions, keeps one selected, and hands it to the section that is shown.
  * A section is a module with mount(container, session) and unmount(), plus
  * an optional update(session) called whenever the session list refreshes.
- * Dashboard (conversation and graphs) and Sense are functional; Model, Plan
+ * Dialogue (conversation and graphs) and Sense are functional; Model, Plan
  * and Act explain that they are not implemented yet.
  *
  * The address fragment "#smpa/<section>/<session id>" records the choice,
  * so reloading the page shows the same section and session.
  */
 import {getJSON, h, poll} from '../../api.js';
-import dashboard from './dashboard.js';
+import dialogue from './dialogue.js';
 import sense from './sense.js';
 
 const ACTIVITY = {
@@ -40,7 +40,7 @@ function placeholder(title, content) {
 }
 
 export const SECTIONS = [
-  dashboard,
+  dialogue,
   sense,
   placeholder('Model', 'It will show the world model snapshots and belief state of the selected session.'),
   placeholder('Plan', 'It will show goals and the actions the planner selected.'),
@@ -50,7 +50,7 @@ export const SECTIONS = [
 let dom = {};
 let sessions = [];
 let status = null;
-let sectionId = 'dashboard';
+let sectionId = 'dialogue';
 let sessionId = null;
 let mounted = null;
 let stops = [];
@@ -175,9 +175,15 @@ export function chooseSession(identity) {
   refreshSessions();
 }
 
-/** Apply a sub-route "<section>/<session id>" from the address. */
+/**
+ * Apply a sub-route "<section>/<session id>" from the address.
+ *
+ * The Dialogue section was called Dashboard before; an old address or
+ * bookmark naming "dashboard" opens the Dialogue.
+ */
 function applyRoute(route) {
-  const [section, ...rest] = (route || '').split('/');
+  const [named, ...rest] = (route || '').split('/');
+  const section = named === 'dashboard' ? 'dialogue' : named;
   if (SECTIONS.some((item) => item.id === section)) sectionId = section;
   if (rest.join('/')) sessionId = rest.join('/');
 }

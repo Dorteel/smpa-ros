@@ -70,10 +70,10 @@ def parse_options(arguments):
     parser.add_argument('--memory-root', default=os.environ.get('SMPA_GUI_MEMORY_ROOT') or None,
                         help="SMPA's memory directory for the SMPA tab (read-only; default: <smpa root>/memory)")
     parser.add_argument('--smpa-root', default=os.environ.get('SMPA_GUI_SMPA_ROOT') or None,
-                        help='SMPA checkout whose conversation server the Dashboard starts (default: the repository '
+                        help='SMPA checkout whose conversation server the Dialogue starts (default: the repository '
                              'containing this source checkout, if any)')
     parser.add_argument('--layout', default=os.environ.get('SMPA_GUI_LAYOUT') or None,
-                        help='YAML file with SMPA paths for the Dashboard (see README.md)')
+                        help='YAML file with SMPA paths for the Dialogue (see README.md)')
     return parser.parse_args(strip_ros_arguments(arguments))
 
 
