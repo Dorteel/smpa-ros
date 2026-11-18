@@ -511,3 +511,36 @@ def test_snapshot_distinguishes_server_restart(server):
         assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
     finally:
         other.destroy_node()
+
+
+def test_experiment_persists_real_server_snapshot_with_mock_backend(server, tmp_path):
+    """Exercise acquisition, metadata and release against the real server object.
+
+    Replace only ROS transport with direct calls and use the fixture's mock model
+    loader. The experiment must persist the exact server snapshot, verify it,
+    and release the matching run owner without loading weights or inference.
+    """
+    import json
+    import yaml
+    from memory import MemoryManager
+    from smpa_ros.smpa import acquire_inference, verify_inference, release_inference
+    server.replace_model('qwen3_4b')
+    memory = MemoryManager(tmp_path, goal='Test ownership', models={'model': {'model_id': 'fixture/qwen'}})
+    def set_parameters(values):
+        """Return the real server's atomic parameter result in a ROS-shaped reply."""
+        return SimpleNamespace(result=server.set_parameters_atomically(values))
+    def get_parameters(names):
+        """Read the real server's ROS parameter values without network transport."""
+        return SimpleNamespace(values=[server.get_parameter(name).get_parameter_value() for name in names])
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True,
+                                 set_parameters_atomically=set_parameters, get_parameters=get_parameters)
+    def wait(future, timeout, operation):
+        """Return each completed direct-call response without starting an executor."""
+        return future
+    acquisition = {}
+    snapshot = acquire_inference(parameters, memory, wait, 1.0, acquisition)
+    assert snapshot == json.loads(server.get_parameter('frozen_settings_json').value)
+    assert yaml.safe_load((memory.directory / 'metadata.yaml').read_text())['inference'] == snapshot
+    verify_inference(parameters, memory, wait, 1.0)
+    release_inference(parameters, memory.metadata['run_id'], wait, 1.0, {})
+    assert server.get_parameter('experiment_run_id').value == ''
