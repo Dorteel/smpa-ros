@@ -85,7 +85,8 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
     only sensor acquisition, model output, planning output and robot execution.
     Reject unsupported capabilities, then let the actual experiment script run
     two cycles using default and explicit capabilities. Check ROS terminal
-    states, source records, shared run identity and completion before draining
+    states, source records, shared run identity and completion. Invoke the same
+    nodes in an alternative explicit order to check stage independence before draining
     and destroying every node and the ROS context.
     """
     import smpa_ros.sense_node as sense
@@ -148,6 +149,17 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
             assert records['model']['source_record'].endswith('/sense.json')
             assert records['plan']['source_record'].endswith('/model.json')
             assert records['act']['source_record'].endswith('/plan.json')
+        memory.begin_cycle()
+        identity = memory.metadata['run_id']
+        reordered = [('plan', Plan, Plan.Goal(run_id=identity, world_model='provided world')),
+                     ('sense', Sense, Sense.Goal(run_id=identity)),
+                     ('model', Model, Model.Goal(run_id=identity, observation='provided observation')),
+                     ('act', Act, Act.Goal(run_id=identity, action_json='{"action":"look_left"}'))]
+        for stage, kind, goal in reordered:
+            invoke(stage, kind, goal)
+        memory.complete_cycle()
+        assert order[-4:] == ['plan', 'sense', 'model', 'act']
+        assert memory.metadata['completed_cycles'] == 3
         invalid = Sense.Goal(run_id='00000000-0000-0000-0000-000000000000', capability='sense')
         failed = wait_future(clients['sense'].send_goal_async(invalid))
         assert failed.accepted
@@ -328,3 +340,71 @@ def test_real_inference_freeze_and_standalone_rejection(tmp_path):
         node.destroy_node()
         server.destroy_node()
         rclpy.shutdown()
+
+
+def test_installed_smpa_command_runs_complete_experiment(tmp_path):
+    """Run the installed command against independent, mocked ROS participants.
+
+    Start one real stage server per process and a real inference server with a
+    weight-free backend. Run the installed console script with an API selection
+    that names that fixture, then inspect the completed run, stage records and
+    authoritative freeze. Stop and join every owned participant on all paths.
+    """
+    import multiprocessing
+    import os
+    import subprocess
+    import yaml
+    from ament_index_python.packages import get_package_prefix
+    from smpa_llm.server import InferenceServer
+
+    context = multiprocessing.get_context('spawn')
+    stop = context.Event()
+    names = ('sense', 'model', 'plan', 'act')
+    processes = [context.Process(target=stage_process, args=(name, str(tmp_path), stop)) for name in names]
+    for process in processes:
+        process.start()
+    registry = tmp_path / 'models.yaml'
+    registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
+    from ament_index_python.packages import get_package_share_directory
+    configuration = yaml.safe_load((__import__('pathlib').Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text())
+    configuration['model'] = {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture'}
+    configuration['sensing'] = {'vision': False, 'hear': False}
+    configuration.pop('scene_refinement', None)
+    config = tmp_path / 'config.yaml'
+    config.write_text(yaml.safe_dump(configuration))
+    rclpy.init(args=[])
+    server = InferenceServer(loader=fake_backend_loader,
+                             parameter_overrides=[Parameter('registry_file', value=str(registry))])
+    server.replace_model('fixture')
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(server)
+    thread = Thread(target=executor.spin, daemon=True)
+    thread.start()
+    executable = __import__('pathlib').Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/smpa'
+    try:
+        completed = subprocess.run([str(executable), '--config', str(config), '--world-model-root', str(tmp_path),
+                                    '--max-cycles', '1', '--timeout', '15'], cwd=tmp_path,
+                                   capture_output=True, text=True, timeout=90, env=os.environ.copy())
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        runs = list((tmp_path / 'runs').glob('*/metadata.yaml'))
+        assert len(runs) == 1
+        metadata = yaml.safe_load(runs[0].read_text())
+        assert metadata['status'] == 'completed' and metadata['completed_cycles'] == 1
+        assert metadata['inference']['run_id'] == metadata['run_id']
+        assert metadata['inference']['loading']['model_id'] == 'fixture'
+        directory = runs[0].parent / 'state/cycle_000001'
+        records = [json.loads((directory / f'{stage}.json').read_text()) for stage in names]
+        assert [item['sequence'] for item in records] == [1, 2, 3, 4]
+        assert server.get_parameter('experiment_run_id').value == ''
+    finally:
+        executor.shutdown(timeout_sec=10)
+        thread.join(timeout=10)
+        server.destroy_node()
+        rclpy.shutdown()
+        stop.set()
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        assert all(process.exitcode == 0 for process in processes)
