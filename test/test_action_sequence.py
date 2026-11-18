@@ -120,7 +120,7 @@ def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch
         """Provide each stage its memory root and bounded timeout."""
         return SimpleNamespace(value=1.0 if name == 'timeout' else str(tmp_path))
     nodes = {'sense': SimpleNamespace(get_parameter=parameter, wait=Mock(), describe=Mock(), get_logger=lambda: Mock()),
-             'model': SimpleNamespace(get_parameter=parameter, generate=world, get_logger=lambda: Mock()),
+             'model': SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value='model') if name == 'default_capability' else parameter(name), generate=world, get_logger=lambda: Mock()),
              'plan': SimpleNamespace(get_parameter=parameter, generate=decision, get_logger=lambda: Mock()),
              'act': SimpleNamespace(get_parameter=parameter, dispatch=dispatch, get_logger=lambda: Mock())}
     callbacks = {'sense': sense.SenseNode.execute, 'model': model.ModelNode.execute,
