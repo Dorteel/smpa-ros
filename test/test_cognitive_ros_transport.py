@@ -685,3 +685,70 @@ def test_stage_initialization_uses_real_parameter_transport(tmp_path):
         node.destroy_node()
         server.destroy_node()
         rclpy.shutdown()
+
+
+def test_frozen_stage_settings_reach_backend_over_ros_actions(tmp_path):
+    """Send Model and Plan requests through ROS with their frozen settings.
+
+    A fake backend records its arguments without loading weights. Acquire the
+    shared server using distinct settings from an experiment, then send real
+    inference action goals for each stage. Compare the backend calls with the
+    persisted server snapshot and release the owner after both complete.
+    """
+    import yaml
+    from types import SimpleNamespace
+    from rclpy.parameter_client import AsyncParameterClient
+    from smpa_llm.server import InferenceServer
+    from smpa_ros.smpa import acquire_inference, release_inference
+    from smpa_ros_interfaces.action import GenerateText
+    registry = tmp_path / 'models.yaml'
+    registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
+    calls = []
+    def generate(prompt, **settings):
+        """Record the selected controls and return a deterministic fake reply."""
+        calls.append((prompt, settings))
+        return 'fixture output'
+    def loader(*args):
+        """Supply the recording backend without opening any model weights."""
+        return SimpleNamespace(generate=generate)
+    stages = {name: {'max_output_tokens': tokens, 'temperature': temp, 'seed': None,
+                     'reasoning_effort': None} for name, tokens, temp in
+              [('sense', 30, 0.0), ('model', 40, 0.2), ('plan', 50, 0.7)]}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'stage_settings': stages})
+    rclpy.init(args=[])
+    server = InferenceServer(loader=loader, parameter_overrides=[Parameter('registry_file', value=str(registry))])
+    server.replace_model('fixture')
+    node = Node('stage_inference_transport_test')
+    client = ActionClient(node, GenerateText, '/llm/generate')
+    parameters = AsyncParameterClient(node, '/llm')
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(server)
+    executor.add_node(node)
+    thread = Thread(target=executor.spin, daemon=True)
+    thread.start()
+    def wait(future, timeout, operation):
+        """Wait for the named ROS response without waiting indefinitely."""
+        return wait_future(future, timeout)
+    try:
+        assert client.wait_for_server(timeout_sec=10)
+        snapshot = acquire_inference(parameters, memory, wait, 10, {})
+        for stage in ('model', 'plan'):
+            goal = GenerateText.Goal(prompt=stage, run_id=memory.metadata['run_id'], stage=stage)
+            accepted = wait_future(client.send_goal_async(goal))
+            assert accepted.accepted
+            response = wait_future(accepted.get_result_async())
+            assert response.status == GoalStatus.STATUS_SUCCEEDED
+            assert response.result.text == 'fixture output'
+        assert [(prompt, settings['max_new_tokens'], settings['temperature']) for prompt, settings in calls] == [
+            ('model', 40, 0.2), ('plan', 50, 0.7)]
+        assert snapshot['stages']['model']['max_new_tokens'] == 40
+        assert snapshot['stages']['plan']['max_new_tokens'] == 50
+        assert yaml.safe_load((memory.directory / 'metadata.yaml').read_text())['inference'] == snapshot
+        release_inference(parameters, memory.metadata['run_id'], wait, 10, {})
+    finally:
+        executor.shutdown(timeout_sec=10)
+        thread.join(timeout=10)
+        client.destroy()
+        node.destroy_node()
+        server.destroy_node()
+        rclpy.shutdown()
