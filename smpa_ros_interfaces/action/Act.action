@@ -1,0 +1,8 @@
+string run_id
+string capability
+string action_json
+string source_record
+---
+bool success
+string record_path
+---
