@@ -406,3 +406,27 @@ def test_experiment_rejects_staged_loading_settings(server):
     server.replace_model('qwen3_4b')
     assert server.set_parameters_atomically([Parameter('models.qwen3_4b.model_id', value='staged')]).successful
     assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+
+
+def test_run_scoped_inference_requires_matching_owner(server):
+    """Check run ownership atomically with the inference reservation.
+
+    A run-scoped goal is rejected while unloaded, after ownership changes, or
+    after release. A matching goal is accepted and prevents ownership changes
+    until its operation releases the slot. An empty ID preserves standalone use.
+    No model weights or inference are used by this test.
+    """
+    run_a = SimpleNamespace(run_id='run-a')
+    run_b = SimpleNamespace(run_id='run-b')
+    standalone = SimpleNamespace(run_id='')
+    assert server.reserve(run_a, inference=True) == GoalResponse.REJECT
+    server.replace_model('qwen3_4b')
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+    assert server.reserve(run_b, inference=True) == GoalResponse.REJECT
+    assert server.reserve(run_a, inference=True) == GoalResponse.ACCEPT
+    assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='')]).successful
+    server.busy = False
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='')]).successful
+    assert server.reserve(run_a, inference=True) == GoalResponse.REJECT
+    assert server.reserve(standalone, inference=True) == GoalResponse.ACCEPT
+    server.busy = False

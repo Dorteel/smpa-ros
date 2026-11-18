@@ -1,5 +1,6 @@
 sensor_msgs/Image image
 string prompt
+string run_id
 ---
 string description
 ---

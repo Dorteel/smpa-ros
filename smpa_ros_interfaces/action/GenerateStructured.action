@@ -1,5 +1,6 @@
 string prompt
 string json_schema
+string run_id
 ---
 string json_output
 ---

@@ -1,4 +1,5 @@
 string prompt
+string run_id
 ---
 string text
 ---

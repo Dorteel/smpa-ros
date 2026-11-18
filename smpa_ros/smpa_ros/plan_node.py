@@ -111,7 +111,7 @@ class PlanNode(Node):
             raise ValueError(f'Inference parameters do not match frozen Plan settings: expected {expected}, got {actual}')
         if not self.client.wait_for_server(timeout_sec=timeout):
             raise TimeoutError('Structured inference action is unavailable')
-        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema))
+        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema), run_id=run_id)
         handle = self.wait(self.client.send_goal_async(goal), timeout, 'inference acceptance')
         if not handle.accepted:
             raise RuntimeError('Structured inference goal was rejected')

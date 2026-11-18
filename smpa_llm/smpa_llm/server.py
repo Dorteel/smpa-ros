@@ -157,7 +157,7 @@ class InferenceServer(Node):
                 (DescribeStructuredImage, 'describe_structured_image', 'json_output')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
                 partial(self.infer, action_type=action_type, result_field=field),
-                goal_callback=self.reserve, cancel_callback=self.cancel,
+                goal_callback=partial(self.reserve, inference=True), cancel_callback=self.cancel,
                 callback_group=self.group))
         self.change_state('unloaded')
         if initial:
@@ -376,18 +376,23 @@ class InferenceServer(Node):
             self.change_state('error')
             raise
 
-    def reserve(self, goal, *, management=False):
+    def reserve(self, goal, *, management=False, inference=False):
         """Reserve the sole operation slot or promptly reject an overlapping goal.
 
         Keep status and parameter services responsive while exactly one management
         or inference action owns backend access. Reject model management while
-        an experiment owns the loaded settings; inference remains available.
-        The slot is released in execute
+        an experiment owns the loaded settings. For an inference goal carrying a
+        run ID, require the same active experiment while holding the reservation
+        lock. Empty IDs retain standalone inference. The slot is released in execute
         cleanup, including failure. No second goal is queued against stale model
         settings or allowed to unload weights used by an active generation.
         """
         with self.lock:
-            if self.busy or (management and self.get_parameter('experiment_run_id').value):
+            owner = self.get_parameter('experiment_run_id').value
+            if self.busy or (management and owner):
+                return GoalResponse.REJECT
+            requested_run = goal.run_id if inference else ''
+            if requested_run and requested_run != owner:
                 return GoalResponse.REJECT
             self.busy = True
             return GoalResponse.ACCEPT

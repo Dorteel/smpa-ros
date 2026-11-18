@@ -106,10 +106,10 @@ class ModelNode(Node):
         format_name = settings.get('response_format')
         if format_name == 'text':
             client = self.text_client
-            goal = GenerateText.Goal(prompt=prompt)
+            goal = GenerateText.Goal(prompt=prompt, run_id=run_id)
         elif format_name == 'json_schema' and isinstance(settings.get('schema'), dict):
             client = self.structured_client
-            goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(settings['schema']))
+            goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(settings['schema']), run_id=run_id)
         else:
             raise ValueError('Unsupported Model response format')
         if not client.wait_for_server(timeout_sec=timeout):
