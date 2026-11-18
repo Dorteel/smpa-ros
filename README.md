@@ -310,7 +310,7 @@ implemented by `smpa_llm` and the SMPA endpoints by `smpa_ros`.
 Inference goal `run_id` is empty for standalone use. A nonempty ID must match
 the inference server's `experiment_run_id` at goal acceptance. Setting that
 parameter on an idle server with a ready model freezes model configuration and
-rejects model-management goals until the parameter is cleared. Experiment
+rejects model-management and standalone inference goals until the parameter is cleared. Experiment
 lifecycle acquisition and recording of the frozen settings are not yet wired up.
 These goal fields change the ROS wire definitions: rebuild the interfaces and
 all clients before using this branch.

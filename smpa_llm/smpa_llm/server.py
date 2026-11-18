@@ -383,7 +383,8 @@ class InferenceServer(Node):
         or inference action owns backend access. Reject model management while
         an experiment owns the loaded settings. For an inference goal carrying a
         run ID, require the same active experiment while holding the reservation
-        lock. Empty IDs retain standalone inference. The slot is released in execute
+        lock. Empty IDs retain standalone inference only when no run owns the
+        server. The slot is released in execute
         cleanup, including failure. No second goal is queued against stale model
         settings or allowed to unload weights used by an active generation.
         """
@@ -392,7 +393,7 @@ class InferenceServer(Node):
             if self.busy or (management and owner):
                 return GoalResponse.REJECT
             requested_run = goal.run_id if inference else ''
-            if requested_run and requested_run != owner:
+            if inference and requested_run != owner:
                 return GoalResponse.REJECT
             self.busy = True
             return GoalResponse.ACCEPT

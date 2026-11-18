@@ -413,7 +413,8 @@ def test_run_scoped_inference_requires_matching_owner(server):
 
     A run-scoped goal is rejected while unloaded, after ownership changes, or
     after release. A matching goal is accepted and prevents ownership changes
-    until its operation releases the slot. An empty ID preserves standalone use.
+    until its operation releases the slot. An empty ID is rejected while frozen
+    and preserves standalone use after the run releases the server.
     No model weights or inference are used by this test.
     """
     run_a = SimpleNamespace(run_id='run-a')
@@ -423,6 +424,7 @@ def test_run_scoped_inference_requires_matching_owner(server):
     server.replace_model('qwen3_4b')
     assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
     assert server.reserve(run_b, inference=True) == GoalResponse.REJECT
+    assert server.reserve(standalone, inference=True) == GoalResponse.REJECT
     assert server.reserve(run_a, inference=True) == GoalResponse.ACCEPT
     assert not server.set_parameters_atomically([Parameter('experiment_run_id', value='')]).successful
     server.busy = False
