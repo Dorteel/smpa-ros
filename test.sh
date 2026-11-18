@@ -123,7 +123,7 @@ assert llm_config == {key: pipeline[key] for key in ('model', 'openai', 'nebula'
 import smpa_llm
 assert Path(smpa_llm.__file__).resolve().is_relative_to(llm_share.parents[1])
 assert distribution('smpa-llm').metadata['Name'] == 'smpa_llm'
-assert {entry.name for entry in distribution('smpa-llm').entry_points} == {'download_models'}
+assert {entry.name for entry in distribution('smpa-llm').entry_points} == {'download_models', 'llm_server'}
 assert callable(next(iter(distribution('smpa-llm').entry_points)).load())
 assert (Path(get_package_share_directory('smpa_ros_interfaces')) / 'package.xml').is_file()
 assert type(pipeline['execution']['max_cycles']) is int and pipeline['execution']['max_cycles'] > 0

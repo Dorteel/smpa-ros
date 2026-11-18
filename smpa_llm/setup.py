@@ -10,6 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/smpa_llm']),
         ('share/smpa_llm', ['package.xml', 'config.yaml']),
         ('share/smpa_llm/models', glob('models/*.yaml')),
+        ('share/smpa_llm/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools>=30.3,<80', 'outlines==1.3.3', 'jsonschema==4.26.0',
                       'openai==3.39.0', 'python-dotenv==1.2.4'],
@@ -17,6 +18,7 @@ setup(
     maintainer_email='dorteel@gmail.com',
     description='Shared inference and offline training package boundary for SMPA.',
     license='MIT',
-    entry_points={'console_scripts': ['download_models = smpa_llm.models.provision:main']},
+    entry_points={'console_scripts': ['download_models = smpa_llm.models.provision:main',
+                                       'llm_server = smpa_llm.server:main']},
     zip_safe=True,
 )

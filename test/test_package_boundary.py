@@ -27,17 +27,17 @@ def test_functional_packages_install_primary_configuration():
     assert pipeline['conversation']['agent'] == 'local:qwen3-4b'
 
 
-def test_shared_package_installs_without_an_inference_process():
+def test_shared_package_installs_with_optional_inference_server():
     """Import the installed shared package and inspect its distribution metadata.
 
-    The shared implementation must import without loading weights or registering
-    an inference executable. Its declared dependencies remain separate from
+    The shared implementation must import without loading weights. Its optional inference executable must
+    remain independent of legacy Runner execution. Its declared dependencies remain separate from
     training requirements. Existing execution stays with the cognitive package.
     """
     import smpa_llm
     assert Path(smpa_llm.__file__).is_file()
     installed = distribution('smpa-llm')
-    assert {entry.name for entry in installed.entry_points} == {'download_models'}
+    assert {entry.name for entry in installed.entry_points} == {'download_models', 'llm_server'}
     requirements = [Requirement(value) for value in installed.requires]
     assert {value.name for value in requirements} == {
         'setuptools', 'outlines', 'jsonschema', 'openai', 'python-dotenv'}
