@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>smpa_gui</name>
-  <version>0.6.0</version>
+  <version>0.7.0</version>
   <description>Standalone browser GUI for ROS 2: graph, topics, sensors, parameters, services and actions,
     with optional SMPA views: recorded sessions, and a Dashboard that talks to SMPA's own conversation
     server (started as a separate process) and draws Sense, Belief and Plan Turtle graphs.
@@ -35,6 +35,7 @@
   <test_depend>example_interfaces</test_depend>
   <test_depend>sensor_msgs</test_depend>
   <test_depend>std_msgs</test_depend>
+  <test_depend>std_srvs</test_depend>
   <test_depend>tf2_msgs</test_depend>
 
   <export>

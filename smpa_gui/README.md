@@ -153,6 +153,8 @@ be started before, after or without them. No SMPA launch file was changed.
   everything that does not match. The check boxes hide or show topics, actions,
   unconnected topics, `/rosout` and `/parameter_events`, hidden names, and the GUI's
   own node. The graph refreshes every two seconds without changing zoom or pan.
+- **Workspace**: the discovered interfaces of the whole ROS graph around an empty
+  canvas; see [ROS 2 Workspace](#ros-2-workspace-ros-2--workspace).
 - **Topics**: select a topic to see its publishers and subscribers with QoS. *Start
   echo* subscribes and shows live messages; *Stop echo* unsubscribes.
 - **Parameters**: select a node to read its parameters with types, values,
@@ -163,6 +165,46 @@ be started before, after or without them. No SMPA launch file was changed.
   Any number of panels can be open. A panel subscribes only while it is open and the
   Sensors tab is shown. In the 3D viewer: drag rotates, Shift-drag or right-drag pans,
   wheel zooms, double click re-centres.
+
+## ROS 2 Workspace (ROS 2 → Workspace)
+
+The Workspace shows every discovered ROS 2 interface, arranged around a large canvas:
+
+| Region | Shows | Clicking a chip opens |
+|---|---|---|
+| Top: **Topics** (blue) | name, message type, publishers ▸ and subscribers ◂ | ROS 2 → Topics with that topic |
+| Left: **Services** (green) | name, service type | ROS 2 → Services with that service |
+| Right: **Actions** (purple) | name, action type | the Actions tab with that action selected |
+| Bottom: **Parameters** (orange) | per owning node: name, current value, type | ROS 2 → Parameters with that node, the parameter highlighted |
+| Centre: **canvas** | nothing: it is reserved for the future visual ROS 2 editor | – |
+
+- Each panel has a filter field (topics and services by name or type, actions by name
+  or type, parameters by node, name, value or type) and shows how many entries match.
+  Topics: *Hidden* also shows hidden and action topics, *Wrap* switches between
+  wrapped rows and one horizontally scrolling row. Services: *Plumbing* also shows
+  parameter, action and type-description services (hidden by default, as in the
+  Services view). Parameters are read from all nodes every five seconds (*Refresh*
+  reads them at once); topics, services and actions every two seconds.
+- Dimmed, dashed chips are unavailable: a topic without publisher, a service without
+  provider, an action without server. A node that does not answer parameter requests
+  in one second, or offers none (such as the GUI itself), is shown with that state.
+  An interface that disappears from discovery is crossed out as *gone* for ten seconds
+  and then removed. When the GUI server cannot be reached, a panel keeps its last
+  known chips dimmed and says *gateway unreachable*.
+- The Workspace only reads. A parameter is changed in the Parameters view it opens,
+  with the usual *Edit* → *Apply changes…* → confirmation dialog
+  ([Changing parameters](#changing-parameters-ros-2--parameters)); goals and service
+  calls likewise go through their own views and dialogs.
+- Canvas: drag to pan, wheel or **+**/**−** to zoom, *Reset* (key 0) shows the origin in
+  the middle at 100 %, *Fit* (key F) frames the canvas content or, while it is empty,
+  the 1200 × 800 sheet around the origin; arrow keys pan when the canvas has the focus.
+  *Grid* switches the background grid. Discovery refreshes never move the canvas, and
+  the viewport is kept when you open an inspector and come back (for this browser tab).
+- Panels collapse with ▾/▸ and are resized by dragging the lines between them and the
+  canvas (or with the arrow keys when a line has the focus); the canvas takes the rest.
+  A collapsed panel is not refreshed until it is expanded again.
+  Sizes and switches are remembered in this browser. Below 900 px width the regions are
+  stacked: topics, canvas, services, actions, parameters.
 
 ## Sending action goals (Actions tab)
 
@@ -417,7 +459,9 @@ What SMPA would need to provide for exact liveness and simpler integration is de
 The tests start their own fixture nodes in a random ROS domain restricted to this
 computer: talkers, sensors and action servers (`test/fixtures/fixture_nodes.py`), and a
 settings node and service providers that the parameter and service tests change and
-call (`test/fixtures/management_nodes.py`). The packaging tests build the package with
+call (`test/fixtures/management_nodes.py`), and a node that the Workspace tests start
+and stop to watch a topic, service, action and parameter appear and disappear
+(`test/fixtures/workspace_nodes.py`). The packaging tests build the package with
 colcon into a temporary workspace and run it through `ros2 run` and `ros2 launch`; they
 are skipped without colcon. Nothing is mocked except where a test says so (the
 frontend-logic tests run the page's pure functions in Node.js). The tests do not touch
@@ -446,6 +490,11 @@ General
   was considered and not needed). Short-lived entities, such as SMPA's per-cycle camera
   subscription and action clients, appear and disappear between refreshes.
 - Services are listed in the Services panel but not drawn in the graph.
+- The Workspace canvas is intentionally empty: placing, connecting and editing nodes
+  and interfaces, and generating code, are not implemented yet. Reading every node's
+  parameters creates short-lived service clients on those nodes every five seconds;
+  on a very large or slow system, collapse the Parameters panel when you do not need
+  it (a collapsed panel is not refreshed) or leave the Workspace.
 - ROS discovery does not transmit the history policy or queue depth of other nodes'
   endpoints; they are shown as unknown.
 - Parameters can be read only from nodes that are spinning. SMPA's loop and Sense

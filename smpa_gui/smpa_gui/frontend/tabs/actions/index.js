@@ -32,6 +32,7 @@ let shownGoal = '';
 let shownHistory = '';
 let stops = [];
 let dom = {};
+let requestedAction = null;
 
 /** Format a time stamp in seconds as local clock time with milliseconds, or a dash. */
 function clock(seconds) {
@@ -71,6 +72,28 @@ function renderServers() {
         h('span', {class: 'pill ' + (action.available ? 'pill-ok' : 'pill-off')}, action.available ? 'available' : 'no server'))));
   dom.servers.replaceChildren(...(rows.length ? rows : [h('tr', {}, h('td', {class: 'empty'}, 'No action servers discovered.'))]));
   updateControls();
+}
+
+/**
+ * Select the action named in the address, once the server list contains it.
+ *
+ * Another view (the ROS 2 Workspace) opens this tab with an address such
+ * as "#actions/fixture/fibonacci" to show one action. The name is
+ * remembered until the action appears in the discovered list, then it is
+ * selected exactly as a click on its row would select it. Selecting only
+ * reads; no goal is sent.
+ */
+function selectRequestedAction() {
+  if (!requestedAction) return;
+  const action = servers.find((candidate) => candidate.name === requestedAction);
+  if (!action) return;
+  requestedAction = null;
+  if (!selected || selected.name !== action.name) selectAction(action.name, action.types[0]);
+}
+
+/** Turn the part of the address after "actions/" into an action name, or null when it is empty. */
+function actionFromRoute(subRoute) {
+  return subRoute ? (subRoute.startsWith('/') ? subRoute : '/' + subRoute) : null;
 }
 
 /** Return the discovered entry of the selected action, or null when it is not currently discovered. */
@@ -364,9 +387,12 @@ export default {
    *
    * Mounting only reads: it fetches the session, the server list and the
    * goal records. If an action was selected earlier in this page visit its
-   * editor is restored with its draft values, without sending anything.
+   * editor is restored with its draft values, without sending anything. An
+   * action named in the address (for example by the ROS 2 Workspace) is
+   * selected as soon as the server list contains it.
    */
-  mount(container) {
+  mount(container, subRoute) {
+    requestedAction = actionFromRoute(subRoute);
     dom = {
       filter: h('input', {type: 'search', placeholder: 'Filter actions…', style: 'flex:1', oninput: renderServers}),
       servers: h('tbody', {id: 'action-server-list'}),
@@ -449,11 +475,17 @@ export default {
     renderConfigurations();
     refreshSession();
     stops = [
-      poll(async () => { servers = (await getJSON('/actions/servers')).actions; renderServers(); }, 2000),
+      poll(async () => { servers = (await getJSON('/actions/servers')).actions; renderServers(); selectRequestedAction(); }, 2000),
       poll(refreshGoals, 500, () => { dom.offline.style.display = ''; }),
       poll(refreshSession, 5000),
     ];
     if (selected) { const again = selected; selected = null; editor = null; selectAction(again.name, again.type); }
+  },
+
+  /** Select the action named in a new address while this tab stays open; nothing is sent. */
+  navigate(subRoute) {
+    requestedAction = actionFromRoute(subRoute);
+    selectRequestedAction();
   },
 
   /** Stop polling and keep the draft of the action being edited; active goals are unaffected. */

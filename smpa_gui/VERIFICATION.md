@@ -1,4 +1,52 @@
-# Verification results (GUI version 6, 2026-11-18)
+# Verification results (GUI version 7, 2026-11-18)
+
+## Version 7: ROS 2 Workspace (phase 1: layout, discovery, inspection)
+
+### Where it ran
+
+**Cloud container only** (same environment and SMPA copy as version 6 below). Nothing
+was run on the workstation.
+
+Command: `SMPA_GUI_TEST_SMPA_ROOT=<copy> ./test_gui.sh --browser` with the copy's
+`smpa_llm` workspace sourced: **170 passed** (backend, ROS integration, packaging) and
+**65 passed** (browser), none skipped. The two Workspace suites were also run twice more on
+their own without a failure.
+
+| Suite | Tests | Kind |
+|---|---|---|
+| `test/test_workspace.py` | 5 | integration with real fixture nodes: topic/service/action routes with types and providers; `GET /ros/parameters` keeps parameters with their nodes, explains the silent node, flags the GUI, stays within one timeout; timeout limits; a real node's topic, service, action and parameter appear and disappear; unit: side-by-side reading, order and isolated failure |
+| `test/test_browser_workspace.py` | 14 | browser against real fixture nodes (below) |
+| all earlier suites | 165 + 51 | regression; the two subview-list assertions now include *Workspace* |
+
+Requested checks and where they are covered (`test_browser_workspace.py` unless noted):
+
+1. Topics with correct message types in the top panel: `test_topics_appear_with_their_message_types`.
+2. Services in the left panel: `test_services_appear_in_the_left_panel`.
+3. Actions in the right panel: `test_actions_appear_in_the_right_panel`.
+4. Parameters with owning nodes and values: `test_parameters_appear_grouped_by_their_nodes`;
+   backend `test_parameter_overview_keeps_parameters_with_their_nodes`.
+5. Selecting an interface opens its existing inspector: `test_chips_open_the_existing_inspectors`.
+6. Parameter changes use the existing confirmation (nothing changes before *Apply now*;
+   the new value appears in the Workspace afterwards):
+   `test_parameter_change_from_the_workspace_needs_the_existing_confirmation`.
+7. Adding and removing ROS 2 entities updates the panels (gone, then removed):
+   `test_panels_follow_entities_appearing_and_disappearing`; backend
+   `test_interfaces_appear_and_disappear_with_their_node`. Unreachable gateway:
+   `test_unreachable_gateway_is_shown_with_the_last_known_interfaces`.
+8. The canvas remains empty: `test_canvas_stays_empty` (and `data-elements` is 0 in every
+   viewport check).
+9. Zoom (buttons, wheel, keys), pan (drag, arrow keys), reset, fit, grid:
+   `test_zoom_pan_reset_and_fit`; viewport kept across refreshes and inspector visits:
+   `test_viewport_survives_refreshes_and_inspector_visits`. Layout:
+   `test_workspace_has_five_regions_with_the_canvas_dominant`,
+   `test_panels_collapse_and_resize`, `test_layout_adapts_to_a_narrow_window`.
+10. Existing ROS 2, Sensors, Actions and SMPA functionality: all earlier suites pass unchanged
+    except for the subview list.
+
+Not verified: the workstation's ROS installation, a large real system (hundreds of nodes)
+and the load the parameter overview puts on it, other browsers than Chromium, touch input.
+
+---
 
 ## Version 6: conversational Dashboard integrated into `smpa_gui`
 

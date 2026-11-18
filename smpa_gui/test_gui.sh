@@ -17,7 +17,7 @@ if ! "$gui/.venv/bin/python" -c 'import rclpy' 2>/dev/null; then
 fi
 "$gui/.venv/bin/python" -c 'import pytest, httpx' 2>/dev/null || fail 'Test packages are missing; run ./install_gui.sh --dev.'
 cd "$gui"
-"$gui/.venv/bin/python" -m pytest test/test_units.py test/test_frontend_logic.py test/test_ros_integration.py test/test_actions.py test/test_smpa_runs.py test/test_smpa_integration.py test/test_management.py test/test_dashboard_units.py test/test_conversation.py test/test_packaging.py -v
+"$gui/.venv/bin/python" -m pytest test/test_units.py test/test_frontend_logic.py test/test_ros_integration.py test/test_actions.py test/test_smpa_runs.py test/test_smpa_integration.py test/test_management.py test/test_dashboard_units.py test/test_conversation.py test/test_workspace.py test/test_packaging.py -v
 if [[ "${1:-}" == --browser ]]; then
-    GUI_TEST_PYTHON="$gui/.venv/bin/python" "${SMPA_GUI_BROWSER_PYTHON:-python3}" -m pytest test/test_browser.py test/test_browser_actions.py test/test_browser_smpa.py test/test_browser_management.py test/test_browser_dashboard.py -v
+    GUI_TEST_PYTHON="$gui/.venv/bin/python" "${SMPA_GUI_BROWSER_PYTHON:-python3}" -m pytest test/test_browser.py test/test_browser_actions.py test/test_browser_smpa.py test/test_browser_management.py test/test_browser_dashboard.py test/test_browser_workspace.py -v
 fi

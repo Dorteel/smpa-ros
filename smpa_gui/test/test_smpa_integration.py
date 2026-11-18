@@ -77,7 +77,7 @@ def test_observations_and_files(server):
     """Observations come in time order; recorded images and audio are served with their media types."""
     result = fetch(server + f'{API}/sessions/{ROBOT}/observations')
     entries = result['observations']
-    assert len(entries) == 7 and result['contract_version'] == '1.5' and result['revision']
+    assert len(entries) == 7 and result['contract_version'] == '1.6' and result['revision']
     image = next(entry for entry in entries if entry['kind'] == 'scene_description')['image']
     with urlopen(server + image, timeout=5) as response:
         assert response.headers['Content-Type'] == 'image/png' and response.read()[:4] == b'\x89PNG'

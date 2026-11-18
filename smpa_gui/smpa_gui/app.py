@@ -265,6 +265,31 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
         except GatewayError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
+    @app.get('/api/v1/ros/parameters')
+    def get_all_parameters(timeout: float = Query(1.0, ge=0.2, le=5.0)):
+        """Read the parameters of every discovered node, grouped by the node that owns them.
+
+        This is the Workspace's parameter overview. The nodes are the visible
+        nodes of the current graph (hidden nodes are left out, as in the
+        Parameters view). Each other node is read as
+        ``/ros/nodes/parameters`` reads it, side by side, so an unresponsive
+        node costs one timeout and appears with its state instead of
+        delaying or hiding the others. The GUI's own node is listed and
+        flagged but not asked: it deliberately offers no parameter services,
+        so it is reported as ``unavailable`` straight away. Nothing is changed.
+        """
+        try:
+            nodes = [node for node in graph()['nodes'] if not node['hidden']]
+            others = [node['full_name'] for node in nodes if not node['is_gateway']]
+            readings = dict(zip(others, ros_parameters.read_many(gateway, others, timeout)))
+        except GatewayError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        result = []
+        for node in nodes:
+            reading = readings.get(node['full_name']) or dict(node=node['full_name'], state='unavailable', parameters=[])
+            result.append(dict(reading, is_gateway=node['is_gateway']))
+        return envelope(nodes=result, timeout=timeout)
+
     @app.get('/api/v1/ros/parameters/changes')
     def get_parameter_changes():
         """List the parameter changes made through this GUI process, newest first."""

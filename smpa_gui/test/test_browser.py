@@ -53,10 +53,10 @@ def page(server, browser):
     assert errors == [], f'The page reported errors: {errors}'
 
 
-def test_shell_has_four_tabs_and_five_ros_views(page):
+def test_shell_has_four_tabs_and_six_ros_views(page):
     """The primary tabs are ROS 2, Sensors, Actions and SMPA; the image viewer is not a ROS 2 view."""
     assert page.locator('#primary-tabs button').all_inner_texts() == ['ROS 2', 'Sensors', 'Actions', 'SMPA']
-    assert page.locator('.subtabs button').all_inner_texts() == ['Graph', 'Topics', 'Parameters', 'Services', 'Actions']
+    assert page.locator('.subtabs button').all_inner_texts() == ['Graph', 'Workspace', 'Topics', 'Parameters', 'Services', 'Actions']
     page.wait_for_function("document.getElementById('connection').textContent.includes('domain')")
 
 

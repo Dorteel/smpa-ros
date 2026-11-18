@@ -99,3 +99,21 @@ To move a version 5 worktree to version 6, apply `smpa-ros-gui-v6-conversation.p
 on the `gui/v5-ros2-package` branch (it changes only `smpa_gui/`), then run
 `./install_gui.sh --dev` again (rdflib 7.1.4 is added) and rebuild the package.
 `smpa-ros-gui-v4-conversation.patch` is superseded and should not be applied.
+
+## 3. From version 6 to version 7 (ROS 2 Workspace)
+
+Version 7 adds the ROS 2 → Workspace view. It changes only `smpa_gui/`:
+
+| Added | Changed |
+|---|---|
+| `smpa_gui/frontend/tabs/ros/workspace.js`, `workspace_canvas.js` | `tabs/ros/index.js` (Workspace subview after Graph; Graph stays the default) |
+| `GET /api/v1/ros/parameters` (`app.py`, `ros_parameters.read_many`) | `tabs/ros/parameters.js` (address `…/parameters/<node>@<parameter>` highlights that parameter) |
+| `test/test_workspace.py`, `test/test_browser_workspace.py`, `test/fixtures/workspace_nodes.py` | `tabs/actions/index.js` (address `#actions/<action>` selects that action; nothing is sent) |
+| | `style.css` (Workspace styles; tab bars scroll on narrow windows), contract 1.6, `package.xml` (version 0.7.0, `std_srvs` test dependency, already used by the tests), `test_gui.sh`, docs |
+
+All earlier routes and addresses behave as before. No SMPA file is read or changed by the
+Workspace.
+
+To move a version 6 worktree to version 7, apply `smpa-ros-gui-v7-workspace.patch` on the
+`gui/v6-conversation` branch and rebuild the package (`./install_gui.sh --build ~/ros2_ws`,
+no new Python packages).

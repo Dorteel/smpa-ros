@@ -15,8 +15,9 @@ Concepts:
 
     The contract version names the JSON shapes documented in ``API.md``.
     Every HTTP response and every stream message follows that document.
-    Version 1.5 merges the conversation and graph routes of GUI version 4
-    (1.3) into version 5 (1.4).
+    Version 1.5 merged the conversation and graph routes of GUI version 4
+    (1.3) into version 5 (1.4); version 1.6 adds the parameter overview
+    ``GET /api/v1/ros/parameters`` used by the ROS 2 Workspace.
 """
 
-CONTRACT_VERSION = '1.5'
+CONTRACT_VERSION = '1.6'

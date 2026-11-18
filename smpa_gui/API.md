@@ -1,4 +1,4 @@
-# Gateway API, contract version 1.5
+# Gateway API, contract version 1.6
 
 Base URL: `http://127.0.0.1:8765/api/v1`. All routes are read-only (HTTP `GET` or
 WebSocket) except the `POST` routes for sending and cancelling action goals
@@ -10,7 +10,9 @@ Version 1.1 added the `/actions/...` routes, 1.2 the read-only `/smpa/...` sessi
 routes, 1.3 (GUI v4 patch) the conversation, layout, model and graph routes, and 1.4
 (GUI v5) the parameter-change and service routes, parameter descriptors, `/session` and
 `/smpa/status.enabled`. Version 1.5 (GUI v6) combines 1.3 and 1.4 and adds `candidates`
-and `fallback` to transcript and graph answers. Nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
+and `fallback` to transcript and graph answers. Version 1.6 (GUI v7) adds the read-only
+parameter overview `GET /ros/parameters` ([Parameter management](#parameter-management))
+for the ROS 2 Workspace. Nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
 URL-encoded query parameters because they contain slashes. A machine-readable
 description of the HTTP routes is served at `/api/openapi.json`.
 
@@ -274,6 +276,26 @@ exist for goals sent by this gateway process since it started (at most 200).
 | `lost` | The action server disappeared while the goal was active; outcome unknown |
 
 ## Parameter management
+
+### `GET /ros/parameters?timeout=<seconds, 0.2–5, default 1>`
+
+Read-only overview of every visible node's parameters (hidden nodes are left out), used
+by the ROS 2 Workspace. Each node is read exactly like `GET /ros/nodes/parameters`, up to
+eight nodes at a time, so an unresponsive node costs one timeout and does not hide the
+others. The GUI's own node is listed with `is_gateway: true` and `state: "unavailable"`
+without being asked (it offers no parameter services).
+
+```json
+{"contract_version": "1.6", "timeout": 1.0,
+ "nodes": [{"node": "/fixture_ns/fixture_parameters", "state": "ok", "is_gateway": false,
+            "parameters": [<as in GET /ros/nodes/parameters>]},
+           {"node": "/fixture_silent", "state": "not_responding", "is_gateway": false, "parameters": []},
+           {"node": "/smpa_gui", "state": "unavailable", "is_gateway": true, "parameters": []}]}
+```
+
+`state` is `ok`, `not_responding`, `unavailable`, or `error` (with `detail`) when reading
+that node failed in the gateway. Nodes keep the order of `GET /ros/nodes`. A timeout
+outside 0.2–5 s gives `422`.
 
 ### `POST /ros/parameters/set`
 

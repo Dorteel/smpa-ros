@@ -57,7 +57,7 @@ All rclpy calls happen on the ROS thread. Web handlers pass small functions to
 | `ros_adapter/ros_names.py` | Name rules: full node names, hidden names, action plumbing names |
 | `ros_adapter/ros_graph.py` | Collect raw discovery; build the graph description (pure function) |
 | `ros_adapter/ros_topics.py` | Message class lookup, QoS matching for subscriptions, bounded message-to-JSON conversion |
-| `ros_adapter/ros_parameters.py` | Read parameters and descriptors; check proposed changes; apply confirmed changes (atomic or individual) once, with a session history |
+| `ros_adapter/ros_parameters.py` | Read parameters and descriptors (one node, or many side by side for the Workspace); check proposed changes; apply confirmed changes (atomic or individual) once, with a session history |
 | `ros_adapter/ros_services.py` | Discover services with providers and clients; describe service types; make confirmed, bounded calls once, with a session history |
 | `ros_adapter/sensors.py` | Sensor registry and one encoder per sensor type |
 | `ros_adapter/ros_interfaces.py` | Action class lookup; schema of any message type from its definition; validation of JSON values; message construction |
@@ -102,7 +102,7 @@ browser never causes a queue. Silence is explained with status messages.
 |---|---|
 | `app.js` | Tab shell, routing by address fragment, health indicator |
 | `api.js` | The only code that talks to the gateway: snapshots, streams with reconnect, polling |
-| `tabs/ros/` | `graph.js`, `topics.js`, `parameters.js` (+ `parameter_values.js`, the pure parsing and checking rules), `services.js` (reuses the Actions form), `actions.js` |
+| `tabs/ros/` | `graph.js`, `workspace.js` (+ `workspace_canvas.js`), `topics.js`, `parameters.js` (+ `parameter_values.js`, the pure parsing and checking rules), `services.js` (reuses the Actions form), `actions.js` |
 | `tabs/sensors/index.js` | Panel manager and sensor discovery list |
 | `tabs/sensors/registry.js` | Viewer name → viewer module |
 | `tabs/sensors/viewers/` | One module per viewer |
@@ -118,6 +118,39 @@ browser never causes a queue. Silence is explained with status messages.
 A tab, a ROS 2 subview and an SMPA module share one contract: an object with `id`,
 `title`, `mount(container, route)` and `unmount()`. `unmount` must stop polling and
 close streams.
+
+## ROS 2 Workspace
+
+The Workspace (`tabs/ros/workspace.js`) is a ROS 2 subview with five CSS-grid regions:
+topics (top), services (left), actions (right), parameters (bottom) and the canvas
+(centre), separated by splitters. It is independent of SMPA.
+
+- **No new discovery.** The topic, service and action panels poll the same routes as the
+  Topics, Services and ROS 2 → Actions views (`/ros/topics`, `/ros/services`,
+  `/ros/actions`). Parameters use `GET /ros/parameters`, which only runs the existing
+  per-node reader (`ros_parameters.read`) for every visible node side by side
+  (`ros_parameters.read_many`).
+- **Panels.** Each panel tracks what it has seen (to show disappeared interfaces as
+  *gone* for ten seconds), filters locally, and redraws only when what it would show
+  changes. A collapsed panel does not poll.
+- **Inspection reuses the existing views** through the address: `#ros/topics/<name>`,
+  `#ros/services/<name>`, `#actions/<name>` (the Actions tab now selects an action named
+  in its address) and `#ros/parameters/<node>@<parameter>` (the Parameters view now
+  highlights and scrolls to the named parameter). Parameter changes therefore keep the
+  Parameters view's proposal, validation and confirmation dialog unchanged; the
+  Workspace itself never posts anything.
+- **Canvas** (`workspace_canvas.js`): a Cytoscape.js instance with no elements, user
+  panning and zooming on, node grabbing and box selection off. The grid is a CSS
+  background moved with the viewport. The viewport is published as `data-zoom`,
+  `data-pan-x`, `data-pan-y`, `data-elements` on `#workspace-canvas` (tests read these
+  instead of Cytoscape objects) and kept in `sessionStorage`; panel sizes and switches
+  in `localStorage`.
+- **Prepared for the editor, not implemented.** Each chip carries `data-kind`,
+  `data-name`, `data-type` (and `data-node`, `data-value` for parameters), which is
+  everything an editor needs to create a canvas element for that interface without
+  asking the gateway again. A future drag-and-drop editor can add elements to the
+  existing Cytoscape instance; `fit` already frames elements when there are any. Today
+  chips are not draggable and nothing is ever added to the canvas.
 
 ## Action execution
 

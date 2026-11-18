@@ -1,19 +1,22 @@
 /**
  * The ROS 2 tab: generic inspection of whatever ROS graph is visible.
  *
- * Concepts: a subview is one inspector or manager (graph, topics, parameters,
- * services, actions)
- * with the same mount and unmount contract as a tab. Only one subview is
- * mounted at a time, so only one of them polls the gateway.
+ * Concepts: a subview is one inspector or manager (graph, workspace, topics,
+ * parameters, services, actions) with the same mount and unmount contract as
+ * a tab. Only one subview is mounted at a time, so only one of them polls
+ * the gateway. The workspace arranges the discovered interfaces around an
+ * empty canvas and opens the other subviews (and the Actions tab) to
+ * inspect one of them.
  */
 import {h} from '../../api.js';
 import graph from './graph.js';
+import workspace from './workspace.js';
 import topics from './topics.js';
 import parameters from './parameters.js';
 import services from './services.js';
 import actions from './actions.js';
 
-const SUBVIEWS = [graph, topics, parameters, services, actions];
+const SUBVIEWS = [graph, workspace, topics, parameters, services, actions];
 let bar = null;
 let host = null;
 let active = null;

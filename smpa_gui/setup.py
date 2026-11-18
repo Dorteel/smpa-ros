@@ -31,7 +31,7 @@ def package_files(*folders):
 
 setup(
     name=PACKAGE,
-    version='0.6.0',
+    version='0.7.0',
     packages=find_packages(include=[PACKAGE, PACKAGE + '.*']),
     package_data={PACKAGE: package_files('frontend', 'mock_graphs')},
     data_files=[

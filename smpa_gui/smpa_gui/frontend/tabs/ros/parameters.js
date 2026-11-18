@@ -30,6 +30,7 @@ let session = {enabled: false, token: null};
 let dom = {};
 let applying = false;
 let lastOutcome = null;
+let focusedParameter = null;
 
 /** Redraw the node list, keeping the selected node highlighted. */
 function renderList() {
@@ -107,7 +108,8 @@ function renderTable() {
   const shown = parameters.filter((parameter) => !text || parameter.name.toLowerCase().includes(text));
   dom.table.replaceChildren(h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Type'), h('th', {}, 'Current value'),
     h('th', {}, 'Constraints'), h('th', {}, 'Description'), h('th', {}, 'Proposed value'))),
-    h('tbody', {}, shown.map((parameter) => h('tr', {'data-parameter': parameter.name},
+    h('tbody', {}, shown.map((parameter) => h('tr', {'data-parameter': parameter.name,
+      class: parameter.name === focusedParameter ? 'selected' : null, 'data-focused': parameter.name === focusedParameter},
       h('td', {class: 'mono'}, parameter.name), h('td', {}, parameter.type),
       h('td', {class: 'mono'}, valueText(parameter.value)),
       h('td', {class: 'muted'}, constraintText(parameter)), h('td', {}, parameter.description || ''),
@@ -116,6 +118,33 @@ function renderTable() {
           onclick: () => { propose(parameter, parameter.type, editText(parameter.type, parameter.value)); renderTable(); }}, 'Edit')
           : h('span', {class: 'muted'}, parameter.read_only ? 'read-only' : session.enabled ? '' : 'changes disabled'))))));
   for (const name of proposals.keys()) markRow(name);
+}
+
+/**
+ * Bring the parameter that was asked for into view, once, after the table is first drawn.
+ *
+ * The ROS 2 Workspace opens this view for one parameter. That parameter's
+ * row is highlighted by ``renderTable``; here it is scrolled into view so
+ * the user sees it without searching. Nothing is proposed or changed: the
+ * user still edits it with its Edit button and confirms in the dialog.
+ */
+function revealFocusedParameter() {
+  const row = focusedParameter && dom.table && dom.table.querySelector(`tr[data-parameter="${CSS.escape(focusedParameter)}"]`);
+  if (row) row.scrollIntoView({block: 'center'});
+}
+
+/**
+ * Split the part of the address after "parameters/" into a node name and an optional parameter name.
+ *
+ * The address names a node, for example "fixture_mgmt/settings", and may
+ * add "@" and one of its parameters, for example
+ * "fixture_mgmt/settings@level". ROS node names cannot contain "@", so the
+ * split is unambiguous. The node name gets its leading slash back.
+ */
+function nodeAndParameter(argument) {
+  if (!argument) return {node: null, parameter: null};
+  const [node, ...rest] = argument.split('@');
+  return {node: node.startsWith('/') ? node : '/' + node, parameter: rest.length ? rest.join('@') : null};
 }
 
 /** Summarise the proposals and enable the apply button only when there are valid ones and nothing is being applied. */
@@ -272,6 +301,7 @@ async function showNode(name, keepOutcome = false) {
   renderTable();
   renderPending();
   renderOutcome();
+  revealFocusedParameter();
 }
 
 /** Ask the gateway whether changes are allowed and fetch the current session token. */
@@ -308,7 +338,9 @@ export default {
       h('table', {}, listBody)), detail, dom.dialog);
     stopList = poll(async () => { nodes = (await getJSON('/ros/nodes')).nodes; renderList(); }, 2000);
     await refreshSession();
-    showNode(argument ? (argument.startsWith('/') ? argument : '/' + argument) : null);
+    const requested = nodeAndParameter(argument);
+    focusedParameter = requested.parameter;
+    showNode(requested.node);
   },
 
   /** Stop refreshing the node list and close the dialog; proposals are discarded with the view. */
@@ -317,6 +349,7 @@ export default {
     stopList = null;
     if (dom.dialog && dom.dialog.open) dom.dialog.close();
     selected = null;
+    focusedParameter = null;
     proposals = new Map();
   },
 };

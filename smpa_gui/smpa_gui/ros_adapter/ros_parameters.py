@@ -128,6 +128,34 @@ def read(gateway, node_name, timeout=2.0):
     return dict(node=node_name, state='ok', parameters=parameters)
 
 
+def read_many(gateway, node_names, timeout=1.0, readers=8):
+    """Read the parameters of several nodes at once, each node with the same rules as ``read``.
+
+    This is what the Workspace's parameter panel shows: every discovered
+    node with its parameters, so that each parameter stays attached to the
+    node that owns it. A node that is busy or never spins would make a
+    one-by-one reading as slow as the sum of all timeouts, so the nodes are
+    read side by side by a small, fixed number of reader threads. Each
+    reader calls ``read`` for one node; nothing is written. A node whose
+    reading fails because the gateway stopped is reported with the state
+    ``error`` and the reason, instead of hiding the other nodes. The result
+    keeps the order of ``node_names``.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def read_one(node_name):
+        """Read one node, turning an unexpected failure into a state of that node."""
+        try:
+            return read(gateway, node_name, timeout)
+        except Exception as error:  # noqa: BLE001 - one node's failure must not hide the others
+            return dict(node=node_name, state='error', detail=str(error), parameters=[])
+
+    if not node_names:
+        return []
+    with ThreadPoolExecutor(max_workers=max(1, min(readers, len(node_names)))) as pool:
+        return list(pool.map(read_one, node_names))
+
+
 def describe_descriptor(descriptor):
     """Turn a ``ParameterDescriptor`` into plain data, or into unknowns when the node gave none.
 

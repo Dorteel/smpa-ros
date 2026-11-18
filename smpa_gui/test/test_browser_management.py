@@ -45,8 +45,8 @@ def page(ros_environment, server, browser):
 
 
 def test_ros_tab_offers_parameters_and_services(page):
-    """The ROS 2 tab has Graph, Topics, Parameters, Services and Actions views."""
-    assert page.locator('nav[aria-label="ROS 2 views"] button').all_inner_texts() == ['Graph', 'Topics', 'Parameters', 'Services', 'Actions']
+    """The ROS 2 tab has Graph, Workspace, Topics, Parameters, Services and Actions views."""
+    assert page.locator('nav[aria-label="ROS 2 views"] button').all_inner_texts() == ['Graph', 'Workspace', 'Topics', 'Parameters', 'Services', 'Actions']
 
 
 def test_parameters_show_constraints_and_read_only(page):
