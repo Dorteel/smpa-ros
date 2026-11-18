@@ -244,17 +244,21 @@ class MemoryManager:
         return Path('state') / f'cycle_{self.cycle:06d}' / name
 
     def invocation(self, stage, prompt, source=None):
+        """Reserve one durable stage record and its run-wide provenance.
+
+        The experiment must have an active cycle. Delegate allocation to shared
+        run memory so independent processes cannot choose the same name or
+        sequence. Mirror the returned values in this manager for existing callers
+        that inspect the current cycle, counters, or previous record.
+        """
         if not self.in_cycle or self.metadata['status'] != 'running':
             raise RuntimeError('Stage calls require an active cycle')
-        count = self.counts.get(stage, 0) + 1
-        self.counts[stage] = count
-        self.sequence += 1
-        name = f'{stage}.json' if count == 1 else f'{stage}_{count:03d}.json'
-        provenance = dict(sequence=self.sequence, invocation=count,
-                          started_at=datetime.now().astimezone().isoformat(),
-                          prompt_name=prompt, source_record=source,
-                          previous_record=self.previous_record)
-        self.previous_record = str(self.record_path(name))
+        cycle, name, provenance = reserve_invocation(
+            self.directory, self.metadata['run_id'], stage, prompt, source,
+            expected_cycle=self.cycle)
+        self.counts[stage] = provenance['invocation']
+        self.sequence = provenance['sequence']
+        self.previous_record = str(Path('state') / f'cycle_{cycle:06d}' / name)
         return name, provenance
 
     def complete_cycle(self):
@@ -342,3 +346,74 @@ def locked_assigned_run(directory, run_id):
             held.remove(directory)
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+def reserve_invocation(directory, run_id, stage, prompt, source=None, *, expected_cycle=None):
+    """Reserve one unique stage record within an active shared run.
+
+    Validate the assigned run and hold its cooperative lock while reading the
+    current metadata, active cycle, and durable invocation counters. A cycle is
+    active when its directory exists and its number is one more than the last
+    completed cycle. Reject a stale expected cycle or a terminal run.
+
+    For older runs without counters, recover the last sequence, previous record,
+    and current-cycle stage counts from existing JSON records. Persist the next
+    reservation atomically before returning its cycle, record name and provenance.
+    A process that dies after reservation can leave a gap, but a later process
+    never overwrites its reserved name or invents its missing result.
+    """
+    import json
+
+    if not isinstance(stage, str) or re.fullmatch(r'[a-z][a-z0-9_]*', stage) is None:
+        raise ValueError('Stage must be a lowercase stage name')
+    with locked_assigned_run(directory, run_id) as run:
+        metadata = yaml.safe_load((run / 'metadata.yaml').read_text())
+        if metadata.get('status') != 'running':
+            raise RuntimeError('Stage calls require an active run')
+        cycle = metadata.get('completed_cycles', 0) + 1
+        cycle_dir = run / 'state' / f'cycle_{cycle:06d}'
+        if not cycle_dir.is_dir() or (expected_cycle is not None and expected_cycle != cycle):
+            raise RuntimeError('Stage calls require the active cycle')
+        state_path = run / 'state' / '.invocations.json'
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            if (type(state.get('sequence')) is not int or type(state.get('cycle')) is not int
+                    or not isinstance(state.get('counts'), dict)):
+                raise ValueError('Invalid invocation reservation state')
+        else:
+            state = dict(cycle=cycle, sequence=0, counts={}, previous_record=None)
+            for path in sorted((run / 'state').glob('cycle_*/*.json')):
+                record = json.loads(path.read_text())
+                sequence = record.get('sequence', 0)
+                if type(sequence) is int and sequence > state['sequence']:
+                    state['sequence'] = sequence
+                    state['previous_record'] = str(path.relative_to(run))
+                if path.parent == cycle_dir and isinstance(record.get('stage'), str):
+                    number = record.get('invocation', 0)
+                    if type(number) is int:
+                        stage_name = record['stage']
+                        state['counts'][stage_name] = max(state['counts'].get(stage_name, 0), number)
+        if state['cycle'] != cycle:
+            if state['cycle'] > cycle:
+                raise RuntimeError('Invocation state is ahead of the active cycle')
+            state['cycle'], state['counts'] = cycle, {}
+        count = state['counts'].get(stage, 0) + 1
+        state['counts'][stage] = count
+        state['sequence'] += 1
+        name = f'{stage}.json' if count == 1 else f'{stage}_{count:03d}.json'
+        provenance = dict(sequence=state['sequence'], invocation=count,
+                          started_at=datetime.now().astimezone().isoformat(),
+                          prompt_name=prompt, source_record=source,
+                          previous_record=state['previous_record'])
+        state['previous_record'] = str(Path('state') / cycle_dir.name / name)
+        with NamedTemporaryFile(mode='w', encoding='utf-8', dir=state_path.parent,
+                                prefix='.invocations-', delete=False) as output:
+            pending = Path(output.name)
+            try:
+                json.dump(state, output, ensure_ascii=False, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+                pending.replace(state_path)
+            finally:
+                pending.unlink(missing_ok=True)
+        return cycle, name, provenance

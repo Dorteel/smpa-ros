@@ -14,12 +14,11 @@ def test_concurrent_belief_writers_do_not_duplicate_source_or_lose_graph(tmp_pat
     Both workers attach to the same conversation with the same metadata snapshot.
     Their inference returns fixed RDF without loading a model. After both complete,
     require one durable SDS entry, one graph containing the proposal, and two
-    completed records in separate cycle directories. No external service runs.
+    completed records in the same active cycle. No external service runs.
     """
     memory = open_conversation(tmp_path, configuration={'conversation': {'agent': 'fixture'}})
     append_message(memory.directory, 'User', 'A cup is visible.')
-    for cycle in (1, 2):
-        (memory.directory / 'state' / f'cycle_{cycle:06d}').mkdir()
+    (memory.directory / 'state' / 'cycle_000001').mkdir()
     go = tmp_path / 'go'
     code = '''
 from copy import deepcopy
@@ -53,7 +52,7 @@ assert go.exists()
 model_messages(memory, {'generate': generate, 'settings': {},
                        'agent': {'backend': 'transformers'}}, messages)
 '''
-    children = [subprocess.Popen([sys.executable, '-c', code, str(memory.directory), str(cycle),
+    children = [subprocess.Popen([sys.executable, '-c', code, str(memory.directory), '1',
                                   str(go), str(tmp_path / f'{cycle}.ready')],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 for cycle in (1, 2)]
@@ -76,6 +75,6 @@ model_messages(memory, {'generate': generate, 'settings': {},
     assert yaml.safe_load((memory.directory / 'metadata.yaml').read_text())['sds_messages'] == 1
     assert (memory.directory / 'conversation-sds.md').read_text().count('## User — message 1') == 1
     assert len(read_graph(memory.directory)) > 0
-    for cycle in (1, 2):
-        record = json.loads((memory.directory / 'state' / f'cycle_{cycle:06d}' / 'model.json').read_text())
+    for name in ('model.json', 'model_002.json'):
+        record = json.loads((memory.directory / 'state' / 'cycle_000001' / name).read_text())
         assert record['status'] == 'succeeded'

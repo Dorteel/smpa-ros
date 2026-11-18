@@ -241,3 +241,59 @@ def test_metadata_updates_work_for_an_assigned_run_outside_runs_directory(tmp_pa
     stored = yaml.safe_load((memory.directory / 'metadata.yaml').read_text())
     assert stored['run_id'] == memory.metadata['run_id']
     assert stored['configuration']['assigned'] is True
+
+
+def test_separate_processes_reserve_unique_stage_invocations(tmp_path):
+    """Allocate distinct record names and provenance for concurrent stage calls.
+
+    Start two separate processes for the same run and active cycle. Release them
+    together and verify that both receive different ordered names and sequence
+    numbers. A later allocation must continue after both reservations even when
+    neither worker has written a stage result, as after an interrupted worker.
+    """
+    import json
+    import subprocess
+    import sys
+    import time
+    from memory import reserve_invocation
+
+    memory = MemoryManager(tmp_path, goal='Observe the scene')
+    memory.begin_cycle()
+    start = tmp_path / 'start'
+    code = (
+        'from pathlib import Path\n'
+        'from time import monotonic, sleep\n'
+        'import json, sys\n'
+        'from memory import reserve_invocation\n'
+        'directory, identity, start, ready = sys.argv[1:]\n'
+        'Path(ready).touch()\n'
+        'deadline = monotonic() + 5\n'
+        'while not Path(start).exists() and monotonic() < deadline: sleep(0.01)\n'
+        'assert Path(start).exists()\n'
+        'print(json.dumps(reserve_invocation(directory, identity, "model", "default")))\n'
+    )
+    children = [subprocess.Popen([sys.executable, '-c', code, str(memory.directory),
+                                  memory.metadata['run_id'], str(start), str(tmp_path / f'{n}.ready')],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                for n in (1, 2)]
+    try:
+        deadline = time.monotonic() + 5
+        while not all((tmp_path / f'{n}.ready').exists() for n in (1, 2)):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        start.touch()
+        results = []
+        for child in children:
+            output, error = child.communicate(timeout=5)
+            assert child.returncode == 0, error
+            results.append(json.loads(output))
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=2)
+    assert {result[1] for result in results} == {'model.json', 'model_002.json'}
+    assert {result[2]['sequence'] for result in results} == {1, 2}
+    cycle, name, provenance = reserve_invocation(memory.directory, memory.metadata['run_id'], 'plan', 'default')
+    assert (cycle, name, provenance['sequence']) == (1, 'plan.json', 3)
+    assert provenance['previous_record'] == 'state/cycle_000001/model_002.json'
