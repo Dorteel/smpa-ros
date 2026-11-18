@@ -697,6 +697,13 @@ class ConversationTests(unittest.TestCase):
             print(f'Qwen reproduction debug report: {log_path}', flush=True)
 
     def test_generation_controls_and_run_lifecycle(self):
+        """Retain per-agent controls across explicit conversation session changes.
+
+        Exercise message generation, clear, new and resume through the existing
+        HTTP API while preserving historical transcript bytes. Each successful
+        switch must transfer heartbeat ownership. Invalid selections and failed
+        finalization must leave the original active session and heartbeat usable.
+        """
         import fcntl
         agents, default, config, config_path = self.configured_agents()
         agents[default]['available'] = True
@@ -740,6 +747,8 @@ class ConversationTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 400)
                 raised.exception.close()
             state = post('/api/clear', {})
+            self.assertFalse(self.memory._heartbeat_thread.is_alive())
+            self.assertTrue(server.memory._heartbeat_thread.is_alive())
             self.assertEqual(state['messages'], [])
             self.assertNotEqual(state['run_id'], original_id)
             self.assertEqual(state['generation']['values']['seed'], 12)
@@ -770,6 +779,19 @@ class ConversationTests(unittest.TestCase):
                 post('/api/resume', {'run_id': '../outside'})
             raised.exception.close()
             self.assertEqual(server.memory.metadata['run_id'], original_id)
+            active = server.memory
+            def fail_finalization(status):
+                """Stop the current heartbeat, then simulate failed finalization storage."""
+                active.stop_heartbeat()
+                raise OSError('fixture finalization failed')
+            with patch.object(active, 'finalize', side_effect=fail_finalization):
+                with self.assertRaises(HTTPError) as raised:
+                    post('/api/new', {})
+                self.assertEqual(raised.exception.code, 400)
+                raised.exception.close()
+            self.assertIs(server.memory, active)
+            self.assertTrue(active._heartbeat_thread.is_alive())
+            self.assertFalse(active._heartbeat_stop.is_set())
         finally:
             server.shutdown(); server.server_close(); thread.join()
             server.memory.finalize('completed')

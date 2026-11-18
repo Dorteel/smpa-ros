@@ -19,12 +19,63 @@ from smpa_ros.backends.base import (stage_generation, generation_arguments, vali
                                     generation_capabilities)
 
 from smpa_ros.backends.transformers import TransformersVLM
-from memory import MemoryManager
+from memory import MemoryManager, append_observation
 from smpa_ros.model import resolve_vision_model
 from smpa_ros.plan import refinement_settings
 
 
 from smpa_llm.inference.images import image_to_pil
+
+
+def camera_provenance(image, topic, received_at):
+    """Describe the original ROS frame and the time this process received it.
+
+    Preserve the publisher's header stamp independently of the UTC receipt
+    time. Return the same source fields used by normal camera PNGs so frozen
+    refinement evidence carries equally explicit provenance.
+    """
+    return dict(topic=topic, received_at=received_at.isoformat(),
+                stamp=dict(sec=image.header.stamp.sec, nanosec=image.header.stamp.nanosec),
+                frame_id=image.header.frame_id, encoding=image.encoding,
+                width=image.width, height=image.height, step=image.step,
+                is_bigendian=image.is_bigendian)
+
+
+def freeze_image(directory, pixels, camera, *, cycle=None, sense_record=None):
+    """Durably freeze the first refinement frame with its camera provenance.
+
+    Preserve an existing frozen image byte for byte. Otherwise save original
+    pixels with a smpa.camera chunk containing the source metadata and frozen_at
+    timestamp, fsync the temporary PNG, and publish it exclusively. Index only
+    the process that wins publication, then remove its temporary file even if
+    indexing fails. No capture timestamp is invented for older existing images.
+    """
+    import os
+    from tempfile import NamedTemporaryFile
+    from PIL.PngImagePlugin import PngInfo
+
+    destination = directory / 'observations/vision/frozen_image.png'
+    if destination.exists():
+        return
+    frozen = dict(camera, frozen_at=datetime.now(timezone.utc).isoformat())
+    metadata = PngInfo()
+    metadata.add_itxt('smpa.camera', json.dumps(frozen))
+    with NamedTemporaryFile(mode='wb', dir=destination.parent, prefix='.frozen-image-', delete=False) as output:
+        pending = Path(output.name)
+        try:
+            pixels.save(output, format='PNG', pnginfo=metadata)
+            output.flush()
+            os.fsync(output.fileno())
+            try:
+                os.link(pending, destination)
+            except FileExistsError:
+                return
+            append_observation(directory, modality='vision', kind='camera_frame',
+                observed_at=frozen['received_at'], status='evidence_without_description',
+                files={'image': str(destination.relative_to(directory))}, cycle=cycle,
+                sense_record=sense_record, provenance=frozen)
+        finally:
+            pending.unlink(missing_ok=True)
 
 
 class SenseService(Node):
@@ -112,7 +163,10 @@ class SenseService(Node):
         """Describe the requested frame using the shared configured backend.
 
         Decode and cache original pixels, freezing initial evidence only when
-        refinement is enabled. Bound a copy to 512 pixels before inference and
+        refinement is enabled. Reuse previously frozen pixels on a restarted
+        service rather than pairing a new frame with old persisted evidence.
+        Record source and freeze times for new evidence.
+        Bound a copy to 512 pixels before inference and
         return exact generated text. Report failures in the existing error field;
         original evidence persistence belongs to the acquiring caller.
         """
@@ -123,8 +177,11 @@ class SenseService(Node):
                 self.image = image_to_pil(request.image)
                 if self.refinement['enabled']:
                     import hashlib
+                    freeze_image(self.world_model_dir, self.image, camera_provenance(
+                        request.image, self.pipeline.get('camera_topic', ''), datetime.now(timezone.utc)))
+                    with PILImage.open(self.world_model_dir / 'observations/vision/frozen_image.png') as stored:
+                        self.image = stored.convert('RGB')
                     self.image_sha256 = hashlib.sha256(self.image.tobytes()).hexdigest()
-                    self.image.save(self.world_model_dir / 'observations/vision/frozen_image.png')
             image = self.image.copy()
             # Bound image size before processor tiling to limit inference memory.
             image.thumbnail((512, 512))
@@ -174,9 +231,13 @@ def capture_once(node: Node, config: dict, output_dir: Path,
 
     Receive the first camera frame and its UTC receipt time, then unsubscribe
     and save the original full-resolution RGB pixels before requesting Sense.
-    Embed source header and UTC receipt metadata in that PNG. On success save
-    the exact description under the same timestamp; on inference error retain
-    the image without fabricating a description. Create files exclusively; the
+    Embed source header and UTC receipt metadata in that PNG. Append its index
+    entry before inference so a failed request still leaves discoverable camera
+    evidence. Freeze the same frame when refinement is enabled. On success save
+    and fsync the description, then append its separate manifest with any known
+    cycle and Sense invocation supplied by the stage. Standalone captures retain
+    null invocation fields rather than guessing an experiment association.
+    Keep the image on inference error without fabricating a description. Create files exclusively; the
     existing caller records them as sources of one Sense invocation. An optional
     description callable uses the shared inference server instead of the legacy
     service. Always destroy the subscription and any service client before returning.
@@ -186,8 +247,8 @@ def capture_once(node: Node, config: dict, output_dir: Path,
     from sensor_msgs.msg import Image
     from smpa_ros_interfaces.srv import DescribeScene
 
-    output_dir, _ = MemoryManager.assigned_run(output_dir, config.get('run_id', ''))
-    output_dir = output_dir / 'observations' / 'vision'
+    run_directory, _ = MemoryManager.assigned_run(output_dir, config.get('run_id', ''))
+    output_dir = run_directory / 'observations' / 'vision'
     selected = config.get('stage_prompts', {}).get('sense', {})
     prompt = (selected['text'] if config['prompt'] == selected.get('name') else
               files('smpa_ros').joinpath('prompts/sense/' + config['prompt'] + '.txt')
@@ -224,16 +285,19 @@ def capture_once(node: Node, config: dict, output_dir: Path,
         timestamp = received_at.strftime('%Y-%m-%d_%H-%M-%S_%fZ')
         path = output_dir / f'{timestamp}_sense_output.md'
         metadata = PngInfo()
-        metadata.add_itxt('smpa.camera', json.dumps(dict(
-            topic=config['camera_topic'], received_at=received_at.isoformat(),
-            stamp=dict(sec=image.header.stamp.sec, nanosec=image.header.stamp.nanosec),
-            frame_id=image.header.frame_id, encoding=image.encoding,
-            width=image.width, height=image.height, step=image.step,
-            is_bigendian=image.is_bigendian)))
+        camera = camera_provenance(image, config['camera_topic'], received_at)
+        metadata.add_itxt('smpa.camera', json.dumps(camera))
         with path.with_suffix('.png').open('xb') as output:
             image_to_pil(image).save(output, format='PNG', pnginfo=metadata)
             output.flush()
             os.fsync(output.fileno())
+        association = dict(cycle=config.get('_cycle'), sense_record=config.get('_sense_record'))
+        append_observation(run_directory, modality='vision', kind='camera_frame',
+            observed_at=received_at.isoformat(), status='evidence_without_description',
+            files={'image': str(path.with_suffix('.png').relative_to(run_directory))},
+            provenance=camera, **association)
+        if refinement_settings(config)['enabled']:
+            freeze_image(run_directory, image_to_pil(image), camera, **association)
         started = perf_counter()
         if describe is None:
             response_future = client.call_async(DescribeScene.Request(image=image, prompt=prompt))
@@ -248,6 +312,12 @@ def capture_once(node: Node, config: dict, output_dir: Path,
             description = describe(image, prompt)
         with path.open('x', encoding='utf-8', newline='') as output:
             output.write(description)
+            output.flush()
+            os.fsync(output.fileno())
+        append_observation(run_directory, modality='vision', kind='scene_description',
+            observed_at=received_at.isoformat(), status='generated', text=description,
+            files={'image': str(path.with_suffix('.png').relative_to(run_directory)),
+                   'text': str(path.relative_to(run_directory))}, provenance=camera, **association)
         node.get_logger().info(f'Markdown file saved: {path.resolve()}')
         return path
     except Exception as error:

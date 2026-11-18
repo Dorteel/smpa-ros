@@ -36,6 +36,9 @@ def record_observation(directory, cycle, sense, *, record_name='sense.json',
     it exclusively to its final name. Recovery therefore sees either no record
     or one complete record containing both observation and cursor. Never overwrite
     an invocation, swallow the observation error, or consume messages separately.
+    Index attributed Read messages before committing the cursor; an index failure
+    therefore records failed Sense without consuming those messages. The index
+    retains source-session provenance and the planned local Sense record.
     """
     import os
     from tempfile import NamedTemporaryFile
@@ -53,6 +56,14 @@ def record_observation(directory, cycle, sense, *, record_name='sense.json',
             text = json.loads(value).get('read', {})
             if 'cursor' in text:
                 record['read_cursor'] = text['cursor']
+            from memory import append_observation
+            for message in text.get('observations', []):
+                append_observation(directory, modality='read', kind='user_message',
+                    observed_at=message.get('timestamp') or text['observed_at'], status='generated',
+                    text=message['content'], cycle=cycle,
+                    sense_record=str((destination / record_name).relative_to(directory)),
+                    epistemic_status=message.get('epistemic_status'),
+                    provenance={key: entry for key, entry in message.items() if key != 'content'})
     except (Exception, KeyboardInterrupt) as error:
         record.pop('read_cursor', None)
         record.update(status='interrupted' if isinstance(error, KeyboardInterrupt) else 'failed',
@@ -60,7 +71,8 @@ def record_observation(directory, cycle, sense, *, record_name='sense.json',
         raise
     finally:
         observations = [str(path.relative_to(directory)) for path in sorted(
-            set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()]
+            set((directory / 'observations').rglob('*')) - prior_files) if path.is_file()
+            and path.name not in ('index.jsonl', '.index.lock')]
         record['source_observations'] = observations
         with NamedTemporaryFile(mode='w', encoding='utf-8', dir=destination, prefix='.sense-', delete=False) as output:
             temporary = Path(output.name)
@@ -156,22 +168,13 @@ def describe_image(node, image, prompt, *, run_id, directory, pipeline):
             with PILImage.open(frozen) as stored:
                 pixels = stored.convert('RGB')
         else:
-            import os
-            from tempfile import NamedTemporaryFile
-            with NamedTemporaryFile(mode='wb', dir=frozen.parent, prefix='.frozen-image-', delete=False) as output:
-                pending = Path(output.name)
-                try:
-                    pixels.save(output, format='PNG')
-                    output.flush()
-                    os.fsync(output.fileno())
-                    try:
-                        os.link(pending, frozen)
-                    except FileExistsError:
-                        from PIL import Image as PILImage
-                        with PILImage.open(frozen) as stored:
-                            pixels = stored.convert('RGB')
-                finally:
-                    pending.unlink(missing_ok=True)
+            from datetime import datetime, timezone
+            from sense.vision import camera_provenance, freeze_image
+            freeze_image(directory, pixels, camera_provenance(
+                image, pipeline.get('camera_topic', ''), datetime.now(timezone.utc)))
+            from PIL import Image as PILImage
+            with PILImage.open(frozen) as stored:
+                pixels = stored.convert('RGB')
     pixels.thumbnail((512, 512))
     message = Image(height=pixels.height, width=pixels.width, encoding='rgb8',
                     is_bigendian=0, step=pixels.width * 3, data=list(pixels.tobytes()))

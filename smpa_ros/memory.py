@@ -328,12 +328,167 @@ class MemoryManager:
         self.metadata['completed_cycles'] += 1
         self.write_metadata()
 
+    def start_heartbeat(self):
+        """Advertise the process that actually owns this live session.
+
+        The experiment entry point or conversation server calls this method;
+        attached stage workers never do. Record the host, PID and Linux process
+        start time, then publish immediately and every five seconds on a daemon
+        thread. Use a separate metadata reader for each update so the heartbeat
+        cannot mutate the owner's in-memory experiment state or lose another
+        writer's changes. Stop refreshing when the session ends or ownership
+        changes. Log write failures and retry rather than claiming freshness.
+
+        Calling this again on the same active manager is harmless. A stopped
+        worker may be replaced; its captured stop flag prevents further writes
+        even if it is still leaving a blocked lock acquisition. The owner must
+        stop the heartbeat when its server closes or finalize the run.
+        """
+        import logging
+        import socket
+        from threading import Event, Thread
+        from datetime import timezone
+
+        if (getattr(self, '_heartbeat_thread', None) is not None
+                and self._heartbeat_thread.is_alive() and not self._heartbeat_stop.is_set()):
+            return
+        if self.metadata['status'] != 'running':
+            raise RuntimeError('Only a running session can publish a heartbeat')
+        # ROS runs on Linux: btime plus start ticks identifies this process even
+        # if the OS later reuses its PID. Do not substitute a session timestamp.
+        boot = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines()
+                    if line.startswith('btime '))
+        ticks = int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19])
+        owner = dict(pid=os.getpid(), hostname=socket.gethostname(),
+                     started_at=datetime.fromtimestamp(boot + ticks / os.sysconf('SC_CLK_TCK'), timezone.utc).isoformat(),
+                     heartbeat_interval_s=5)
+        self.metadata['process'] = dict(owner, heartbeat_at=datetime.now(timezone.utc).isoformat())
+        self.write_metadata()
+        stopped = Event()
+        directory, identity = self.directory, self.metadata['run_id']
+
+        def refresh():
+            """Refresh only this owner's running session until explicitly stopped.
+
+            Wait between writes, reload under the run lock, and check ownership
+            again after waiting for that lock. A stopped or terminal session is
+            never made live again. Failed writes leave the old timestamp intact.
+            """
+            while not stopped.wait(5):
+                try:
+                    with locked_assigned_run(directory, identity):
+                        current = yaml.safe_load((directory / 'metadata.yaml').read_text())
+                        process = current.get('process', {})
+                        if (stopped.is_set() or current.get('status') != 'running'
+                                or any(process.get(key) != value for key, value in owner.items())):
+                            return
+                        publisher = MemoryManager.__new__(MemoryManager)
+                        publisher.directory, publisher.metadata = directory, deepcopy(current)
+                        publisher._metadata_snapshot = current
+                        publisher.metadata['process']['heartbeat_at'] = datetime.now(timezone.utc).isoformat()
+                        publisher.write_metadata()
+                except Exception:
+                    logging.getLogger(__name__).exception('Session heartbeat could not be written: %s', identity)
+
+        self._heartbeat_stop = stopped
+        self._heartbeat_thread = Thread(target=refresh, name=f'smpa-heartbeat-{identity}', daemon=True)
+        self._heartbeat_thread.start()
+
+    def stop_heartbeat(self):
+        """Stop this manager's liveness writer without changing session status.
+
+        Wake its worker immediately and join for at most one second. A worker
+        waiting for the run lock checks the stop flag before writing once it
+        acquires the lock. Retain the last durable timestamp for stale-session
+        detection, and tolerate managers that never owned a heartbeat.
+        """
+        stopped = getattr(self, '_heartbeat_stop', None)
+        if stopped is not None:
+            stopped.set()
+            if self._heartbeat_thread.ident is not None:
+                self._heartbeat_thread.join(timeout=1)
+
     def finalize(self, status):
+        """Stop owner liveness and durably record a valid terminal outcome.
+
+        Reject unknown states before changing anything. Stop the heartbeat even
+        if another writer already finalized the run; otherwise preserve the
+        existing completion timestamp and publish this owner's final outcome.
+        """
         if status not in ('completed', 'interrupted', 'failed'):
             raise ValueError(f'Invalid terminal run status: {status}')
+        self.stop_heartbeat()
         if self.metadata['status'] == 'running':
             self.metadata.update(status=status, completed_at=datetime.now().astimezone().isoformat())
             self.write_metadata()
+
+
+def append_observation(directory, *, modality, kind, observed_at, status, files=None,
+                       text=None, cycle=None, sense_record=None, epistemic_status=None,
+                       provenance=None):
+    """Append one durable evidence manifest without editing any previous line.
+
+    The producer supplies the evidence's actual timestamp, status, and provenance.
+    File references must resolve to existing files inside this assigned run.
+    Cycle and Sense record may be unknown for independent sensor operations or
+    focused evidence produced by Act before its next Sense; never guess them.
+
+    Serialize only index appends with a separate advisory lock. Require an
+    intact previous line, write one UTF-8 JSON line in one append operation, and
+    fsync it and its directory. A partial write is reported; later writers refuse
+    to append to that incomplete tail. Evidence and previous lines are retained
+    for explicit recovery instead of being truncated or silently repaired.
+    Return the new manifest, including its observation and session identities.
+    """
+    import fcntl
+    import json
+
+    directory, identity = MemoryManager.assigned_run(str(directory))
+    if modality not in ('vision', 'hear', 'read'):
+        raise ValueError('Unknown observation modality')
+    if datetime.fromisoformat(observed_at).utcoffset() is None:
+        raise ValueError('Observation timestamps must include a UTC offset')
+    references = dict(image=None, audio=None, text=None)
+    references.update(files or {})
+    for reference in (*references.values(), sense_record):
+        if reference is not None:
+            path = Path(reference)
+            if path.is_absolute() or not (directory / path).resolve().is_relative_to(directory.resolve()):
+                raise ValueError('Observation files must belong to this run')
+            if reference in references.values() and not (directory / path).is_file():
+                raise ValueError('Observation evidence must exist before indexing')
+    manifest = dict(schema='smpa.observation/1', observation_id=str(uuid4()), session_id=identity,
+                    modality=modality, kind=kind, observed_at=observed_at, cycle=cycle,
+                    sense_record=sense_record, status=status, text=text, files=references,
+                    epistemic_status=epistemic_status, provenance=deepcopy(provenance or {}))
+    line = (json.dumps(manifest, ensure_ascii=False, allow_nan=False) + '\n').encode('utf-8')
+    # Sync directory entries as well as the producer's already-fsynced files.
+    # This makes a just-published PNG or transcript rename durable before its
+    # manifest can become durable.
+    for parent in {(directory / reference).parent for reference in references.values() if reference is not None}:
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    parent = directory / 'observations'
+    with (parent / '.index.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        descriptor = os.open(parent / 'index.jsonl', os.O_CREAT | os.O_APPEND | os.O_RDWR, 0o600)
+        try:
+            if os.fstat(descriptor).st_size and os.pread(descriptor, 1, os.fstat(descriptor).st_size - 1) != b'\n':
+                raise RuntimeError('Observation index has an incomplete tail; explicit recovery is required')
+            if os.write(descriptor, line) != len(line):
+                raise OSError('Observation index append was incomplete')
+            os.fsync(descriptor)
+            parent_descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+        finally:
+            os.close(descriptor)
+    return manifest
 
 
 def merge_run_updates(previous, desired, current):

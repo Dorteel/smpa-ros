@@ -88,7 +88,8 @@ def test_focused_observation_uses_saved_camera_evidence(act_node_class, tmp_path
 
     Persist a prior Sense record and image, then execute the real Act and focus
     logic. Confirm the saved image and question reach inference and the answer
-    is attributed to a durable observation and action record.
+    is attributed to a durable observation and action record. Its explicit
+    timestamp and index entry must identify that same evidence and Act source.
     """
     from types import MethodType
     from PIL import Image as PILImage
@@ -119,6 +120,14 @@ def test_focused_observation_uses_saved_camera_evidence(act_node_class, tmp_path
     record = json.loads((memory.directory / result.record_path).read_text())
     observation = json.loads((memory.directory / record['observation_record']).read_text())
     assert observation['output'] == 'red' and observation['question'] == 'What color?'
+    from datetime import datetime
+    assert datetime.fromisoformat(observation['observed_at']).utcoffset() is not None
+    manifest, = [json.loads(line) for line in (memory.directory / 'observations/index.jsonl').read_text().splitlines()]
+    assert manifest['kind'] == 'focused_observation' and manifest['text'] == 'red'
+    assert manifest['observed_at'] == observation['observed_at']
+    assert manifest['files']['text'] == record['observation_record']
+    assert manifest['provenance']['act_record'] == result.record_path
+    assert manifest['sense_record'] is None
     assert calls[0][0] == bytes([255, 0, 0]) and calls[0][2] == memory.metadata['run_id']
 
 

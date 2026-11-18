@@ -51,7 +51,12 @@ def test_empty_session_and_disabled_modalities(sources):
 
 
 def test_incremental_roles_order_provenance_and_read_only(sources):
-    """Consume each persisted User entry once and leave the source byte-identical."""
+    """Consume User entries once without modifying any source artifact.
+
+    Check every source byte before asking the conversation owner to append a
+    fourth message. That legitimate append may extend its observation index,
+    but must preserve every earlier index byte and historical stage record.
+    """
     robot, source, config = sources
     for message in ('first', 'same', 'same'):
         exchange(source, message, reply, {})
@@ -65,10 +70,14 @@ def test_incremental_roles_order_provenance_and_read_only(sources):
     assert len(observe(robot.directory, source.directory)['observations']) == 3
     persist(robot, source, config)
     assert observe(robot.directory, source.directory)['observations'] == []
+    assert {str(p.relative_to(source.directory)): p.read_bytes()
+            for p in source.directory.rglob('*') if p.is_file()} == before
     exchange(source, 'fourth', reply, {})
     assert [x['content'] for x in observe(robot.directory, source.directory)['observations']] == ['fourth']
     for path, content in before.items():
-        if path not in ('conversation.md', 'metadata.yaml', 'state/.invocations.json'):
+        if path == 'observations/index.jsonl':
+            assert (source.directory / path).read_bytes().startswith(content)
+        elif path not in ('conversation.md', 'metadata.yaml', 'state/.invocations.json'):
             assert (source.directory / path).read_bytes() == content
 
 

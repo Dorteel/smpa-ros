@@ -4,6 +4,10 @@ This inventory records the control flow at base commit `2efae36`. It describes
 the original responsibilities and requested ownership. The historical inventory
 is retained below; the completed migration status follows it.
 
+The current GUI-facing backend contract audit, C1–C3 persistence additions and
+remaining C4/C5 decisions are in [backend-interface-inventory.md](backend-interface-inventory.md).
+The historical Runner references below do not describe the current execution path.
+
 | Existing responsibility | Current implementation and dependencies | Intended owner |
 |---|---|---|
 | Experiment goal, cycle count, stage order and completion | `smpa_ros.smpa.run` calls `Runner.start`, `cycle`, `sense`, `model`, `plan`, `act`, and `finish`; refinement can set `experiment_complete`. | `smpa.py`, using stage action clients and shared run memory. |

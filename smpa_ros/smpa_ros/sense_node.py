@@ -215,6 +215,8 @@ class SenseNode(Node):
         attribution cannot overlap. Return the observation and record path on
         success; persist failures and abort without invoking another stage.
         Use the requested prompt name when supplied, or the frozen default.
+        Supply the reserved invocation to camera persistence for exact index
+        attribution without changing the ROS action goal.
         """
         result = Sense.Result()
         record_path = None
@@ -231,7 +233,8 @@ class SenseNode(Node):
                           pipeline.get('stage_prompts', {}).get('sense', {}).get('name', pipeline.get('prompt', 'describe_scene')))
                 cycle, name, provenance = reserve_invocation(directory, request.run_id, 'sense', prompt)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name
-            config = dict(pipeline, run_id=request.run_id, prompt=prompt)
+            config = dict(pipeline, run_id=request.run_id, prompt=prompt, _cycle=cycle,
+                          _sense_record=str(record_path.relative_to(directory)))
             service = pipeline.get('_run', {}).get('service', 'vision')
             from sense import modalities
             speech = None

@@ -5,7 +5,7 @@ import os
 import struct
 from tempfile import mkdtemp
 
-from memory import MemoryManager
+from memory import MemoryManager, append_observation
 
 
 class AudioObservation:
@@ -31,6 +31,15 @@ class AudioObservation:
             os.fsync(output.fileno())
 
     def write_transcript(self, status: str, text: str = '', error: str = ''):
+        """Durably publish the transcript and index its completed write.
+
+        Preserve the existing Markdown fields and atomic replacement. The
+        constructor's provisional transcript precedes the audio file and is not
+        indexed. Once audio exists, append the terminal complete or incomplete
+        observation with its actual capture timestamp, model and error. Listen
+        has no Sense invocation field, so leave cycle and Sense linkage unknown
+        rather than attributing an independent request to an unrelated stage.
+        """
         content = (f'# Audio Observation\n\n- Timestamp: {self.timestamp.isoformat()}\n'
                    f'- Run ID: {self.run_id}\n- Source: ROS 2 Listen action\n- Audio file: recording.wav\n'
                    f'- Audio format: 16000 Hz, mono, IEEE float32 PCM (lossless)\n'
@@ -45,3 +54,11 @@ class AudioObservation:
             output.flush()
             os.fsync(output.fileno())
         pending.replace(self.path / 'transcript.md')
+        if (self.path / 'recording.wav').is_file():
+            root = self.path.parents[2]
+            append_observation(root, modality='hear', kind='audio_transcript',
+                observed_at=self.timestamp.isoformat(), status=status, text=text,
+                files={'audio': str((self.path / 'recording.wav').relative_to(root)),
+                       'text': str((self.path / 'transcript.md').relative_to(root))},
+                provenance=dict(source='ROS 2 Listen action', language=self.language,
+                                model_identifier=self.model, error=error))
