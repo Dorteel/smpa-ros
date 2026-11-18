@@ -34,7 +34,7 @@ python3 -c 'import rclpy, rosidl_runtime_py, numpy, PIL, yaml' \
 [[ -x .venv/bin/python ]] || python3 -m venv --system-site-packages .venv \
     || fail 'Could not create smpa_gui/.venv (on Ubuntu: sudo apt install python3-venv).'
 .venv/bin/python -m pip install --quiet -r "$requirements"
-.venv/bin/python -c 'import fastapi, uvicorn, websockets, rclpy; print("GUI environment ready:", __import__("sys").prefix)'
+.venv/bin/python -c 'import fastapi, uvicorn, websockets, rdflib, rclpy; print("GUI environment ready:", __import__("sys").prefix)'
 
 if [[ -n "$workspace" ]]; then
     command -v colcon >/dev/null || fail 'colcon is not installed (on Ubuntu: sudo apt install python3-colcon-common-extensions).'

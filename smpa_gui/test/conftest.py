@@ -195,3 +195,74 @@ def browser():
         browser = driver.chromium.launch(args=['--disable-dev-shm-usage'])
         yield browser
         browser.close()
+
+
+SMPA_SOURCE = Path(os.environ.get('SMPA_GUI_TEST_SMPA_ROOT') or GUI.parent).resolve()
+
+
+def smpa_conversation_available():
+    """Tell whether an SMPA checkout with its conversation server and its own .venv is available for tests.
+
+    Both SMPA checkout layouts count: the ROS 2 packages layout
+    (``smpa_ros/smpa_ros/conversation_web.py`` beside ``smpa_llm``) and the
+    earlier flat one.
+    """
+    from smpa_gui.smpa_adapter.smpa_layout import checkout_layout
+    return checkout_layout(SMPA_SOURCE) is not None and (SMPA_SOURCE / '.venv' / 'bin' / 'python').exists()
+
+
+def conversation_world(directory, *, agent='api:stub', files=None):
+    """Prepare an isolated SMPA world for conversation tests and start the deterministic inference stub.
+
+    Writes, under ``directory``: the test configuration (with the stub's
+    port), the test model registry beside it, an empty memory root and a GUI
+    layout file pointing at the SMPA checkout. Nothing is written into the
+    SMPA checkout. Returns the stub process, the GUI environment and the paths.
+    """
+    import yaml
+    directory = Path(directory)
+    stub_port, conversation_port = free_port(), free_port()
+    stub = subprocess.Popen([sys.executable, str(GUI / 'test/fixtures/openai_stub.py'), str(stub_port)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    assert 'STUB READY' in stub.stdout.readline()
+    fixture = GUI / 'test' / 'fixtures' / 'conversation'
+    config = (fixture / 'config.yaml').read_text().replace('STUB_PORT', str(stub_port))
+    if agent != 'api:stub':
+        config = config.replace('  agent: api:stub', f'  agent: {agent}')
+    (directory / 'models').mkdir(parents=True, exist_ok=True)
+    (directory / 'config.yaml').write_text(config)
+    (directory / 'models' / 'model_library.yaml').write_text((fixture / 'models' / 'model_library.yaml').read_text())
+    (directory / 'memory' / 'runs').mkdir(parents=True, exist_ok=True)
+    layout = dict(smpa_root=str(SMPA_SOURCE), python=str(SMPA_SOURCE / '.venv/bin/python'),
+                  config=str(directory / 'config.yaml'), model_root=str(directory / 'models'),
+                  memory_root=str(directory / 'memory'), conversation_port=conversation_port)
+    if files:
+        layout['files'] = files
+    (directory / 'layout.yaml').write_text(yaml.safe_dump(layout))
+    environment = isolated_environment()
+    environment.pop('SMPA_GUI_MEMORY_ROOT', None)
+    environment['SMPA_GUI_LAYOUT'] = str(directory / 'layout.yaml')
+    environment['SMPA_GUI_STUB_API_KEY'] = 'test-only-key'
+    return dict(stub=stub, environment=environment, directory=directory, memory=directory / 'memory',
+                conversation_port=conversation_port)
+
+
+@pytest.fixture(scope='module')
+def conversation_server(tmp_path_factory):
+    """Run a GUI server whose layout points at SMPA's real conversation server and the inference stub.
+
+    Skips when ROS or an SMPA checkout with its ``.venv`` is unavailable
+    (set ``SMPA_GUI_TEST_SMPA_ROOT`` to the checkout).
+    """
+    if not ros_available():
+        pytest.skip('ROS 2 with rclpy and the GUI packages is required')
+    if not smpa_conversation_available():
+        pytest.skip(f'No SMPA checkout with a conversation server and .venv at {SMPA_SOURCE} '
+                    '(set SMPA_GUI_TEST_SMPA_ROOT)')
+    world = conversation_world(tmp_path_factory.mktemp('conversation'))
+    process, base = start_server(world['environment'])
+    world.update(base=base, process=process)
+    yield world
+    if process.poll() is None:
+        stop(process)
+    stop(world['stub'])

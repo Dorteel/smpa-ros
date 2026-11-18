@@ -63,8 +63,8 @@ def select(page, identity):
 
 
 def test_sections_and_session_selector(page):
-    """Four sections are offered; only Sense is functional; the selector lists every session with its state."""
-    assert page.locator('nav[aria-label="SMPA sections"] button').all_inner_texts() == ['Sense', 'Model', 'Plan', 'Act']
+    """Five sections are offered; Model, Plan and Act are placeholders; the selector lists every session with its state."""
+    assert page.locator('nav[aria-label="SMPA sections"] button').all_inner_texts() == ['Dashboard', 'Sense', 'Model', 'Plan', 'Act']
     for section in ('model', 'plan', 'act'):
         page.click(f'button[data-section="{section}"]')
         assert 'not implemented in this iteration' in page.inner_text(f'[data-placeholder="{section}"]')
@@ -205,7 +205,7 @@ def test_unconfigured_and_demonstration_banners(ros_environment, browser, tmp_pa
         process, base = start_server(dict(ros_environment, **settings))
         try:
             page = browser.new_page()
-            page.goto(base + '/#smpa')
+            page.goto(base + '/#smpa/sense')
             page.wait_for_selector(banner, state='visible')
             if banner == '#smpa-demo':
                 assert 'DEMONSTRATION DATA' in page.inner_text(banner)

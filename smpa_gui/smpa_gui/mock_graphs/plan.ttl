@@ -1,0 +1,21 @@
+# MOCK DATA for GUI development. Not a plan produced by SMPA.
+@prefix mock: <https://example.invalid/smpa-gui-mock/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+mock:graph rdfs:comment "Mock Plan graph. Not recorded by SMPA." .
+
+mock:goal a mock:MockGoal ;
+    rdfs:label "mock goal: look at the cup" ;
+    mock:firstStep mock:step_1 .
+
+mock:step_1 a mock:MockStep ;
+    rdfs:label "mock step 1: turn head" ;
+    mock:next mock:step_2 ;
+    mock:target mock:thing_table .
+
+mock:step_2 a mock:MockStep ;
+    rdfs:label "mock step 2: focus" ;
+    mock:target mock:thing_cup .
+
+mock:thing_cup rdfs:label "mock cup" .
+mock:thing_table rdfs:label "mock table" .

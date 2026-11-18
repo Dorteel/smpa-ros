@@ -2,9 +2,11 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>smpa_gui</name>
-  <version>0.5.0</version>
+  <version>0.6.0</version>
   <description>Standalone browser GUI for ROS 2: graph, topics, sensors, parameters, services and actions,
-    with optional read-only views of SMPA's recorded sessions. Depends on no SMPA package.</description>
+    with optional SMPA views: recorded sessions, and a Dashboard that talks to SMPA's own conversation
+    server (started as a separate process) and draws Sense, Belief and Plan Turtle graphs.
+    Depends on no SMPA package.</description>
   <maintainer email="dorteel@gmail.com">Mark Adamik</maintainer>
   <license>MIT</license>
 
@@ -26,6 +28,8 @@
   <exec_depend>python3-fastapi</exec_depend>
   <exec_depend>python3-uvicorn</exec_depend>
   <exec_depend>python3-websockets</exec_depend>
+  <!-- Turtle parsing for the Dashboard's graph views; the same version as SMPA pins (rdflib 7.1.4). -->
+  <exec_depend>python3-rdflib</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
   <test_depend>example_interfaces</test_depend>

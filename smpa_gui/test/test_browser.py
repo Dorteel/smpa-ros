@@ -75,7 +75,7 @@ def test_graph_shows_connections_filters_and_keeps_the_viewport(page):
     assert page.evaluate("window.__graph.getElementById('node:/fixture_talker').edgesTo('[id = \"topic:/fixture/chatter\"]').length") == 1
     page.screenshot(path=str(ARTIFACTS / 'ros-graph.png'))
 
-    page.evaluate("window.__graph.zoom(1.7); window.__graph.pan({x: 123, y: -45})")
+    page.evaluate("() => { window.__graph.zoom(1.7); window.__graph.pan({x: 123, y: -45}); }")
     before = page.evaluate("window.__graph.getElementById('node:/fixture_talker').position()")
     time.sleep(5)
     assert page.evaluate("window.__graph.zoom()") == pytest.approx(1.7)
@@ -95,7 +95,7 @@ def test_graph_shows_connections_filters_and_keeps_the_viewport(page):
     assert {'/smpa_gui', '/rosout'} <= set(graph_labels(page))
     page.uncheck('input[data-filter="gateway"]')
     page.uncheck('input[data-filter="infrastructure"]')
-    page.evaluate("window.__graph.getElementById('node:/fixture_talker').emit('tap')")
+    page.evaluate("() => { window.__graph.getElementById('node:/fixture_talker').emit('tap'); }")
     assert '/fixture/chatter' in page.inner_text('.graph-side')
 
 

@@ -77,7 +77,7 @@ def test_observations_and_files(server):
     """Observations come in time order; recorded images and audio are served with their media types."""
     result = fetch(server + f'{API}/sessions/{ROBOT}/observations')
     entries = result['observations']
-    assert len(entries) == 7 and result['contract_version'] == '1.4' and result['revision']
+    assert len(entries) == 7 and result['contract_version'] == '1.5' and result['revision']
     image = next(entry for entry in entries if entry['kind'] == 'scene_description')['image']
     with urlopen(server + image, timeout=5) as response:
         assert response.headers['Content-Type'] == 'image/png' and response.read()[:4] == b'\x89PNG'
@@ -109,7 +109,11 @@ def test_unknown_sessions_and_bad_parameters(server):
 
 
 def test_reading_through_the_server_changes_nothing(server):
-    """Every SMPA route is read-only: the memory directory is identical before and after use."""
+    """Every SMPA read route is read-only: the memory directory is identical before and after use.
+
+    The only other SMPA routes are the conversation routes, which relay to
+    SMPA's own conversation server (tested in test_conversation.py).
+    """
     before = tree_fingerprint(smpa_memory())
     for item in fetch(server + API + '/sessions')['sessions']:
         for entry in fetch(server + f"{API}/sessions/{item['session_id']}/observations")['observations']:
@@ -118,7 +122,8 @@ def test_reading_through_the_server_changes_nothing(server):
                     urlopen(server + entry[key], timeout=5).read()
     assert tree_fingerprint(smpa_memory()) == before
     routes = fetch(server + '/api/openapi.json')['paths']
-    assert all(set(methods) == {'get'} for path, methods in routes.items() if path.startswith('/api/v1/smpa'))
+    assert all(set(methods) == {'get'} for path, methods in routes.items()
+               if path.startswith('/api/v1/smpa') and not path.startswith('/api/v1/smpa/conversation/'))
 
 
 def test_unconfigured_and_demonstration_memory(ros_environment, tmp_path):
@@ -166,4 +171,4 @@ def test_ros_side_imports_nothing_from_smpa():
         tree = ast.parse(path.read_text())
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
         imported |= {node.module or '' for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-        assert not any(name.split('.')[0] in ('smpa_ros', 'memory', 'runner', 'sense', 'speech') for name in imported), path
+        assert not any(name.split('.')[0] in ('smpa_ros', 'smpa_llm', 'memory', 'runner', 'sense', 'speech') for name in imported), path

@@ -1,0 +1,10 @@
+# Example layout: read only the per-run files where SMPA writes them today, instead of
+# preferring the target world_model/ locations. Use it with:
+#   ros2 launch smpa_gui gui.launch.py smpa_layout:=$(ros2 pkg prefix smpa_gui)/share/smpa_gui/layouts/smpa-current.yaml
+#   ./run_gui.sh --layout layouts/smpa-current.yaml
+# Every entry is optional; omitted entries keep their defaults (see smpa_gui/smpa_adapter/smpa_layout.py).
+files:
+  conversation: conversation.md     # SMPA writes the transcript at the run root today
+  belief: belief-state.ttl          # SMPA's conversational belief graph today
+  sense: world_model/sense.ttl      # not produced by SMPA yet
+  plan: world_model/plan.ttl        # not produced by SMPA yet

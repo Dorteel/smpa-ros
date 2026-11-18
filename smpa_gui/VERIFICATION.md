@@ -1,3 +1,80 @@
+# Verification results (GUI version 6, 2026-11-18)
+
+## Version 6: conversational Dashboard integrated into `smpa_gui`
+
+### Where it ran
+
+**Cloud container only** (same environment as version 5 below: RoboStack Jazzy, Python
+3.12, headless Chromium, colcon-core 0.21.3). Nothing was run on the workstation.
+
+SMPA used by the tests: a copy of the workstation's `main` 717094b sources needed by the
+conversation server (`smpa_ros/smpa_ros/*`, `smpa_ros/memory.py`, `smpa_ros/config.yaml`,
+`smpa_llm/` with its `config.yaml` and model registry), laid out like the repository, with
+an SMPA-style `.venv` (rdflib 7.1.4, python-dotenv 1.2.4, jsonschema 4.26.0, openai 3.39.0)
+and `smpa_llm` built with colcon and sourced, as SMPA's `install.sh` would. No model
+weights and no API keys: conversations used the deterministic OpenAI-compatible stub
+`test/fixtures/openai_stub.py` through SMPA's real API backend. The conversation tests
+also passed against a copy of the earlier flat SMPA layout.
+
+Command: `SMPA_GUI_TEST_SMPA_ROOT=<copy> ./test_gui.sh --browser` with the copy's
+`smpa_llm` workspace sourced: **165 passed** (backend, ROS integration, packaging) and
+**51 passed** (browser), none skipped.
+
+| Suite | Tests | Kind |
+|---|---|---|
+| `test/test_dashboard_units.py` | 23 | unit: layout (both SMPA layouts, candidates and fallbacks, refused paths), Turtle reader, transcript reader, catalogue (configuration overlay, registry in smpa_llm, `.env`, real SMPA configuration), server prerequisites |
+| `test/test_conversation.py` | 13 | integration with SMPA's real conversation server and the stub |
+| `test/test_packaging.py` | 7 | colcon build, `ros2 pkg/run/launch`, include, installed assets (frontend, mock graphs, layouts), and the installed GUI holding a real SMPA conversation |
+| `test/test_browser_dashboard.py` | 7 | browser |
+| all earlier suites | 118 + 44 | regression |
+
+### Requested checks
+
+1. **Package installation and launch.** colcon build; `ros2 pkg executables`; `ros2 run`;
+   `ros2 launch smpa_gui gui.launch.py` with `smpa_layout:=`, from the install space, held
+   a conversation with SMPA's server (message saved in the run) and stopped cleanly.
+2. **Model discovery and selection.** With SMPA's own `smpa_ros/config.yaml`
+   (`inference_config: package://smpa_llm/config.yaml`) the GUI's list equals the agents
+   SMPA's server reports (6 local Qwen/Phi/Gemma entries, `api:openai`, `api:nebula`;
+   default `local:qwen3-4b`) and is computed without starting anything. Selecting a model
+   switches SMPA's agent; a model without weights is refused with SMPA's reason.
+3. **Conversation start and message exchange** through SMPA's server; one run per
+   start even when the request is repeated; generation progress (busy, elapsed time).
+4. **Automatic persistence.** Each exchange is in `<run>/conversation.md`, written by
+   SMPA; inference failure keeps the user's message and shows SMPA's explanation.
+5. **Reload and resume.** Page reload shows the active conversation; an earlier one is
+   shown from its transcript (read via the `conversation.md` fallback), reopened, and
+   continued in the same file.
+6. **Turtle parsing and visualization**: nodes, labelled edges, literal values, blank
+   nodes, truncation; node and edge inspection in the browser.
+7. **Switching Sense, Belief, Plan**: three files, three graphs, paths shown.
+8. **External updates** appear within about 1.5 s with zoom and pan unchanged.
+9. **Missing, empty, malformed, unavailable** files, each explained; the last valid
+   drawing is kept for malformed and unreadable files. Belief shows SMPA's
+   `belief-state.ttl` (marked as fallback) until `world_model/belief.ttl` exists.
+10. **Operation without SMPA**: `--no-smpa` disables every Dashboard route (404) and the
+    page shows a note; ROS routes keep working; nothing of SMPA (`smpa_ros`, `smpa_llm`,
+    `memory`, …) is imported anywhere in the GUI.
+11. **Preservation**: all ROS 2, Sensors, Actions, Parameters, Services and SMPA Sense
+    tests pass. Mock graphs never change a run directory (fingerprint test).
+
+### Test changes
+
+- Contract version 1.5; the write-route list includes the five conversation routes.
+- Browser tests no longer return Cytoscape objects from `page.evaluate`. Doing so made
+  Chromium's renderer crash reproducibly when an edge was tapped, and is the most
+  likely cause of the occasional "Target crashed" seen in versions 4 and 5 (two such
+  calls existed in `test_browser.py`). No crash occurred after the change.
+
+### Not verified (version 6)
+
+- Anything on the workstation, including SMPA's real `.venv`, model weights, API keys,
+  and the installed SMPA workspace there.
+- A real model answering (local or API); belief modelling beyond the stub's one triple.
+- SMPA producing `world_model/*.ttl` (it does not yet); only the GUI side was tested.
+- The complete SMPA tree: the copy held only what the conversation server imports
+  (no `sense/`, `speech/`, `rlhf_gym`); robot runs were not started.
+
 # Verification results (GUI version 5, 2026-11-17)
 
 ## Version 5: ROS 2 package `smpa_gui`, parameter and service management
@@ -310,12 +387,13 @@ those of the copy, not the originals.
 ```bash
 cd <gui worktree>/smpa_gui
 ./install_gui.sh --dev --build ~/ros2_ws    # venv + colcon build of smpa_gui into ~/ros2_ws/install
-./test_gui.sh                       # expect 128 passed (122 if Node.js is absent, fewer if colcon is missing)
-SMPA_GUI_BROWSER_PYTHON=<python with playwright> ./test_gui.sh --browser   # expect 44 more
+source ~/ros2_ws/install/setup.bash          # SMPA workspace (smpa_llm) for the real-configuration test
+SMPA_GUI_TEST_SMPA_ROOT=~/ros2_ws/src/smpa-ros ./test_gui.sh                 # expect 165 passed
+SMPA_GUI_TEST_SMPA_ROOT=~/ros2_ws/src/smpa-ros SMPA_GUI_BROWSER_PYTHON=<python with playwright> ./test_gui.sh --browser   # expect 51 more
 source ~/ros2_ws/install/setup.bash
 ros2 pkg executables smpa_gui       # smpa_gui smpa_gui
-ros2 launch smpa_gui gui.launch.py smpa_memory_root:=$HOME/ros2_ws/src/smpa-ros/memory
-                                    # open http://127.0.0.1:8765, stop with Ctrl+C
+ros2 launch smpa_gui gui.launch.py smpa_root:=$HOME/ros2_ws/src/smpa-ros
+                                    # open http://127.0.0.1:8765 → SMPA → Dashboard, stop with Ctrl+C
 
 # Try parameters and services on harmless nodes first, for example:
 ros2 run demo_nodes_cpp parameter_blackboard      # ROS 2 → Parameters → /parameter_blackboard

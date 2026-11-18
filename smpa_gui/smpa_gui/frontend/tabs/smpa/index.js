@@ -1,18 +1,19 @@
 /**
- * The SMPA tab: a session selector above four sections, Sense, Model, Plan and Act.
+ * The SMPA tab: a session selector above five sections, Dashboard, Sense, Model, Plan and Act.
  *
  * Concepts: a session is one SMPA run, recorded by SMPA in its memory
  * directory and read (never written) by the GUI server. The shell lists the
  * sessions, keeps one selected, and hands it to the section that is shown.
  * A section is a module with mount(container, session) and unmount(), plus
  * an optional update(session) called whenever the session list refreshes.
- * Only Sense is functional in this iteration; the other sections explain
- * that they are not implemented yet.
+ * Dashboard (conversation and graphs) and Sense are functional; Model, Plan
+ * and Act explain that they are not implemented yet.
  *
  * The address fragment "#smpa/<section>/<session id>" records the choice,
  * so reloading the page shows the same section and session.
  */
 import {getJSON, h, poll} from '../../api.js';
+import dashboard from './dashboard.js';
 import sense from './sense.js';
 
 const ACTIVITY = {
@@ -39,6 +40,7 @@ function placeholder(title, content) {
 }
 
 export const SECTIONS = [
+  dashboard,
   sense,
   placeholder('Model', 'It will show the world model snapshots and belief state of the selected session.'),
   placeholder('Plan', 'It will show goals and the actions the planner selected.'),
@@ -48,7 +50,7 @@ export const SECTIONS = [
 let dom = {};
 let sessions = [];
 let status = null;
-let sectionId = 'sense';
+let sectionId = 'dashboard';
 let sessionId = null;
 let mounted = null;
 let stops = [];
@@ -156,6 +158,21 @@ async function refreshStatus() {
   dom.disabled.style.display = status.enabled === false ? '' : 'none';
   dom.unconfigured.style.display = status.configured || status.enabled === false ? 'none' : '';
   dom.root.textContent = status.memory_root ? `Recorded data from ${status.memory_root} (read-only)` : '';
+}
+
+/**
+ * Select a session from inside a section (for example a conversation that was just started).
+ *
+ * The section stays mounted and is told about the new session through
+ * update(); the session list is re-read at once so a new run appears.
+ */
+export function chooseSession(identity) {
+  sessionId = identity;
+  remember();
+  renderSelector();
+  renderSummary();
+  if (mounted && mounted.update) mounted.update(selectedSession());
+  refreshSessions();
 }
 
 /** Apply a sub-route "<section>/<session id>" from the address. */

@@ -83,12 +83,17 @@ def test_package_is_discovered_with_its_executable_and_launch_file(workspace):
 
 
 def test_frontend_assets_are_installed_completely(workspace):
-    """Every frontend file of the source tree is installed beside the installed Python package."""
-    source = GUI / 'smpa_gui' / 'frontend'
-    installed = next((workspace['path'] / 'install' / 'smpa_gui' / 'lib').glob('python3*/site-packages/smpa_gui/frontend'))
-    expected = sorted(str(path.relative_to(source)) for path in source.rglob('*') if path.is_file())
-    assert sorted(str(path.relative_to(installed)) for path in installed.rglob('*') if path.is_file()) == expected
-    assert (installed / 'vendor' / 'cytoscape.min.js').stat().st_size == (source / 'vendor' / 'cytoscape.min.js').stat().st_size
+    """Every frontend file and mock graph of the source tree is installed beside the installed Python package."""
+    package = next((workspace['path'] / 'install' / 'smpa_gui' / 'lib').glob('python3*/site-packages/smpa_gui'))
+    for folder in ('frontend', 'mock_graphs'):
+        source, installed = GUI / 'smpa_gui' / folder, package / folder
+        expected = sorted(str(path.relative_to(source)) for path in source.rglob('*') if path.is_file())
+        assert sorted(str(path.relative_to(installed)) for path in installed.rglob('*') if path.is_file()) == expected
+    assert (package / 'frontend' / 'tabs' / 'smpa' / 'dashboard.js').is_file()
+    assert (package / 'frontend' / 'vendor' / 'cytoscape.min.js').stat().st_size == \
+        (GUI / 'smpa_gui' / 'frontend' / 'vendor' / 'cytoscape.min.js').stat().st_size
+    share = workspace['path'] / 'install' / 'smpa_gui' / 'share' / 'smpa_gui'
+    assert (share / 'layouts' / 'smpa-current.yaml').is_file()
 
 
 def test_ros2_run_serves_the_installed_frontend_and_stops_cleanly(workspace):
@@ -140,7 +145,9 @@ def test_launch_arguments_translate_to_command_line_options():
     assert module.command_arguments(dict(defaults, read_only='true', keep_goals_on_exit='True',
                                          smpa_memory_root='/data/memory')) == \
         ['--host', '127.0.0.1', '--port', '8765', '--read-only', '--keep-goals-on-exit', '--memory-root', '/data/memory']
-    assert module.command_arguments(dict(defaults, smpa='false', smpa_memory_root='/data/memory'))[-1] == '--no-smpa'
+    assert module.command_arguments(dict(defaults, smpa_root='/ws/smpa-ros', smpa_layout='/ws/layout.yaml'))[-4:] == \
+        ['--smpa-root', '/ws/smpa-ros', '--layout', '/ws/layout.yaml']
+    assert module.command_arguments(dict(defaults, smpa='false', smpa_memory_root='/data/memory', smpa_root='/ws'))[-1] == '--no-smpa'
     description = module.generate_launch_description()
     assert {entity.name for entity in description.entities if hasattr(entity, 'default_value')} == set(defaults)
 
@@ -172,3 +179,45 @@ def generate_launch_description():
     finally:
         output = interrupt(process)
     assert 'node left the ROS graph' in output, output
+
+
+def test_installed_gui_runs_the_dashboard_against_an_smpa_checkout(workspace, tmp_path):
+    """The installed package, launched with smpa_root, serves the Dashboard: models, mock graphs, a real conversation.
+
+    Uses SMPA's real conversation server from the checkout named by
+    SMPA_GUI_TEST_SMPA_ROOT with the test configuration and the inference stub.
+    """
+    from conftest import conversation_world, smpa_conversation_available
+    if not smpa_conversation_available():
+        pytest.skip('no SMPA checkout with a conversation server and .venv (set SMPA_GUI_TEST_SMPA_ROOT)')
+    import json
+    from urllib.request import Request, urlopen
+    world = conversation_world(tmp_path)
+    workspace = dict(workspace, environment=world['environment'])
+    port = free_port()
+    process = start_in_workspace(workspace, f"ros2 launch smpa_gui gui.launch.py port:={port} smpa_layout:={tmp_path / 'layout.yaml'}")
+    base = f'http://127.0.0.1:{port}'
+    try:
+        wait_for_health(base, process)
+        assert {model['source'] for model in fetch(base + '/api/v1/smpa/models')['models']} == {'api:stub', 'local:absent-local-model'}
+        mock = fetch(base + '/api/v1/smpa/graphs/belief?source=mock')
+        assert mock['state'] == 'ok' and '/site-packages/smpa_gui/mock_graphs/' in mock['path']
+        token = fetch(base + '/api/v1/session')['token']
+
+        def post(path, body):
+            """POST one conversation request with the session token."""
+            request = Request(base + '/api/v1/smpa/conversation/' + path, data=json.dumps(body).encode(), method='POST',
+                              headers={'Content-Type': 'application/json', 'X-SMPA-GUI-Token': token})
+            with urlopen(request, timeout=60) as response:
+                return json.load(response)['conversation']
+
+        assert post('start', {'source': 'api:stub', 'request_id': 'pkg-start-0001'})['phase'] == 'ready'
+        reply = post('messages', {'text': 'From the installed GUI', 'request_id': 'pkg-message-0001'})
+        assert reply['messages'][-1]['content'].endswith('to: From the installed GUI')
+    finally:
+        output = interrupt(process)
+        stop_stub = world['stub']
+        stop_stub.terminate()
+    assert 'node left the ROS graph' in output, output
+    runs = list((world['memory'] / 'runs').iterdir())
+    assert len(runs) == 1 and 'From the installed GUI' in (runs[0] / 'conversation.md').read_text()

@@ -15,7 +15,10 @@ Concepts:
     over the process signals that the web server relies on.
 
     SMPA integration is optional. Without it (``--no-smpa``) the SMPA tab
-    reports that it is disabled, and nothing of SMPA is read.
+    reports that it is disabled, nothing of SMPA is read, and SMPA's
+    conversation server is never started. With it, the SMPA layout
+    (``--smpa-root``, ``--layout``) says where SMPA's checkout, interpreter,
+    configuration and memory directory are; see ``smpa_adapter/smpa_layout.py``.
 """
 import argparse
 import os
@@ -65,24 +68,43 @@ def parse_options(arguments):
     parser.add_argument('--no-smpa', action='store_true', default=environment_flag('SMPA_GUI_NO_SMPA'),
                         help='disable the optional SMPA integration (the SMPA tab shows that it is disabled)')
     parser.add_argument('--memory-root', default=os.environ.get('SMPA_GUI_MEMORY_ROOT') or None,
-                        help="SMPA's memory directory for the SMPA tab (read-only; default: memory/ beside the "
-                             'source checkout, when run from one)')
+                        help="SMPA's memory directory for the SMPA tab (read-only; default: <smpa root>/memory)")
+    parser.add_argument('--smpa-root', default=os.environ.get('SMPA_GUI_SMPA_ROOT') or None,
+                        help='SMPA checkout whose conversation server the Dashboard starts (default: the repository '
+                             'containing this source checkout, if any)')
+    parser.add_argument('--layout', default=os.environ.get('SMPA_GUI_LAYOUT') or None,
+                        help='YAML file with SMPA paths for the Dashboard (see README.md)')
     return parser.parse_args(strip_ros_arguments(arguments))
+
+
+def smpa_layout_for(options):
+    """Load the SMPA layout with the command-line choices taking precedence over the environment."""
+    from smpa_gui.smpa_adapter import smpa_layout
+    environment = dict(os.environ)
+    if options.smpa_root:
+        environment['SMPA_GUI_SMPA_ROOT'] = options.smpa_root
+    if options.memory_root:
+        environment['SMPA_GUI_MEMORY_ROOT'] = options.memory_root
+    return smpa_layout.load(options.layout, environment)
 
 
 def smpa_memory_root(options):
     """Decide which SMPA memory directory the SMPA tab reads, or None.
 
     With SMPA disabled there is none. An explicitly given directory is used
-    as it is. Otherwise, when the GUI runs from a source checkout inside the
-    SMPA repository, ``memory/`` beside the package folder is used if it
-    holds runs. An installed package has no such neighbour, so there the
-    directory must be given explicitly.
+    as it is. Otherwise the SMPA layout's memory directory is used when an
+    SMPA checkout is known (given with ``--smpa-root`` or found around this
+    source checkout). Failing that, ``memory/`` beside the package folder is
+    used if it holds runs. An installed package has no such neighbour, so
+    there the checkout or directory must be given explicitly.
     """
     if options.no_smpa:
         return None
     if options.memory_root:
         return options.memory_root
+    layout = smpa_layout_for(options)
+    if layout['smpa_root'] is not None:
+        return str(layout['memory_root'])
     from smpa_gui.smpa_adapter.smpa_runs import default_root
     return default_root(Path(__file__).resolve().parent.parent)
 
@@ -102,16 +124,20 @@ def main(arguments=None):
 
     options = parse_options(sys.argv[1:] if arguments is None else arguments)
     memory_root = smpa_memory_root(options)
+    layout = smpa_layout_for(options)
     if options.no_smpa:
         print('SMPA integration: disabled', flush=True)
     else:
         print(f'SMPA memory directory (read-only): {memory_root or "not configured"}', flush=True)
+        print('SMPA conversation server: ' + (layout['conversation_url'] or (
+            f'started on demand from {layout["smpa_root"]} on port {layout["conversation_port"]}'
+            if layout['smpa_root'] else 'not configured (give --smpa-root or smpa_root:=)')), flush=True)
     print(f'SMPA-ROS GUI: http://{options.host}:{options.port}'
           + (' (read-only)' if options.read_only else
              ' (goals, parameter changes and service calls can be confirmed from this computer)'), flush=True)
     try:
         uvicorn.run(create_app(allow_changes=not options.read_only, cancel_on_exit=not options.keep_goals_on_exit,
-                               memory_root=memory_root, smpa_enabled=not options.no_smpa),
+                               memory_root=memory_root, smpa_enabled=not options.no_smpa, layout=layout),
                     host=options.host, port=options.port, log_level='warning')
     except KeyboardInterrupt:
         # uvicorn re-raises the interrupt after its graceful shutdown has completed.

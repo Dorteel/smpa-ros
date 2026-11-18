@@ -1,4 +1,4 @@
-# SMPA integration contracts (Sense workspace, iteration 1)
+# SMPA integration contracts (Sense workspace and Dashboard)
 
 This document is the boundary between the GUI (owned by the GUI work in `smpa_gui/`, formerly `gui/`) and SMPA
 (owned by Codex). It lists, separately:
@@ -10,8 +10,10 @@ This document is the boundary between the GUI (owned by the GUI work in `smpa_gu
 3. **Interfaces requested from Codex**, with exact data shapes, for what cannot be done
    correctly today. The GUI does not implement substitutes for them.
 
-The GUI never writes into SMPA's memory directory, imports no SMPA module, takes no file
-locks, and offers no session creation, chat submission or observation writing.
+The GUI never writes into SMPA's memory directory itself, imports no SMPA module and takes
+no file locks. Since version 4 the Dashboard starts SMPA's own conversation server
+(§1.5) and relays conversation requests to it; that server, not the GUI, creates runs and
+writes transcripts. The GUI offers no observation writing and writes no Turtle file.
 
 ## 1. Interfaces SMPA provides today
 
@@ -61,6 +63,58 @@ read-only archive session.
 - The run's `camera_topic` provides the live picture. It is labelled live: it is not what
   SMPA recorded.
 
+### 1.5 Conversation server (`smpa_ros/smpa_ros/conversation_web.py`), used by the Dashboard
+
+Verified against SMPA's source on `main` 717094b (after the ROS 2 package restructuring,
+`feature/llm-reorganization`) and by running it in the cloud with a test configuration and
+with SMPA's own configuration on 2026-11-18. The earlier flat layout
+(`smpa_ros/conversation_web.py` at the repository root) behaves the same and is still
+recognised.
+
+- Started as `python -m smpa_ros.conversation_web --config <config.yaml> --world-model-root
+  <memory> --model-root <models> --port <port> [--resume <run directory>]` with SMPA's
+  `.venv`, working directory = the checkout, and `PYTHONPATH` = `<root>/smpa_ros:<root>/smpa_llm`
+  (the GUI sets this; an installed workspace works too). Without `--resume` it **creates a
+  conversation run** at start. SIGINT/SIGTERM finalize the run.
+- Configuration: `smpa_ros/config.yaml` holds the cognitive settings and selects the
+  inference defaults with `inference_config: package://smpa_llm/config.yaml`
+  (`smpa_llm.configuration.load_configuration`: top-level entries of the cognitive file
+  replace whole sections of the defaults). `package://smpa_llm` and the model registry
+  (`models/model_library.yaml` beside the configuration, else `share/smpa_llm/models`)
+  are found only through the sourced ROS workspace. Model weights: `<cwd>/models` for
+  such a configuration, `models/` beside a complete legacy configuration. API keys:
+  environment, else `.env` beside the configuration, else `.env` in the working directory.
+- One run per process, served on `127.0.0.1`; the transcript is locked with `flock`.
+  Single-threaded: one request at a time.
+- `GET /api/conversation` (also `/api/agents`, `/api/graph`): `messages`, `run_id`,
+  `active_agent`, `agents` (`source`, `id`, `label`, `available`, `availability`, …),
+  `generation`, `modelling_error`, `runs`.
+- `POST /api/message {message}`, `/api/agent {agent_id}`, `/api/new {}`,
+  `/api/resume {run_id}` (same pipeline configuration required), `/api/settings`,
+  `/api/clear`. Errors: 400 `{"error"}`; inference failure 500 with the state and "Your
+  message is saved"; a foreign `Origin` 403 (the GUI sends none).
+- Agents: `local:<name>` for registry entries with backend `transformers`/`ollama`,
+  `api:<provider>` for providers with `models.text`, `base_url`, `api_key_env`; the
+  start-up agent is `conversation.agent`, belief modelling uses `conversation.modelling_agent`.
+- Transcript `<run>/conversation.md`: `# Conversation` header, then entries
+  `<!-- smpa-message <Role> <bytes> [agent <bytes>] [parts <thinking> <response>] -->`,
+  optional `<!-- smpa-agent {json} -->`, `<a id="message-<n>"></a>`, `## <Role>`, body,
+  blank line. Belief modelling writes `<run>/belief-state.ttl` and `conversation-sds.md`.
+
+### 1.6 Per-run files read by the Dashboard
+
+Configurable lists of candidates relative to a run directory (`files.*` in the GUI
+layout); the first existing candidate is used and the Dashboard says when it is a fallback:
+
+| View | Target location (preferred) | Where SMPA writes today (fallback) |
+|---|---|---|
+| Conversation | `world_model/conversation.md` | `conversation.md` |
+| Sense | `world_model/sense.ttl` | — (not produced) |
+| Belief | `world_model/belief.ttl` | `belief-state.ttl` (conversation runs; starts as a comment-only file) |
+| Plan | `world_model/plan.ttl` | — (not produced) |
+
+Any valid Turtle is drawn; no vocabulary is assumed. The GUI never writes these files.
+
 ## 2. Gateway contract for any frontend
 
 The GUI server exposes the above as read-only HTTP JSON under `/api/v1/smpa/` (see
@@ -71,6 +125,10 @@ images (Movie File In TOP with a URL) without access to SMPA's disk or ROS.
 
 The normalized observation record is the same shape requested in C2 below, so a native
 SMPA index could replace the file adapter without changing any frontend.
+
+The Dashboard's routes (`/api/v1/smpa/models`, `/conversation…`, `/graphs/…`) are the same
+kind of adapter: a frontend can hold a conversation and draw the graphs without knowing
+SMPA's files, process or server protocol.
 
 ## 3. Interfaces requested from Codex
 
@@ -127,23 +185,80 @@ Add `observed_at` (ISO 8601 with offset) to `observe_<cycle>_<n>.json`, and a
 `frozen_at` with the image's `smpa.camera` text chunk to `frozen_image.png`, as normal
 camera PNGs already have. Until then the GUI shows file modification times and labels them so.
 
-### C4. Conversation input (decision needed, not implemented)
+### C4. Conversation input (resolved for conversations)
 
-The Read panel is read-only by design of this iteration. If the SMPA tab should accept
-text, Codex needs to decide where submission lives. The GUI needs only:
+Conversation input now goes through SMPA's existing conversation server (§1.5), started
+by the GUI. Robot runs still have no text input of their own.
 
-- one operation that submits user text to a named conversation session and returns the
-  identity of the resulting recorded Sense record (or an error saying it was not recorded),
-- a statement of whether submission requires the session to be live (C1),
-- the same local-only access rules as the GUI's action routes.
+### C5. Session lifecycle control (partly resolved)
 
-The GUI will not add a submission route of its own.
+Conversation runs are started, reopened and stopped through SMPA's conversation server.
+Robot runs remain with `run_smpa.sh`; the request for a control interface there stands.
 
-### C5. Session lifecycle control (decision needed, not implemented)
+### C6. Transcript location `world_model/conversation.md` (requested)
 
-Starting, stopping or creating sessions stays with `run_smpa.sh` and the conversation GUI.
-A future control interface should say how a client starts a session with a configuration,
-learns its run id immediately, and requests a clean stop that finalizes `metadata.yaml`.
+The requested structure persists each conversation in `world_model/conversation.md`
+within its run. SMPA writes `<run>/conversation.md` (unchanged by the restructuring).
+Moving it belongs to SMPA (its reader, writer, lock, resume and the belief provenance
+links `conversation.md#message-n` all use that path). The GUI already prefers
+`world_model/conversation.md` and falls back to `conversation.md`, so a move needs no GUI
+change. Please keep the format of §1.5 or announce a new one, and do not write two copies.
+
+### C7. Producer contract for `sense.ttl`, `belief.ttl`, `plan.ttl` (requested)
+
+- Location per run: `world_model/{sense,belief,plan}.ttl` (the GUI's preferred
+  candidates). Today the belief graph is `<run>/belief-state.ttl`, which the GUI shows as
+  a fallback; please reconcile the names (one file, not a copy).
+- Replace files atomically (write a temporary file in the same folder, `fsync`, rename),
+  so readers never see half a graph. The GUI tolerates partial files but must then show
+  the previous version.
+- UTF-8 Turtle; an empty graph is a file without triples (not a missing file); a
+  missing file means "not produced (yet)".
+- Optional but useful: a `# revision:` comment or a sidecar with the producing cycle,
+  so a viewer can say which cycle a graph belongs to. Historical snapshots stay out of
+  scope for the GUI.
+
+### C8. Model descriptions in the registry (small)
+
+`model_library.yaml` and the provider blocks have no description. An optional
+`description:` per entry would be shown first by the GUI (already supported); without
+it the GUI shows configuration facts.
+
+### C9. Conversation server conveniences (optional)
+
+- List agents without creating a run (for example `--list-agents` printing JSON), so
+  availability can be verified before a conversation starts.
+- Accept the initial agent at start (`--agent <source>`), so a run does not start with
+  the configured default and switch immediately (both are recorded today).
+- Include the run directory in the state, and answer status requests while a reply is
+  being generated (a threaded server, or a lightweight `/api/status`).
+- Stream or report generation progress (for example tokens so far); today the GUI can
+  only say how long a reply has been running.
+
+### C10. Stable start interface for the conversation server (needed for packaging)
+
+The GUI starts the server as a Python module from the checkout and must know the
+package layout (`smpa_ros/smpa_ros`, `smpa_llm`) to set `PYTHONPATH`. A stable interface
+would let it use an installed SMPA without knowing the source layout, for example:
+
+- `ros2 run smpa_ros conversation --config <file> --world-model-root <dir> --port <port>`
+  documented as the supported way (the console script exists; its arguments and the
+  run-creating behaviour should be declared stable), and
+- the installed path of the default configuration (`share/smpa_ros/config.yaml`) and of
+  the model root declared, so a GUI launched from an install space needs only the
+  workspace, not the checkout.
+
+### C11. Interfaces Codex must eventually provide or stabilize (summary)
+
+1. Conversation server start/stop interface and its HTTP API (§1.5) as a stable contract (C10).
+2. Transcript location and format, ideally `world_model/conversation.md` (C6).
+3. Producer contract for `world_model/{sense,belief,plan}.ttl`: location, atomic
+   replacement, empty versus missing (C7).
+4. Session liveness heartbeat for conversation and robot runs (C1).
+5. Listing agents without creating a run, initial agent at start, run directory and
+   progress in the state (C9).
+6. Optional model descriptions in the registry (C8); observation index (C2); recorded
+   times for refinement evidence (C3); robot-run lifecycle control (C5).
 
 ### Not requested
 
@@ -151,7 +266,10 @@ learns its run id immediately, and requests a clean stop that finalizes `metadat
   `elapsed_seconds`). The GUI can show it when started with the SMPA workspace overlay
   (`SMPA_GUI_OVERLAY`); iteration 1 uses only the status topic, which needs no SMPA types.
 - **Push events.** Polling the run directory every two seconds is sufficient for Sense; C2
-  makes it cheap.
+  makes it cheap. The graph views poll every 1.5 s and redraw only on a changed content
+  digest, so no file-change notifications are needed either.
+- **Graph history.** The GUI shows the current file only; snapshots and reconstruction
+  of earlier graph states are out of scope.
 
 ## 4. Functional, demonstration, absent
 
@@ -163,4 +281,7 @@ learns its run id immediately, and requests a clean stop that finalizes `metadat
 | See, Hear, Read recorded evidence and timeline | Functional, from §1.2 and §1.3 |
 | Live camera, live Listen state | Functional, from §1.4 |
 | Demonstration data | `test/fixtures/smpa_memory.py --demo` writes sessions in SMPA's formats plus the GUI marker `.smpa-gui-demo`; the GUI then shows a DEMONSTRATION DATA banner |
-| Text input, session control | Absent by decision (C4, C5) |
+| Conversation (models, start, chat, reopen, continue) | Functional, through SMPA's conversation server (§1.5) |
+| Sense, Belief, Plan graph views | Functional for any Turtle file at the configured paths; Belief falls back to SMPA's `belief-state.ttl`; SMPA does not produce `world_model/*.ttl` yet (C7) |
+| Mock graphs | `smpa_gui/smpa_gui/mock_graphs/`, reserved namespace, MOCK DATA banner; never written into runs |
+| Robot-run text input, robot-run lifecycle control | Absent (C5) |

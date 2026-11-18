@@ -4,18 +4,20 @@ A standalone, browser-based GUI for ROS 2, packaged as the `ament_python` packag
 `smpa_gui`. It runs as its own process and its own ROS 2 node (`/smpa_gui`), depends on
 no SMPA package, and works whether or not SMPA is running. It observes the ROS graph and
 acts on it only when a user on this computer explicitly confirms each action: sending
-and cancelling action goals, changing parameters, and calling services.
+and cancelling action goals, changing parameters, and calling services. Its optional
+SMPA tab holds a conversational Dashboard that uses SMPA's own conversation server
+(started as a separate process); the GUI implements no inference of its own.
 
 | Tab | Content |
 |---|---|
 | **ROS 2** | Graph (rqt_graph-like), Topics (types, endpoints, QoS, live messages), **Parameters** (read, propose, confirm and apply changes), **Services** (discover, inspect, confirm and call), Actions (passive list) |
 | **Sensors** | Live viewers for nine `sensor_msgs` types in freely arranged panels |
 | **Actions** | Discover action servers, edit a goal in a generated form or as JSON, send and cancel goals, watch feedback, result and history |
-| **SMPA** (optional) | Session selector and four sections. **Sense** is functional: See, Hear and Read panels and a unified observation timeline from SMPA's recorded sessions, plus live camera and Listen state. Model, Plan and Act are placeholders |
+| **SMPA** (optional) | Session selector and five sections. **Dashboard** (default): a conversation with SMPA (model selector, chat, saved and reopenable conversations) beside interactive Sense, Belief and Plan graphs read from Turtle files. **Sense**: See, Hear and Read panels and a unified observation timeline from SMPA's recorded sessions, plus live camera and Listen state. Model, Plan and Act are placeholders |
 
 Further documentation: [ARCHITECTURE.md](ARCHITECTURE.md), [API.md](API.md),
 [SMPA_CONTRACTS.md](SMPA_CONTRACTS.md), [VERIFICATION.md](VERIFICATION.md),
-[MIGRATION.md](MIGRATION.md) (from `gui/` to `smpa_gui/`, and the GUI v4 conversation patch).
+[MIGRATION.md](MIGRATION.md) (from `gui/` to `smpa_gui/`, and from GUI v5 to v6).
 
 ## Package layout
 
@@ -87,6 +89,7 @@ As a ROS 2 package (after `--build`):
 source ~/ros2_ws/install/setup.bash
 ros2 launch smpa_gui gui.launch.py                      # then open http://127.0.0.1:8765
 ros2 launch smpa_gui gui.launch.py port:=9000 read_only:=true smpa:=false
+ros2 launch smpa_gui gui.launch.py smpa_root:=$HOME/ros2_ws/src/smpa-ros   # Dashboard with SMPA's conversation server
 ros2 run smpa_gui smpa_gui --port 9000 --no-smpa         # the same process without launch
 ```
 
@@ -108,10 +111,12 @@ the GUI does not affect any other ROS process.
 |---|---|---|---|---|
 | `host` | `--host` | `SMPA_GUI_HOST` | Listening address | `127.0.0.1` |
 | `port` | `--port` | `SMPA_GUI_PORT` | Listening port | `8765` |
-| `read_only` | `--read-only` | `SMPA_GUI_READ_ONLY=1` | Disable action goals, parameter changes and service calls | `false` |
+| `read_only` | `--read-only` | `SMPA_GUI_READ_ONLY=1` | Disable action goals, parameter changes, service calls and conversation changes | `false` |
 | `keep_goals_on_exit` | `--keep-goals-on-exit` | `SMPA_GUI_KEEP_GOALS_ON_EXIT=1` | Do not cancel active goals when the GUI stops | `false` |
 | `smpa` | `--no-smpa` (when `false`) | `SMPA_GUI_NO_SMPA=1` | Optional SMPA integration | `true` |
-| `smpa_memory_root` | `--memory-root` | `SMPA_GUI_MEMORY_ROOT` | SMPA's `memory/` directory for the SMPA tab (read-only) | `memory/` beside the source checkout, if it contains `runs/`; none when installed |
+| `smpa_memory_root` | `--memory-root` | `SMPA_GUI_MEMORY_ROOT` | SMPA's `memory/` directory for the SMPA tab (read-only) | `<smpa_root>/memory` |
+| `smpa_root` | `--smpa-root` | `SMPA_GUI_SMPA_ROOT` | SMPA checkout whose conversation server the Dashboard starts | the repository containing this source checkout, if it holds SMPA; none when installed |
+| `smpa_layout` | `--layout` | `SMPA_GUI_LAYOUT` | YAML file with further Dashboard paths ([below](#where-the-dashboard-finds-smpa)) | none |
 
 `run_gui.sh` additionally reads `SMPA_GUI_ROS_SETUP` (ROS 2 `setup.bash` to source) and
 `SMPA_GUI_OVERLAY` (a workspace `install/setup.bash` with custom message types, or
@@ -245,7 +250,8 @@ and nothing is sent. The GUI holds a service client only while one of its calls 
 
 ## Safeguards for every change
 
-Action goals, parameter changes and service calls share the same rules:
+Action goals, parameter changes, service calls and conversation changes (start, message,
+reopen, model switch, stop) share the same rules:
 
 - **Explicit confirmation.** Each change is made only by the confirmation button of a
   dialog that shows exactly what will be sent. Nothing is changed by selecting,
@@ -262,6 +268,99 @@ Action goals, parameter changes and service calls share the same rules:
   value that fits the type (and range) is **not** thereby safe.
 - **No other powers.** The gateway does not publish to topics and offers no access to
   files or a shell; the SMPA tab reads recorded files only.
+
+## SMPA tab: Dashboard (conversation and graphs)
+
+The Dashboard is the SMPA tab's first and default section (navigation: Dashboard |
+Sense | Model | Plan | Act). Its left column is a conversation with SMPA, its right
+column shows the selected session's Sense, Belief and Plan graphs.
+
+### Where the Dashboard finds SMPA
+
+The Dashboard runs SMPA's own conversation server, `python -m smpa_ros.conversation_web`,
+with SMPA's own `.venv`, configuration, model folder and memory directory, in SMPA's
+checkout as working directory. It needs:
+
+- the SMPA checkout (`smpa_root`): found automatically when this GUI is a source
+  checkout inside it (`<smpa-ros>/smpa_gui`); otherwise, and always for an installed
+  package, give it: `ros2 launch smpa_gui gui.launch.py smpa_root:=$HOME/ros2_ws/src/smpa-ros`;
+- SMPA's `.venv` in that checkout (created by SMPA's `install.sh`);
+- the **SMPA workspace sourced** before starting the GUI
+  (`source ~/ros2_ws/install/setup.bash`): SMPA's configuration
+  `smpa_ros/config.yaml` takes its provider and model defaults from the installed
+  `smpa_llm` package (`inference_config: package://smpa_llm/config.yaml`), and SMPA finds
+  that package and its model registry only through the sourced workspace.
+
+When something is missing, the Dashboard lists it instead of starting anything. Both
+SMPA checkout layouts are recognised: the ROS 2 packages layout
+(`smpa_ros/smpa_ros/conversation_web.py`, `smpa_llm/`) and the earlier flat layout.
+
+Everything can also be set in a layout file (`smpa_layout:=` / `--layout`); every entry
+is optional, and relative paths are relative to the layout file's folder:
+
+```yaml
+smpa_root: ~/ros2_ws/src/smpa-ros
+config: ~/ros2_ws/src/smpa-ros/smpa_ros/config.yaml   # default: <root>/smpa_ros/config.yaml
+python: ~/ros2_ws/src/smpa-ros/.venv/bin/python       # default: <root>/.venv/bin/python
+model_root: ~/ros2_ws/src/smpa-ros/models             # default: <root>/models
+memory_root: ~/ros2_ws/src/smpa-ros/memory            # default: <root>/memory
+conversation_port: 8766                               # loopback port of the server the GUI starts
+conversation_url: null                                # e.g. http://127.0.0.1:8000 to use a running server
+mock_graphs: /path/to/other/mock/graphs               # default: the mock_graphs installed with the GUI
+files:                    # per-run files, relative to the run directory; first existing candidate wins
+  conversation: [world_model/conversation.md, conversation.md]
+  sense: [world_model/sense.ttl]
+  belief: [world_model/belief.ttl, belief-state.ttl]
+  plan: [world_model/plan.ttl]
+```
+
+The `files` entries above are the defaults. The first candidate of each is the target
+structure `memory/runs/<run>/world_model/{conversation.md,sense,belief,plan.ttl}`; the
+second is where SMPA writes today (`conversation.md` and `belief-state.ttl` at the run
+root). The Dashboard says when it shows such a fallback location. SMPA does not write
+`sense.ttl` or `plan.ttl` yet; those views say "no file yet" until it does
+(SMPA_CONTRACTS.md, C6 and C7). `layouts/smpa-current.yaml` (installed in
+`share/smpa_gui/layouts`) is an example that uses only today's locations.
+
+### Conversation (left)
+
+- **Model**: every conversation model SMPA is configured with: local text models of the
+  model registry (backends `transformers`, `ollama`) and API providers with a text model.
+  Each shows its provider, a description built from the configuration (the registry has
+  no description field) and its availability: a precheck (weights folder present,
+  credential variable set) until SMPA's server runs, then SMPA's own verdict. Listing
+  models starts nothing.
+- **Start new conversation**: starts SMPA's conversation server if it is not running
+  (that is what creates the run; it is never started just to list models) or asks it
+  for a new run, then selects the model. The new run becomes the selected session.
+- **Chat**: Enter sends, Shift+Enter starts a new line. While SMPA generates, the status
+  line says so with the elapsed time and the message is shown as *sending…*. SMPA saves
+  the message and the reply in the run's transcript after each exchange; nothing else
+  is needed to persist a conversation. If inference fails, SMPA keeps the message and
+  the Dashboard shows SMPA's explanation; no other model is tried.
+- **Reopen**: select an earlier conversation session. It is shown from its recorded
+  transcript (read-only). *Continue this conversation* reopens it in SMPA, which appends
+  to the same transcript and restores the model recorded in that run; switch models
+  explicitly with *Use … from now on*. SMPA refuses to reopen a run made with a
+  different configuration.
+- **Stop server**: SMPA finalizes the run. The server is also stopped when the GUI stops.
+  Its output is shown under *Server output*.
+
+### Graphs (right)
+
+*Sense*, *Belief* and *Plan* each read one Turtle file of the selected session. Every
+resource is a node and every resource-to-resource triple a labelled edge; literal values
+are listed when you tap a node, and tapping an edge shows its predicate and the triple
+(scroll to zoom, drag to pan, *Fit*, *Re-arrange*). Nothing about the vocabulary is
+interpreted. The file is re-read every 1.5 s; a change is merged into the drawing
+without moving the viewport. A missing or empty file is explained; while a file is
+malformed (for example being written) or unreadable, the last valid drawing stays,
+marked as such. *Mock* shows the GUI's own fixtures (`smpa_gui/mock_graphs/`, reserved
+namespace `https://example.invalid/smpa-gui-mock/`) under a **MOCK DATA** banner; they
+are never copied into a run, and the GUI never writes any Turtle file.
+
+With `smpa:=false` the Dashboard says that SMPA integration is disabled and nothing is
+read or started.
 
 ## SMPA tab: Sense workspace (optional)
 
@@ -291,13 +390,13 @@ Without a memory directory the tab says how to configure one.
   sessions only), and every recording with its player and transcript.
 - **Read**: the user messages SMPA's Sense stage observed, with their epistemic status
   ("unverified user statement") and message number; a robot run links to the
-  conversation session it read. There is no text input: messages are entered in SMPA's
-  conversation GUI.
+  conversation session it read. Messages are entered on the Dashboard.
 - **Timeline**: all observations and Sense invocations (including failed ones) in time
   order, filterable by modality; click a row for its source file, Sense record, the
   source of its time stamp and every recorded provenance field.
 
-Nothing is written to the memory directory. Demonstration data in SMPA's formats can be
+The GUI writes nothing to the memory directory; only SMPA does (also when SMPA's
+conversation server was started from the Dashboard). Demonstration data in SMPA's formats can be
 generated and is clearly labelled:
 
 ```bash
@@ -322,8 +421,15 @@ call (`test/fixtures/management_nodes.py`). The packaging tests build the packag
 colcon into a temporary workspace and run it through `ros2 run` and `ros2 launch`; they
 are skipped without colcon. Nothing is mocked except where a test says so (the
 frontend-logic tests run the page's pure functions in Node.js). The tests do not touch
-SMPA or its test runner. See [VERIFICATION.md](VERIFICATION.md)
-for what was and was not verified.
+SMPA or its test runner.
+
+The Dashboard tests run SMPA's real conversation server from an SMPA checkout with its
+`.venv` (default: the repository containing `smpa_gui/`; set `SMPA_GUI_TEST_SMPA_ROOT`),
+with a test configuration whose only model is a deterministic local stub
+(`test/fixtures/openai_stub.py`). They write only to temporary directories and are
+skipped when no such checkout is found. One test also checks the GUI's model list
+against SMPA's server using SMPA's real configuration; it needs the SMPA workspace
+sourced. See [VERIFICATION.md](VERIFICATION.md) for what was and was not verified.
 
 ## Known limitations
 
@@ -405,7 +511,21 @@ SMPA tab
   are shortened.
 - The live camera is the session's configured `camera_topic`; recorded frames are what
   SMPA saved. The GUI does not record anything itself.
-- Read is read-only; text input and session control are deliberately absent (C4, C5).
+- Read is read-only; conversation input is on the Dashboard. Robot runs have no text
+  input or session control here (C5).
+
+Dashboard
+
+- SMPA's conversation server answers one request at a time. While it generates a reply,
+  the Dashboard shows the last known state and refuses other conversation actions.
+- One conversation server per GUI. Two GUIs (or a GUI and SMPA's own conversation page)
+  cannot serve the same run: SMPA locks the transcript.
+- Starting a conversation starts the server with SMPA's configured default model and
+  then switches to the chosen one; both are recorded in the run (C9).
+- Liveness of conversation sessions not served by this GUI is still unknown (C1).
+- Model descriptions are configuration facts, not curated text (C8).
+- Graphs above 5000 triples are truncated (marked). The graph views follow files, not
+  cognitive cycles; no history of earlier graph versions is kept or reconstructed.
 
 Sensors
 

@@ -1,14 +1,16 @@
-# Gateway API, contract version 1.4
+# Gateway API, contract version 1.5
 
 Base URL: `http://127.0.0.1:8765/api/v1`. All routes are read-only (HTTP `GET` or
-WebSocket) except four `POST` routes: sending and cancelling action goals
-([Action execution](#action-execution)), [setting parameters](#parameter-management)
-and [calling services](#service-management). All four follow the same
+WebSocket) except the `POST` routes for sending and cancelling action goals
+([Action execution](#action-execution)), [setting parameters](#parameter-management),
+[calling services](#service-management) and the [SMPA conversation](#smpa-conversation)
+routes, which relay to SMPA's own conversation server. All of them follow the same
 [access rules](#access-rules-for-the-post-routes).
-Version 1.1 added the `/actions/...` routes, 1.2 the read-only `/smpa/...` routes, and
-1.4 the parameter-change and service routes, parameter descriptors, `/session` and
-`/smpa/status.enabled`. Version 1.3 is reserved for the SMPA conversation routes of GUI
-version 4, which is kept as a separate patch (see MIGRATION.md). Nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
+Version 1.1 added the `/actions/...` routes, 1.2 the read-only `/smpa/...` session
+routes, 1.3 (GUI v4 patch) the conversation, layout, model and graph routes, and 1.4
+(GUI v5) the parameter-change and service routes, parameter descriptors, `/session` and
+`/smpa/status.enabled`. Version 1.5 (GUI v6) combines 1.3 and 1.4 and adds `candidates`
+and `fallback` to transcript and graph answers. Nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
 URL-encoded query parameters because they contain slashes. A machine-readable
 description of the HTTP routes is served at `/api/openapi.json`.
 
@@ -166,7 +168,7 @@ route for publishing on topics.
 
 ### Access rules for the `POST` routes
 
-A `POST` (goal, cancellation, parameter change or service call) is accepted only if all
+A `POST` (goal, cancellation, parameter change, service call or conversation change) is accepted only if all
 of the following hold; otherwise the status is `403` (or `415`/`422` for a body that is
 not declared as JSON):
 
@@ -182,7 +184,7 @@ not declared as JSON):
 ### `GET /session` (also `GET /actions/session`)
 
 `{"enabled": true, "token": "<session token>", "cancel_on_exit": true}`. The token is
-random per gateway process and authorises all four `POST` routes. In read-only mode
+random per gateway process and authorises every `POST` route (goals, parameters, services, conversation). In read-only mode
 `enabled` is `false` and `token` is `null`. `/actions/session` is the original name.
 
 ### `GET /actions/servers`
@@ -425,3 +427,122 @@ changes; clients can skip redrawing when it is unchanged.
 One recorded file of the session (`.png`, `.wav`, `.md`, `.json`, `.txt`) with its media
 type; byte ranges are supported. Paths outside the session directory, through links
 leading outside, or with other suffixes give `404`.
+
+## SMPA conversation
+
+The GUI implements no conversation logic. These routes start (on demand) and relay to
+SMPA's own `smpa_ros.conversation_web` server, or to an external one when
+`conversation_url` is configured. The `POST` routes follow the
+[access rules](#access-rules-for-the-post-routes) of the action routes, with the same
+session token; with `--read-only` they answer `403`. With SMPA integration disabled
+(`--no-smpa`) every `/smpa/...` Dashboard route answers `404` saying so. Each `POST` answers with
+`{"conversation": <status>}`; on failure the status code says why and `detail` carries
+SMPA's or the GUI's explanation, together with the current `conversation`.
+
+| Status | Meaning |
+|---|---|
+| `403` | Not local, no token, or read-only |
+| `404` | Unknown session (resume) or no SMPA agent for that model source |
+| `409` | Busy with another request; no conversation active; SMPA refused (for example missing weights); server prerequisites missing; port in use |
+| `502` | SMPA's server failed: it could not start (see `log`), or inference failed (the message is saved) |
+| `503`, `504` | SMPA's server is unreachable or did not start in time |
+
+### `GET /smpa/layout`
+
+The effective paths: `smpa_root`, `config`, `python`, `model_root`, `memory_root`,
+`conversation_port`, `conversation_url`, `mock_graphs`, `smpa_layout` (`packages`, `flat`
+or `null` when no SMPA checkout is configured), `files` (`conversation`, `sense`,
+`belief`, `plan`: each a list of candidate paths relative to a run directory, the first
+existing one is used), the layout file used (`source`), and
+`python_present`, `config_present`, `conversation_server_present`.
+
+### `GET /smpa/models`
+
+```json
+{"models": [{"source": "api:openai", "kind": "api", "name": "openai", "provider": "openai", "backend": "api",
+             "model_id": "gpt-4.1-mini", "revision": null,
+             "description": "API provider openai, model gpt-4.1-mini, endpoint https://api.openai.com/v1, credentials from OPENAI_API_KEY.",
+             "availability": {"state": "likely|available|unavailable|unknown", "verified": false, "detail": "…"},
+             "default": false, "modelling_agent": false, "agent_id": null, "label": "…(when verified)"}],
+ "problems": [], "config": "/…/config.yaml", "verified_by": "gui_precheck|conversation_server"}
+```
+
+`source` is SMPA's name for the choice. Until SMPA's server runs, availability is the
+GUI's precheck (`verified: false`); afterwards it is SMPA's verdict and `agent_id` is
+SMPA's agent id. Secrets are never returned, only the name of the credential variable.
+
+### `GET /smpa/conversation`
+
+The conversation status:
+
+```json
+{"conversation": {"mode": "managed|external", "url": "http://127.0.0.1:8766",
+  "phase": "stopped|starting|ready|busy|failed|unreachable",
+  "operation": {"kind": "start|resume|model|message|stop", "elapsed_s": 3.1, "text": "…(message)"},
+  "pid": 1234, "error": null, "exit_code": null, "run_id": "…", "session_id": "…",
+  "active_agent": {"id": "api:openai:…", "source": "api:openai", "label": "API · openai · …"},
+  "agents": [{"source": "…", "id": "…", "label": "…", "available": true, "availability": "…"}],
+  "messages": [{"index": 1, "role": "user|assistant", "content": "…", "thinking": null,
+                "agent": {"source": "…", "label": "…", "provider": "…", "model_id": "…", "backend": "…", "model_revision": null}}],
+  "modelling_error": null, "prerequisites_missing": [], "writes_enabled": true, "log": ["…server output…"]}}
+```
+
+`run_id` (equal to `session_id` of `/smpa/sessions`) is the active conversation. While
+SMPA generates a reply, `phase` is `busy` and the last known messages are returned.
+
+### `POST /smpa/conversation/start` `{"source": "api:openai", "request_id": "…"}`
+
+Starts a new SMPA conversation run, then selects the model (`source` optional: SMPA's
+configured default). If SMPA's server is not running it is started, which creates the
+run. Repeating a `request_id` returns the first outcome and starts nothing.
+
+### `POST /smpa/conversation/resume` `{"session_id": "…", "request_id": "…", "source": null}`
+
+Reopens a recorded conversation session in SMPA (starting the server with `--resume`
+or switching a running one). SMPA restores the model recorded in the run.
+
+### `POST /smpa/conversation/model` `{"source": "local:qwen3-4b"}`
+
+Switches the active conversation's model; SMPA records the change in the run.
+
+### `POST /smpa/conversation/messages` `{"text": "…", "request_id": "…"}`
+
+Sends one message and answers when SMPA has saved it and its reply (this can take
+minutes for local models). Repeating a `request_id` does not send twice.
+
+### `POST /smpa/conversation/stop` `{}`
+
+Stops the server the GUI started (SIGINT; SMPA finalizes the run). For an external
+server only the GUI's state is cleared.
+
+### `GET /smpa/sessions/{session_id}/conversation`
+
+The recorded transcript at the first existing `files.conversation` candidate in that run,
+read-only: `{"state": "ok|partial|missing|unavailable", "path", "configured_path"` (the
+candidate used), `"candidates", "fallback"` (true when it is not the first candidate),
+`"revision",
+"active", "messages": [as above], "problem"}`. `partial` means the complete messages
+before an incomplete or invalid entry.
+
+### `GET /smpa/graphs/{view}?source=real|mock&session_id=`
+
+`view` is `sense`, `belief` or `plan`. `real` reads the first existing `files.<view>`
+candidate in the session's run (`configured_path` names it, `candidates` lists all,
+`fallback` is true when it is not the first; when none exists the first is reported as
+`missing`);
+`mock` reads `<mock_graphs>/<view>.ttl` and is always marked `"mock": true`.
+
+```json
+{"view": "belief", "source": "real", "mock": false, "session_id": "…",
+ "configured_path": "world_model/belief.ttl", "path": "/…/runs/…/world_model/belief.ttl",
+ "candidates": ["world_model/belief.ttl", "belief-state.ttl"], "fallback": false,
+ "state": "ok|missing|empty|malformed|unavailable", "revision": "sha1 prefix of the content",
+ "modified_at": "…", "size": 123, "triples": 6, "truncated": false, "error": null,
+ "prefixes": {"ex": "http://example.org/"},
+ "nodes": [{"id": "http://example.org/cup", "label": "ex:cup", "iri": "…", "blank": false,
+            "literals": [{"predicate": "…", "predicate_label": "ex:colour", "value": "red", "datatype": null, "language": null}]}],
+ "edges": [{"id": "…", "source": "…", "target": "…", "predicate": "…", "label": "ex:on"}]}
+```
+
+No vocabulary is interpreted. `revision` changes exactly when the file content changes,
+so clients redraw only then. At most 5000 triples are returned (`truncated`).

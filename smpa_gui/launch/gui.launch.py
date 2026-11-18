@@ -13,7 +13,10 @@ Concepts:
         keep_goals_on_exit   true leaves active action goals running when the GUI stops
         smpa                 false disables the optional SMPA integration (SMPA tab shows "disabled")
         smpa_memory_root     SMPA's memory directory for the SMPA tab (read-only); empty means
-                             "memory/ beside the source checkout, if any"
+                             "<smpa_root>/memory"
+        smpa_root            SMPA checkout whose conversation server the Dashboard starts on demand;
+                             empty means "the repository containing this source checkout, if any"
+        smpa_layout          YAML file with further SMPA paths for the Dashboard (see README.md)
 
 Usage:
     ros2 launch smpa_gui gui.launch.py
@@ -27,10 +30,12 @@ from launch_ros.actions import Node
 ARGUMENTS = (
     ('host', '127.0.0.1', 'Listening address of the web server; keep the loopback default unless you need remote viewing.'),
     ('port', '8765', 'Listening port of the web server.'),
-    ('read_only', 'false', 'true disables action goals, parameter changes and service calls.'),
+    ('read_only', 'false', 'true disables action goals, parameter changes, service calls and conversation changes.'),
     ('keep_goals_on_exit', 'false', 'true leaves active action goals running when the GUI stops.'),
     ('smpa', 'true', 'false disables the optional SMPA integration.'),
     ('smpa_memory_root', '', "SMPA's memory directory for the SMPA tab (read-only); empty for the default."),
+    ('smpa_root', '', 'SMPA checkout for the Dashboard\'s conversation server; empty for the default.'),
+    ('smpa_layout', '', 'YAML file with SMPA paths for the Dashboard; empty for none.'),
 )
 
 
@@ -43,8 +48,9 @@ def command_arguments(value):
     """Translate the launch argument values into the command-line options of the ``smpa_gui`` executable.
 
     ``value`` maps each launch argument name to its text. Address and port
-    are always passed; the flags only when they are switched on. The memory
-    directory is passed only when SMPA is enabled and a directory was given.
+    are always passed; the flags only when they are switched on. The SMPA
+    settings (memory directory, checkout, layout file) are passed only when
+    SMPA is enabled and a value was given.
     """
     arguments = ['--host', value['host'], '--port', value['port']]
     if is_true(value['read_only']):
@@ -53,8 +59,11 @@ def command_arguments(value):
         arguments.append('--keep-goals-on-exit')
     if not is_true(value['smpa']):
         arguments.append('--no-smpa')
-    elif value['smpa_memory_root'].strip():
-        arguments += ['--memory-root', value['smpa_memory_root'].strip()]
+    else:
+        for name, option in (('smpa_memory_root', '--memory-root'), ('smpa_root', '--smpa-root'),
+                             ('smpa_layout', '--layout')):
+            if value[name].strip():
+                arguments += [option, value[name].strip()]
     return arguments
 
 

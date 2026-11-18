@@ -9,13 +9,14 @@ Concepts:
     data. Everything ROS-specific lives in ``ros_adapter``.
 
     SMPA is optional. ``smpa_adapter`` reads SMPA's recorded run directories
-    read-only; nothing of SMPA is imported, and the ROS functionality works
-    without it.
+    and Turtle graphs read-only, and runs SMPA's own conversation server as a
+    separate process to relay the Dashboard's conversation to it. Nothing of
+    SMPA is imported, and the ROS functionality works without it.
 
     The contract version names the JSON shapes documented in ``API.md``.
     Every HTTP response and every stream message follows that document.
-    Version 1.3 is reserved for the SMPA conversation routes of GUI version 4,
-    which are maintained as a separate patch.
+    Version 1.5 merges the conversation and graph routes of GUI version 4
+    (1.3) into version 5 (1.4).
 """
 
-CONTRACT_VERSION = '1.4'
+CONTRACT_VERSION = '1.5'

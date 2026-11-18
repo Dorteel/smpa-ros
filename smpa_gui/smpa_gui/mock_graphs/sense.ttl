@@ -1,0 +1,18 @@
+# MOCK DATA for GUI development. Not an observation recorded by SMPA.
+@prefix mock: <https://example.invalid/smpa-gui-mock/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+mock:graph rdfs:comment "Mock Sense graph. Not recorded by SMPA." .
+
+mock:observation_1 a mock:MockObservation ;
+    rdfs:label "Mock observation 1" ;
+    mock:modality "vision" ;
+    mock:mentions mock:thing_cup , mock:thing_table .
+
+mock:observation_2 a mock:MockObservation ;
+    rdfs:label "Mock observation 2" ;
+    mock:modality "read" ;
+    mock:mentions mock:thing_cup .
+
+mock:thing_cup rdfs:label "mock cup" .
+mock:thing_table rdfs:label "mock table" .

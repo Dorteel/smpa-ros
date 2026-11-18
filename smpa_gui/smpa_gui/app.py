@@ -7,10 +7,12 @@ Concepts:
     silence (no publishers, waiting, unsupported data). Opening a stream
     subscribes; closing it unsubscribes.
 
-    Everything is read-only except three groups of change routes: sending and
+    Everything is read-only except four groups of change routes: sending and
     cancelling action goals (``/api/v1/actions/goals``), setting parameters
-    (``/api/v1/ros/parameters/set``) and calling services
-    (``/api/v1/ros/services/call``). Each is made only after an explicit
+    (``/api/v1/ros/parameters/set``), calling services
+    (``/api/v1/ros/services/call``) and the SMPA conversation routes
+    (``/api/v1/smpa/conversation/...``, which relay to SMPA's own
+    conversation server). Each is made only after an explicit
     confirmation in the page, accepted only from this computer, only with the
     session token of this gateway process, never repeated for the same
     request id, and all of them can be switched off together (read-only
@@ -35,7 +37,8 @@ from pydantic import BaseModel, Field
 
 from smpa_gui import CONTRACT_VERSION
 from smpa_gui.ros_adapter import ros_graph, ros_interfaces, ros_parameters, ros_services, ros_topics, sensors
-from smpa_gui.smpa_adapter import smpa_runs
+from smpa_gui.smpa_adapter import conversation_transcript, rdf_graphs, smpa_layout, smpa_models, smpa_runs
+from smpa_gui.smpa_adapter.conversation_service import ConversationError, ConversationService
 from smpa_gui.ros_adapter.action_goals import GoalManager, GoalRefused
 from smpa_gui.ros_adapter.gateway import Gateway, GatewayError
 
@@ -103,6 +106,34 @@ class ServiceCallRequest(BaseModel):
     timeout: float = Field(default=10.0, ge=0.5, le=60.0)
 
 
+class ConversationStart(BaseModel):
+    """Start a new conversation with a model source such as ``local:qwen3-4b`` or ``api:openai``."""
+
+    source: str | None = Field(default=None, max_length=200)
+    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+class ConversationResume(BaseModel):
+    """Reopen an existing conversation session, optionally with another model."""
+
+    session_id: str = Field(min_length=1, max_length=200)
+    source: str | None = Field(default=None, max_length=200)
+    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+
+
+class ConversationModel(BaseModel):
+    """Switch the active conversation to another model source."""
+
+    source: str = Field(min_length=3, max_length=200)
+
+
+class ConversationMessage(BaseModel):
+    """One user message for the active conversation."""
+
+    text: str = Field(min_length=1, max_length=32000)
+    request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+
+
 class GoalSubmission(BaseModel):
     """The body of a goal submission: which action, its type, the goal values and a request identifier."""
 
@@ -112,7 +143,8 @@ class GoalSubmission(BaseModel):
     request_id: str = Field(min_length=8, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
 
 
-def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_root=None, smpa_enabled=True):
+def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_root=None, smpa_enabled=True,
+               layout=None, conversation=None):
     """Build the web application around one gateway.
 
     The gateway joins ROS when the application starts and leaves when it
@@ -124,8 +156,19 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
     application stops are asked to cancel. ``memory_root`` is SMPA's memory
     directory, read (never written) by the SMPA tab; None leaves it unconfigured.
     ``smpa_enabled`` false disables the optional SMPA integration altogether:
-    the SMPA routes then say that it is disabled and read nothing.
+    the SMPA routes then say that it is disabled, read nothing and start
+    nothing. ``layout`` is the GUI's SMPA path configuration
+    (``smpa_layout.load()`` when None); its memory directory is used when
+    ``memory_root`` is not given. ``conversation`` is the adapter to SMPA's
+    conversation server (created from the layout when None); a server it
+    started is stopped with the application.
     """
+    layout = dict(layout or smpa_layout.load())
+    if memory_root:
+        layout['memory_root'] = Path(memory_root).absolute()
+    elif smpa_enabled and layout['smpa_root'] is not None:
+        memory_root = layout['memory_root']
+    conversation = conversation or ConversationService(layout)
     gateway = gateway or Gateway()
     session_token = secrets.token_urlsafe(32)
 
@@ -140,6 +183,7 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
             yield
         finally:
             await asyncio.to_thread(app.state.goals.shutdown, cancel_on_exit)
+            await asyncio.to_thread(conversation.shutdown)
             gateway.stop()
             print('SMPA-ROS GUI stopped: goals settled, node left the ROS graph.', flush=True)
             # A second Ctrl+C (a terminal and ros2 launch both send one) makes uvicorn
@@ -611,6 +655,7 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
             raise HTTPException(status_code=503, detail=str(error)) from error
 
     root = Path(memory_root).resolve() if memory_root else None
+    app.state.conversation, app.state.layout = conversation, layout
 
     def smpa_root():
         """Return the configured memory root or answer 404 explaining why there is none.
@@ -669,6 +714,139 @@ def create_app(gateway=None, *, allow_changes=True, cancel_on_exit=True, memory_
         if found is None:
             raise HTTPException(status_code=404, detail='No such recorded file in this session')
         return FileResponse(found[0], media_type=found[1], headers={'Cache-Control': 'no-store'})
+
+    def smpa_available():
+        """Answer 404 when the optional SMPA integration is disabled, so nothing of SMPA is read or started."""
+        if not smpa_enabled:
+            raise HTTPException(status_code=404, detail='SMPA integration is disabled in this GUI (started with --no-smpa)')
+
+    def conversation_reply(work):
+        """Run a conversation operation and answer with the conversation status, or SMPA's explained error.
+
+        A failed reply still carries the conversation state when SMPA
+        returned one (for example: the message was saved but no answer was
+        generated), so the page can show what was recorded.
+        """
+        try:
+            work()
+        except ConversationError as error:
+            return JSONResponse(status_code=error.status, content=envelope(
+                detail=str(error), conversation=conversation_status(refresh=False)))
+        return envelope(conversation=conversation_status(refresh=False))
+
+    def session_directory(session_id):
+        """Return a session's run directory or answer 404."""
+        directory = smpa_runs.find_session(smpa_root(), session_id) if session_id != smpa_runs.LEGACY_ID else None
+        if directory is None:
+            raise HTTPException(status_code=404, detail='Unknown SMPA session')
+        return directory
+
+    def conversation_status(refresh=True):
+        """Describe the conversation server, the active run's session and its messages."""
+        status = conversation.status(refresh=refresh)
+        status['messages'] = (conversation.snapshot or {}).get('messages', []) if status['run_id'] else []
+        status['session_id'] = status['run_id']
+        status['writes_enabled'] = allow_changes
+        return status
+
+    def conversation_change(request):
+        """Require what every conversation change needs: SMPA enabled plus the common change rules."""
+        smpa_available()
+        authorised(request)
+
+    @app.get('/api/v1/smpa/layout')
+    def get_smpa_layout():
+        """Show where the GUI looks for SMPA, its conversation server and the per-run files."""
+        smpa_available()
+        return envelope(layout=smpa_layout.describe(layout), views=list(smpa_layout.GRAPH_VIEWS))
+
+    @app.get('/api/v1/smpa/models')
+    def get_smpa_models():
+        """List the conversation models in SMPA's configuration, with SMPA's own availability when its server runs."""
+        smpa_available()
+        models, problems = smpa_models.catalogue(layout['config'], layout['model_root'], smpa_root=layout['smpa_root'])
+        agents = (conversation.snapshot or {}).get('agents')
+        if agents:
+            models = smpa_models.merge_server_agents(models, agents)
+        return envelope(models=models, problems=problems, config=str(layout['config']),
+                        verified_by='conversation_server' if agents else 'gui_precheck')
+
+    @app.get('/api/v1/smpa/conversation')
+    def get_conversation():
+        """Describe the conversation server and the active conversation (messages included)."""
+        smpa_available()
+        return envelope(conversation=conversation_status())
+
+    @app.post('/api/v1/smpa/conversation/start')
+    def post_conversation_start(body: ConversationStart, request: Request):
+        """Start a new conversation run in SMPA with the chosen model, starting SMPA's server if needed."""
+        conversation_change(request)
+        return conversation_reply(lambda: conversation.start(body.source, body.request_id))
+
+    @app.post('/api/v1/smpa/conversation/resume')
+    def post_conversation_resume(body: ConversationResume, request: Request):
+        """Reopen an existing conversation session so it can be continued."""
+        conversation_change(request)
+        directory = session_directory(body.session_id)
+        return conversation_reply(lambda: conversation.resume(body.session_id, directory, body.source, body.request_id))
+
+    @app.post('/api/v1/smpa/conversation/model')
+    def post_conversation_model(body: ConversationModel, request: Request):
+        """Switch the active conversation to another model."""
+        conversation_change(request)
+        return conversation_reply(lambda: conversation.change_model(body.source))
+
+    @app.post('/api/v1/smpa/conversation/messages')
+    def post_conversation_message(body: ConversationMessage, request: Request):
+        """Send one message; answers when SMPA has saved it and replied (or explained why it could not)."""
+        conversation_change(request)
+        if not body.text.strip():
+            raise HTTPException(status_code=422, detail='The message is empty')
+        return conversation_reply(lambda: conversation.send(body.text, body.request_id))
+
+    @app.post('/api/v1/smpa/conversation/stop')
+    def post_conversation_stop(request: Request):
+        """Stop the GUI-managed conversation server; SMPA finalizes its run."""
+        conversation_change(request)
+        return conversation_reply(conversation.stop)
+
+    @app.get('/api/v1/smpa/sessions/{session_id}/conversation')
+    def get_session_conversation(session_id: str):
+        """Read a session's transcript from the first existing configured location, read-only."""
+        directory = session_directory(session_id)
+        try:
+            path, relative, fallback = smpa_layout.run_file(directory, layout, 'conversation')
+        except smpa_layout.LayoutError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return envelope(session_id=session_id, configured_path=relative, candidates=layout['files']['conversation'],
+                        fallback=fallback, active=conversation.status(refresh=False)['run_id'] == session_id,
+                        **conversation_transcript.read(path))
+
+    @app.get('/api/v1/smpa/graphs/{view}')
+    def get_smpa_graph(view: str, source: str = Query('real', pattern='^(real|mock)$'), session_id: str = Query('')):
+        """Read one graph view (sense, belief, plan) as nodes and edges, from a session or the mock fixtures.
+
+        Real graphs come from the session's run directory: the first existing
+        configured candidate path is used (``fallback`` is true when it is not
+        the preferred one). Mock graphs come only from the GUI's mock folder
+        and are always marked ``mock``; nothing is ever written.
+        """
+        smpa_available()
+        if view not in smpa_layout.GRAPH_VIEWS:
+            raise HTTPException(status_code=404, detail='Unknown graph view')
+        if source == 'mock':
+            path = Path(layout['mock_graphs']) / f'{view}.ttl'
+            configured, candidates, fallback = str(path), [str(path)], False
+        else:
+            if not session_id:
+                raise HTTPException(status_code=422, detail='Choose a session for real graphs')
+            candidates = layout['files'][view]
+            try:
+                path, configured, fallback = smpa_layout.run_file(session_directory(session_id), layout, view)
+            except smpa_layout.LayoutError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+        return envelope(view=view, source=source, mock=source == 'mock', session_id=session_id or None,
+                        configured_path=configured, candidates=candidates, fallback=fallback, **rdf_graphs.read(path))
 
     app.mount('/', StaticFiles(directory=FRONTEND, html=True), name='frontend')
     return app
