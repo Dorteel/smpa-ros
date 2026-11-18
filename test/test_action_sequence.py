@@ -358,3 +358,22 @@ def test_transferred_model_selection_preserves_api_identity():
     assert profile.selected == selection
     assert profile.models == {stage: selection for stage in ('vision', 'model', 'plan')}
     assert profile.model_identifier == profile.plan_identifier == 'fixture/vision'
+
+
+def test_refinement_read_failure_still_finalizes_run(tmp_path):
+    """Finalize failed run metadata even when its refinement queue is unreadable.
+
+    Start with an invalid persisted queue and unavailable inference services.
+    Cleanup must preserve that evidence, report the queue failure, and still
+    record a terminal run status instead of leaving the run marked running.
+    """
+    from smpa_ros.smpa import execute_experiment
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    path = memory.directory / 'state/refinement.json'
+    path.write_text('invalid queue')
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: False)
+    with pytest.raises(RuntimeError, match='cleanup was not confirmed'):
+        execute_experiment(memory, 1, {}, parameters, lambda future, *args: future, 1.0)
+    assert memory.metadata['status'] == 'failed'
+    assert memory.metadata['completed_at'] is not None
+    assert path.read_text() == 'invalid queue'

@@ -31,8 +31,10 @@ def test_shared_package_installs_with_optional_inference_server():
     """Import the installed shared package and inspect its distribution metadata.
 
     The shared implementation must import without loading weights. Its optional inference executable must
-    remain independent of legacy Runner execution. Its declared dependencies remain separate from
-    training requirements. Existing execution stays with the cognitive package.
+    remain independent of experiment execution. Its declared dependencies remain separate from
+    training requirements. Resolve the setuptools constraint by dependency name,
+    since installed metadata does not promise requirement ordering. Existing
+    execution stays with the cognitive package.
     """
     import smpa_llm
     assert Path(smpa_llm.__file__).is_file()
@@ -41,7 +43,7 @@ def test_shared_package_installs_with_optional_inference_server():
     requirements = [Requirement(value) for value in installed.requires]
     assert {value.name for value in requirements} == {
         'setuptools', 'outlines', 'jsonschema', 'openai', 'python-dotenv'}
-    assert str(requirements[0].specifier) == '<80,>=30.3'
+    assert str(next(value for value in requirements if value.name == 'setuptools').specifier) == '<80,>=30.3'
     cognitive = Path(get_package_share_directory('smpa_ros'))
     metadata = ElementTree.parse(cognitive / 'package.xml').getroot()
     assert 'smpa_llm' in [item.text for item in metadata.findall('exec_depend')]
@@ -140,3 +142,24 @@ def test_installed_model_management_and_lazy_package_import(tmp_path):
                     "import sys, smpa_llm; assert 'torch' not in sys.modules; "
                     "assert not any(name.startswith('smpa_llm.training') for name in sys.modules)"],
                    cwd=tmp_path, check=True)
+
+
+def test_installed_experiment_has_no_legacy_controller():
+    """Require the installed experiment and stage entries without a legacy module.
+
+    Inspect the installed cognitive distribution and import its script. The
+    shared memory library remains available, all five cognitive entry points
+    resolve, and the removed controller module and compatibility function must
+    not survive in the installation.
+    """
+    import importlib.util
+    from smpa_ros import smpa
+    assert importlib.util.find_spec('runner') is None
+    assert not hasattr(smpa, 'run')
+    entries = {entry.name: entry for entry in distribution('smpa-ros').entry_points}
+    for name, target in {'smpa': 'smpa_ros.smpa:main', 'sense_stage': 'smpa_ros.sense_node:main',
+                         'model_stage': 'smpa_ros.model_node:main', 'plan_stage': 'smpa_ros.plan_node:main',
+                         'act_stage': 'smpa_ros.act_node:main'}.items():
+        assert entries[name].value == target
+        assert callable(entries[name].load())
+    assert importlib.util.find_spec('memory') is not None

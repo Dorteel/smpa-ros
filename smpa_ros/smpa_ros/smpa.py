@@ -4,20 +4,6 @@ from functools import partial
 GOAL = '# Goal\n\nExplore the environment to discover previously unobserved objects and relationships.\n'
 
 
-def run(runner, cycles, *, goal=GOAL):
-    for experiment in range(1):
-        runner.start(goal=goal)
-        for cycle in range(cycles):
-            with runner.cycle():
-                observation = runner.sense(prompt=None)
-                world = runner.model(observation, prompt='default')
-                action = runner.plan(world, prompt='default')
-                runner.act(action, prompt='default')
-            if runner.experiment_complete:
-                break
-        runner.finish()
-
-
 def main(args=None):
     """Run the explicitly scripted cognitive actions from the command line.
 
@@ -306,7 +292,11 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
     outcomes are known; otherwise leave it in place for safe recovery. Limit
     each cleanup wait to three seconds. Finalize
     run metadata and notify the lifecycle observer of the actual terminal state.
-    Propagate the original error, or a cleanup error when cleanup is incomplete.
+    Mark an unfinished refinement queue as cycle-limited after normal completion,
+    or with the actual failure or interruption outcome. Preserve a queue that
+    Model already completed. Propagate the original error, or a cleanup error
+    when cleanup is incomplete. A refinement persistence error still permits
+    the run metadata to be finalized as failed.
     """
     acquisition = {}
     outstanding = {}
@@ -345,6 +335,15 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
             cleanup()
         except BaseException as error:
             status, cleanup_error = 'failed', cleanup_error or error
+    try:
+        refinement_path = memory.directory / 'state/refinement.json'
+        if refinement_path.exists():
+            refinement = memory.read_refinement()
+            if refinement.get('status') != 'completed':
+                refinement['status'] = 'cycle_limit' if status == 'completed' else status
+                memory.write_refinement(refinement)
+    except BaseException as error:
+        status, cleanup_error = 'failed', cleanup_error or error
     try:
         memory.finalize(status)
     except BaseException as error:

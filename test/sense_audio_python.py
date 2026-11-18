@@ -3,7 +3,7 @@
 
 This interpreter prefix reexecutes the existing repository virtual environment,
 then substitutes PortAudio input with the same callback fixture used by speech
-regressions. Recognition, audio persistence, ROS actions, Runner and inference
+regressions. Recognition, audio persistence, ROS actions, experiment control and inference
 are production code. It is never selected by the normal launcher.
 """
 import os

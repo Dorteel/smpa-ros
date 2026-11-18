@@ -31,7 +31,7 @@ class SenseService(Node):
     def __init__(self, backend: TransformersVLM | None = None) -> None:
         """Bind an assigned visual run and expose its existing description service.
 
-        Read the frozen configuration and generation controls. Reuse Runner's
+        Read the frozen configuration and generation controls. Reuse an explicitly
         supplied backend; only a standalone server loads its own configured
         local or API model. Keep original pixels for focused observation and
         expose the remappable DescribeScene endpoint without starting a loop.

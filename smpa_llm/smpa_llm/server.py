@@ -757,7 +757,7 @@ def main(args=None):
     Initialize ROS, construct one server and use multiple executor threads so
     discovery, parameters and status remain responsive during blocking actions.
     On interruption, drain active work before releasing the backend and context.
-    Legacy Runner execution does not import or require this executable.
+    Cognitive nodes use this server through its independent ROS endpoints.
     """
     from rclpy.signals import SignalHandlerOptions
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)

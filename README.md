@@ -26,7 +26,7 @@ flowchart LR
 - **Act** validates and dispatches the selected action, then records its outcome.
   The explicit stage order is in [smpa_ros/smpa_ros/smpa.py](smpa_ros/smpa_ros/smpa.py);
   four independent ROS action nodes perform the stages and shared Python memory
-  preserves run records. The legacy [runner.py](runner.py) remains for compatibility.
+  preserves run records. The installed `smpa` entry point executes this sequence.
 
 The independent conversational application follows **Sense → Model → Act**:
 receive a message, update attributed RDF beliefs, and generate a response.
@@ -202,16 +202,16 @@ GUI tests use isolated ROS fixture nodes and action servers. Logic tests skip
 without Node.js; browser tests skip without Playwright and require its Chromium
 browser to be installed when Playwright is available.
 `rqt_graph` needs its Qt display and a running system in the same ROS domain;
-it shows ROS communication, not Python calls inside Runner or file-backed Read.
+it shows ROS communication; file-backed Read is part of Sense.
 
 ## Repository Structure
 
 ```text
 smpa_ros/                   Cognitive ROS package: metadata, config and launch/
   smpa_ros/                 Model, Plan, Act, conversation, RDF and sensory service
-  runner.py, memory.py      Legacy Runner and shared run persistence
+  memory.py                 Shared run persistence
   sense/, speech/           Hear/Read/Vision and speech ROS adapters
-smpa_llm/                   Shared inference ROS package; no inference server
+smpa_llm/                   Serialized inference server and shared backends
   config.yaml, models/      Inference defaults and pinned model definitions
   smpa_llm/inference/       Engines, speech, segmentation and VisualJEV inference
   smpa_llm/models/          Local asset checks, selection and explicit provisioning
@@ -386,8 +386,8 @@ load fails, the server enters `error` with no active model. An unknown alias
 is rejected before releasing the old model. An unload
 releases the owned backend. Management and inference share one exclusive slot;
 an overlapping action goal is rejected. The experiment's four independent stage
-nodes send inference requests to this shared server; the legacy Runner remains
-available for older callers and is not used by the new command entry point.
+nodes send inference requests to this shared server. `smpa.py` controls the
+experiment sequence, repetition, and run boundaries.
 
 The adapter reuses existing Transformers text and vision implementations and
 configured API providers. Specialized speech, segmentation, VisualJEV, and

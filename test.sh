@@ -39,8 +39,9 @@ source "$ros_setup"
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
 export ROS_LOG_DIR="$work_dir/ros_logs"
+export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 "${colcon_command[@]}" --log-base "$work_dir/log" build --paths "$PWD/smpa_ros" "$PWD/smpa_llm" "$PWD/smpa_ros_interfaces" \
-    --packages-select smpa_ros_interfaces smpa_llm smpa_ros --build-base "$work_dir/build" \
+    --packages-select smpa_ros_interfaces smpa_llm smpa_ros --executor sequential --parallel-workers 1 --build-base "$work_dir/build" \
     --install-base "$work_dir/install"
 source "$work_dir/install/setup.bash"
 # Repository test fixtures include the provisioning script as a namespace module.
@@ -80,6 +81,7 @@ from ament_index_python.packages import get_package_share_directory
 from memory import MemoryManager
 import yaml
 
+assert importlib.util.find_spec('runner') is None
 entries = {entry.name: entry for entry in distribution('smpa-ros').entry_points}
 assert entries['conversation'].value == 'smpa_ros.conversation_web:main'
 assert callable(entries['conversation'].load())

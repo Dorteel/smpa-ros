@@ -6,7 +6,7 @@ package_name = 'smpa_ros'
 setup(
     name=package_name,
     version='0.0.1',
-    py_modules=['runner', 'memory'],
+    py_modules=['memory'],
     packages=find_packages(include=['smpa_ros', 'smpa_ros.*', 'speech', 'speech.*', 'sense', 'sense.*']),
     package_data={'smpa_ros': ['prompts/*/*.txt', 'conversation.html', 'belief-structure.owl']},
     data_files=[

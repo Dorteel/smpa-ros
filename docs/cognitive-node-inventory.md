@@ -1,8 +1,8 @@
 # Independent cognitive nodes: migration inventory
 
 This inventory records the control flow at base commit `2efae36`. It describes
-existing responsibilities and the ownership requested for the migration; it is
-not a claim that the independent nodes have already been implemented.
+the original responsibilities and requested ownership. The historical inventory
+is retained below; the completed migration status follows it.
 
 | Existing responsibility | Current implementation and dependencies | Intended owner |
 |---|---|---|
@@ -19,7 +19,7 @@ not a claim that the independent nodes have already been implemented.
 | Backend lifetime | `Runner.initialize_backends` and `setup` resolve a shared multimodal model and pass one local backend object to Sense, Model, and Plan. `smpa_llm.server` instead owns one backend per server and serializes its actions. | Existing inference server instances; configure ownership and separate instances explicitly when distinct capabilities or settings require them. |
 | Lifecycle and events | `smpa_ros.run_control` starts an experiment child, wraps Runner stage methods, relays a private notification pipe, and handles bounded shutdown. `llm.launch.py` launches the Runner or legacy participants. | Existing lifecycle services start and observe the experiment; launch starts independent stage processes. Neither chooses stage order. |
 
-## Migration risks and required interfaces
+## Historical migration risks and required interfaces
 
 - Four stage actions need an explicit run identity and capability selector. Their
   nodes also need a reliable way to resolve that identity under the configured
@@ -106,21 +106,61 @@ Model records retained links to both evidence files. The server snapshot now als
 records the loaded model device and dtype when its backend exposes them, preserving
 the existing runtime metadata and frozen-parameters format. An interrupt during a real
 inference backend call remains unverified. The conversation reply backend
-remains unchanged. The legacy Runner and compatibility entry points remain in the
-repository until their remaining regression coverage has been migrated. Some
-legacy tests require different per-stage generation controls within one run;
-the server source now supports separate frozen settings for each stage. The
-inference action definitions were regenerated in the isolated overlay after the
-host cooled, using one build worker without new throttle events. A full four-stage
-ROS sequence now sends Model and Plan inference actions to one fake backend and
-checks their distinct frozen controls and persistence links. The installed command
-also passed completion, interruption, and camera-evidence tests after the Python
-packages were refreshed. Legacy Runner regression coverage still requires migration
-before the Runner can be removed without dropping assertions. A later combined
-transport-suite run timed out waiting for the interruption test's Sense action,
-even though that installed-command test passed in the earlier isolated run.
-This intermittent failure and new hardware throttling need investigation before
-claiming final regression verification.
+remains unchanged. The legacy Runner modules, root compatibility link, obsolete Python
+`run(runner, ...)` function, and setuptools module entry have been removed.
+The four-node ROS sequence sends Model and Plan inference actions to one fake
+backend and checks their distinct frozen controls and persistence links.
+The installed command passed completion, interruption and camera-evidence checks.
+
+The storage regressions now invoke the real stage callbacks through mocked action
+clients and `execute_experiment`; they no longer instantiate a controller.
+The existing 81 storage cases and 10 camera/configuration cases passed after
+migration. Coverage retains concurrent sessions, unchanged historical files,
+source and previous-snapshot links, repeated and skipped stages, named prompts,
+startup/cleanup failures, interruptions, ROS robot rejection/cancellation,
+per-stage controls, whitelists, and focused-observation consolidation.
+Migration exposed and fixed missing terminal refinement status updates: a normal
+cycle limit now records `cycle_limit`; failures and interruptions retain their
+actual outcome, and completed queues remain completed.
+
+The intermittent interruption failure occurred before inference provenance was
+persisted, so it was not evidence that the Sense implementation stalled. The
+original test discarded child output on that path; its exact historical trigger
+cannot be recovered from the retained artifacts. The test now retains child
+output, detects early exits while waiting for Sense, and uses a file rather than
+an unread output pipe. A demonstrable isolation flaw was also corrected: every
+pytest invocation formerly reused DDS domains from 110. Domains are now selected
+from a process-specific sequence and cooperatively leased for each test, keeping
+simultaneous invocations away from each other's identically named services.
+A diagnostic combined run reproduced the timeout during the `active_model`
+parameter read, with a Fast DDS response-send timeout, before stage execution.
+The installed Fast DDS headers map domains starting at 110 into this host's
+32768–60999 ephemeral UDP range. Leased test domains now use 10–89, skip the
+user's configured domain, and avoid that range. All nine transport cases passed
+in focused runs with their existing deadlines. The original incident has no
+packet trace, so an individual historical port collision cannot be proved.
+
+The installed-command completion test keeps the Model and Plan inference
+clients intact: both call the real ROS inference server with a fake backend,
+which is loaded once. Their token limits (40 and 50) reach the backend and its
+persisted frozen snapshot. The installed interruption and camera-evidence
+checks also pass. A clean Python package installation excludes the removed
+module, while all five experiment/stage entry points and shared memory import
+correctly. The installation is under `/tmp/cognitive-final/install`; the
+already-generated interface overlay is reused without recompilation.
+
+Final focused checks passed: 91 migrated storage/camera regressions, 118
+interface/lifecycle/Read/launch/mocked-cognition checks, 57
+stage/shared-memory/conversation/package checks, and all nine local ROS
+transport cases. Real-model inference, hardware, GPU, training and simulation
+remain deferred. `test.sh` passed shell syntax validation; its full clean build
+was not repeated. The existing GUI configuration test requiring unavailable
+model assets was excluded; no GUI files were changed.
+
+The existing public control parameter `runner_arguments` retains its name for
+ROS compatibility; it supplies arguments to `smpa.py` and does not load a legacy
+controller. Conversation replies keep their existing selectable backend; belief
+updates continue through the independent Model node.
 
 To reproduce the generated interface build on a stable authorized host:
 
@@ -140,7 +180,7 @@ checks with local DDS discovery:
 ```bash
 cd /home/dorteel/ros2_ws/smpa-cognitive-nodes
 source /opt/ros/jazzy/setup.bash
-source /home/dorteel/ros2_ws/install/setup.bash
+source /tmp/cognitive-final/install/setup.bash
 source /tmp/cognitive-stage/install/local_setup.bash
 export PYTHONPATH="$PWD:$PWD/smpa_ros:$PWD/smpa_llm:$PYTHONPATH"
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
@@ -197,3 +237,24 @@ conflict rejection with a fake backend.
 Generated action contracts and end-to-end local ROS behavior for the new selector
 have been verified with a fake backend. Real model and hardware behavior remain
 outside these tests.
+
+## Reproduce the installed-path regression check
+
+The following uses the completed temporary installation and generated interface
+overlay. It runs outside the checkout, without adding source directories to
+`PYTHONPATH`, and never loads real model weights.
+
+```bash
+cd /tmp
+unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH PYTHONPATH
+source /opt/ros/jazzy/setup.bash
+source /tmp/cognitive-final/install/setup.bash
+source /tmp/cognitive-stage/install/local_setup.bash
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export ROS_LOG_DIR=/tmp/smpa-ros-final-logs ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+/home/dorteel/ros2_ws/src/smpa-ros/.venv/bin/python -m pytest -q \
+  -c /home/dorteel/ros2_ws/smpa-cognitive-nodes/smpa_ros/setup.cfg \
+  -p no:cacheprovider \
+  /home/dorteel/ros2_ws/smpa-cognitive-nodes/test/test_cognitive_ros_transport.py \
+  /home/dorteel/ros2_ws/smpa-cognitive-nodes/test/test_package_boundary.py
+```
