@@ -544,3 +544,19 @@ def test_experiment_persists_real_server_snapshot_with_mock_backend(server, tmp_
     verify_inference(parameters, memory, wait, 1.0)
     release_inference(parameters, memory.metadata['run_id'], wait, 1.0, {})
     assert server.get_parameter('experiment_run_id').value == ''
+
+
+def test_freeze_snapshot_captures_actual_model_runtime(server):
+    """Capture actual device and dtype from the one loaded backend on acquisition.
+
+    Give the fake backend runtime values different from its configured defaults,
+    then verify the frozen snapshot reports those actual values. Release the
+    owner and leave backend cleanup to the existing server fixture.
+    """
+    import json
+    server.replace_model('qwen3_4b')
+    server.backend.model = SimpleNamespace(device='fixture-device', dtype='fixture-dtype')
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+    snapshot = json.loads(server.get_parameter('frozen_settings_json').value)
+    assert snapshot['runtime'] == {'device': 'fixture-device', 'dtype': 'fixture-dtype'}
+    assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful

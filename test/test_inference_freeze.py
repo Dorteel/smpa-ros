@@ -79,3 +79,28 @@ def test_acquisition_rejects_a_different_loaded_model(tmp_path):
     with pytest.raises(RuntimeError, match='does not match'):
         acquire_inference(parameters, memory, wait, 1.0, acquisition)
     assert acquisition == {'owned': True} and 'inference' not in memory.metadata
+
+
+def test_acquisition_preserves_actual_runtime_in_metadata_and_parameters(tmp_path):
+    """Persist the server's actual model device and dtype in the legacy format.
+
+    Acquire a server snapshot with runtime information and verify that both run
+    metadata and frozen parameters retain the same values alongside the exact
+    inference snapshot. No backend or real model is loaded.
+    """
+    import yaml
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    runtime = {'device': 'fixture-device', 'dtype': 'fixture-dtype'}
+    snapshot = dict(run_id=memory.metadata['run_id'], server_instance_id='server-a',
+                    active_model='fixture', loading={}, generation={}, runtime=runtime)
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True,
+        set_parameters_atomically=lambda values: SimpleNamespace(result=SimpleNamespace(successful=True, reason='')),
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value=json.dumps(snapshot))]))
+    def wait(future, limit, operation):
+        """Return the already completed fixture response without waiting."""
+        return future
+    acquire_inference(parameters, memory, wait, 1.0, {})
+    assert memory.metadata['inference'] == snapshot
+    assert memory.metadata['configuration']['runtime'] == runtime
+    frozen = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
+    assert frozen['_run']['runtime'] == runtime

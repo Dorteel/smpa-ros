@@ -195,7 +195,9 @@ def acquire_inference(parameters, memory, wait, timeout, acquisition):
     Send the run identity to the inference server and retain the pending future
     until its outcome is known. After acceptance, read the server-captured JSON,
     verify its identity and required fields, and write those exact settings into
-    run metadata before any cognitive inference begins. An existing snapshot
+    run metadata before any cognitive inference begins. If the server reports
+    actual model device and dtype, preserve them in the existing runtime metadata
+    and frozen parameters as well. An existing snapshot
     must match, including the server instance, so a restarted or replaced server
     cannot silently continue an earlier experiment. On failure the caller owns
     cleanup; an unconfirmed acquisition must be resolved before release.
@@ -228,6 +230,12 @@ def acquire_inference(parameters, memory, wait, timeout, acquisition):
     existing = memory.metadata.get('inference')
     if existing is not None and existing != snapshot:
         raise RuntimeError('Inference server or frozen settings changed during this experiment')
+    runtime = snapshot.get('runtime')
+    if runtime is not None:
+        if (not isinstance(runtime, dict) or set(runtime) != {'device', 'dtype'}
+                or any(not isinstance(value, str) or not value for value in runtime.values())):
+            raise ValueError('Inference server returned invalid runtime provenance')
+        memory.metadata['configuration']['runtime'] = dict(runtime)
     memory.metadata['inference'] = snapshot
     memory.write_metadata()
     return snapshot

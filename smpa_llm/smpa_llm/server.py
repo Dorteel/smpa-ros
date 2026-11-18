@@ -209,7 +209,9 @@ class InferenceServer(Node):
         used by snapshots. An active experiment can be released only with
         `release:<run_id>`, checked against its current owner under this lock.
         Normalize a matching command to the empty parameter value, and reject a
-        bare or stale release. A rejected batch installs no partial configuration.
+        bare or stale release. Capture the actual model device and dtype in the
+        frozen snapshot when the loaded backend exposes both. A rejected batch
+        installs no partial configuration.
         """
         lock = getattr(self, 'lock', None)
         if lock is None:
@@ -239,6 +241,11 @@ class InferenceServer(Node):
                     loading=dict(self.loaded_settings),
                     generation={field: values[field] for field in GENERATION_FIELDS},
                     model_root=self.model_root)
+                loaded_model = getattr(self.backend, 'model', None)
+                device = getattr(loaded_model, 'device', None)
+                dtype = getattr(loaded_model, 'dtype', None)
+                if device is not None and dtype is not None:
+                    snapshot['runtime'] = {'device': str(device), 'dtype': str(dtype)}
                 provider = getattr(self.backend, 'provider_settings', None)
                 if isinstance(provider, dict):
                     snapshot['provider_settings'] = {key: deepcopy(provider[key]) for key in
