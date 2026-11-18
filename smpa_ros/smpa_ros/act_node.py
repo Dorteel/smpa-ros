@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -169,12 +170,17 @@ class ActNode(Node):
         existing focused prompt and schema. Persist the answer and its image hash,
         then update the queue and action record. A run-local lock prevents two
         focused operations from claiming the same question concurrently.
+        Record when the focused operation begins independently of its earlier
+        camera evidence. Fsync and index the answer before reporting success,
+        preserving the originating Act record without inventing a future Sense.
         """
         from PIL import Image as PILImage
         from sensor_msgs.msg import Image
         from smpa_ros.backends.base import stage_generation, validate_output
         from smpa_ros.sense import describe_image
         from smpa_ros.plan import refinement_settings
+        from datetime import datetime, timezone
+        from memory import append_observation
 
         parameters = record.get('parameters', {})
         target, question = parameters.get('target'), parameters['question']
@@ -190,6 +196,7 @@ class ActNode(Node):
                 item.update(attempted=True, attempted_cycle=cycle)
                 memory.write_refinement(refinement)
             try:
+                observed_at = datetime.now(timezone.utc).isoformat()
                 image_path = directory / 'observations/vision/frozen_image.png'
                 if not image_path.exists():
                     records = []
@@ -205,6 +212,7 @@ class ActNode(Node):
                         raise RuntimeError('Observe requires an earlier Sense camera image')
                 with PILImage.open(image_path) as stored:
                     pixels = stored.convert('RGB')
+                    camera = json.loads(stored.info.get('smpa.camera', '{}'))
                 digest = hashlib.sha256(pixels.tobytes()).hexdigest()
                 message = Image(height=pixels.height, width=pixels.width, encoding='rgb8',
                                 is_bigendian=0, step=pixels.width * 3, data=list(pixels.tobytes()))
@@ -234,10 +242,21 @@ class ActNode(Node):
                 path = directory / 'observations/vision' / filename
                 model = pipeline.get('_run', {}).get('models', {}).get('vision', {}).get('model_id')
                 observation = dict(target=target, question=question, output=value, prompt=prompt,
-                                   generation_parameters=settings, image_sha256=digest, model_identifier=model)
+                                   generation_parameters=settings, image_sha256=digest, model_identifier=model,
+                                   observed_at=observed_at)
                 with path.open('x', encoding='utf-8') as output:
                     json.dump(observation, output, ensure_ascii=False, indent=2)
+                    output.flush()
+                    os.fsync(output.fileno())
                 source = str(path.relative_to(directory))
+                invocation = record.get('invocation', 1)
+                act_name = 'act.json' if invocation == 1 else f'act_{invocation:03d}.json'
+                append_observation(directory, modality='vision', kind='focused_observation',
+                    observed_at=observed_at, status='generated', text=value, cycle=cycle,
+                    files={'image': str(image_path.relative_to(directory)), 'text': source},
+                    provenance=dict(target=target, question=question, image_sha256=digest,
+                                    model_identifier=model, camera=camera,
+                                    act_record=f'state/cycle_{cycle:06d}/{act_name}'))
                 record.update(goal_accepted=True, result_status=4, success=True, result=observation, observation_record=source)
                 if item is not None:
                     item['source_record'] = source

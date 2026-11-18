@@ -610,7 +610,9 @@ def test_installed_experiment_preserves_camera_evidence(tmp_path):
     an actual ROS image while only the visual description, language generation,
     planning and robot movement are mocked. Run two cycles through the installed
     command and verify the original image and Markdown evidence, Model source
-    links, completed cycles, and cleanup of all owned participants.
+    links, completed cycles, owner heartbeat, observation index and cleanup of
+    all owned participants. Inspect the manifest from real camera-action
+    transport rather than reconstructing evidence from filenames.
     """
     import multiprocessing
     import os
@@ -665,6 +667,18 @@ def test_installed_experiment_preserves_camera_evidence(tmp_path):
         metadata = yaml.safe_load(metadata_path.read_text())
         assert metadata['status'] == 'completed' and metadata['completed_cycles'] == 2
         directory = metadata_path.parent
+        assert metadata['process']['pid'] > 0 and metadata['process']['heartbeat_interval_s'] == 5
+        from datetime import datetime
+        assert datetime.fromisoformat(metadata['process']['heartbeat_at']).utcoffset() is not None
+        manifests = [json.loads(line) for line in (directory / 'observations/index.jsonl').read_text().splitlines()]
+        assert [item['kind'] for item in manifests] == ['camera_frame', 'scene_description'] * 2
+        assert [item['cycle'] for item in manifests] == [1, 1, 2, 2]
+        assert all(item['session_id'] == metadata['run_id'] for item in manifests)
+        for item in manifests:
+            assert item['sense_record'] == f'state/cycle_{item["cycle"]:06d}/sense.json'
+            assert item['provenance']['topic'] == configuration['camera_topic']
+            assert datetime.fromisoformat(item['observed_at']).utcoffset() is not None
+            assert (directory / item['files']['image']).is_file()
         observations = list((directory / 'observations/vision').glob('*.md'))
         assert len(observations) == 2
         for observation in observations:

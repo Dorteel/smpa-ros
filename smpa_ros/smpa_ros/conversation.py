@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 
-from memory import MemoryManager
+from memory import MemoryManager, append_observation
 
 HEADER = b'# Conversation\n\n'
 MARKER = re.compile(rb'<!-- smpa-message (User|Assistant) ([0-9]+)(?: agent ([0-9]+))?(?: parts ([0-9]+) ([0-9]+))? -->\n')
@@ -136,6 +136,9 @@ def exchange(memory, message, generate, settings, *, agent=None, modelling=None)
     The optional modelling callback delegates belief updates to Model after each
     saved message. Inference failure leaves the user's message intact and records
     a failed Act. A later exchange can use the same persisted history.
+    Fsync the user's Sense record and append its attributed observation before
+    calling Model or reply inference. The manifest preserves the unverified
+    status, transcript position and exact Sense invocation even if inference fails.
     """
     if not isinstance(message, str) or not message.strip():
         raise ValueError('Message must be nonempty text')
@@ -146,6 +149,13 @@ def exchange(memory, message, generate, settings, *, agent=None, modelling=None)
         append_message(memory.directory, 'User', message)
         with (memory.directory / memory.record_path(name)).open('x') as output:
             json.dump(dict(provenance, stage='sense', status='generated', output=message), output)
+            output.flush()
+            os.fsync(output.fileno())
+        append_observation(memory.directory, modality='read', kind='user_message',
+            observed_at=provenance['started_at'], status='generated', text=message,
+            cycle=memory.cycle, sense_record=str(memory.record_path(name)),
+            files={'text': 'conversation.md'}, epistemic_status='unverified_user_statement',
+            provenance=dict(provenance, role='user', message_index=len(read_messages(memory.directory))))
         if modelling is not None:
             modelling(memory, read_messages(memory.directory))
         name, provenance = memory.invocation('act', 'conversation', str(memory.record_path(name)))

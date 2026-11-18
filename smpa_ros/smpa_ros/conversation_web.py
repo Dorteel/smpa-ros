@@ -313,7 +313,13 @@ def exchange_with_model(memory, message, generate, settings, *, agent, modelling
 
 def make_server(memory, generate, settings, port=8000, *, agents=None, root=None,
                 configuration=None, default=None, lock=None, modelling=None):
-    """Serialize selection and inference requests on the loopback interface."""
+    """Serve this conversation locally and publish its owning process's liveness.
+
+    Keep the existing transcript lease and serialized HTTP operations. Start a
+    heartbeat only after binding succeeds, transfer it after a successful
+    session switch, and stop it on server close without inventing a new terminal
+    status. The existing entry point remains responsible for finalization.
+    """
     root = Path(root or memory.directory.parent.parent).resolve()
     configuration = configuration if configuration is not None else memory.metadata['configuration']['pipeline']
     default = default or memory.metadata.get('active_agent', {}).get('id')
@@ -376,6 +382,14 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
                 self.reply(404, {'error': 'Not found'})
 
         def do_POST(self):
+            """Apply an existing local conversation operation to the active session.
+
+            Validate origin, JSON and operation arguments before recording text
+            or changing sessions. Preserve the old session on a failed switch;
+            restart the old heartbeat if its finalization failed after stopping
+            it. After a successful switch, start the new session's heartbeat and
+            finish the old owner. Report existing state and errors as before.
+            """
             nonlocal memory, lock
             if self.path not in ('/api/message', '/api/agent', '/api/settings', '/api/new', '/api/clear', '/api/resume'):
                 self.reply(404, {'error': 'Not found'})
@@ -427,8 +441,11 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
                             restore_agent(candidate, agents, default)
                         generation_state(candidate, agents)
                         candidate.write_metadata()
+                        candidate.start_heartbeat()
                         memory.finalize('completed')
                     except Exception:
+                        if candidate is not None:
+                            candidate.stop_heartbeat()
                         memory.metadata = previous_metadata
                         try:
                             if candidate is not None:
@@ -440,6 +457,7 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
                         finally:
                             if candidate_lock is not None:
                                 candidate_lock.close()
+                        memory.start_heartbeat()
                         raise
                     lock.close()
                     memory, lock = candidate, candidate_lock
@@ -498,9 +516,21 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
     server.memory, server.transcript_lock = memory, lock
     original_close = server.server_close
     def close():
+        """Stop liveness for the current session and release server resources.
+
+        A session switch may have replaced the original memory and transcript
+        lease. Close only those currently owned by this HTTP server; the caller
+        continues to choose whether and how the session is finalized.
+        """
+        server.memory.stop_heartbeat()
         server.transcript_lock.close()
         original_close()
     server.server_close = close
+    try:
+        memory.start_heartbeat()
+    except BaseException:
+        server.server_close()
+        raise
     return server
 
 

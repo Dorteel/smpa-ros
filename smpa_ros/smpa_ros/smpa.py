@@ -409,6 +409,8 @@ def run_ros_experiment(args=None, *, goal=GOAL, notify=None):
     established speech participants, and construct direct clients for all four
     stage actions. The script acquires and records inference ownership, invokes
     its explicit sequence, and cleans up the owned clients and speech process.
+    Publish process liveness while startup, requests, and cleanup are active;
+    finalizing this session stops its heartbeat.
     The optional observer receives the run identity and lifecycle events. No
     cognitive backend or other stage is loaded in this process.
     """
@@ -489,6 +491,7 @@ def run_ros_experiment(args=None, *, goal=GOAL, notify=None):
         if errors:
             raise RuntimeError(f'Owned resource cleanup failed: {errors[0]}') from errors[0]
     try:
+        memory.start_heartbeat()
         if profile.modalities['hear']:
             command = ['ros2', 'launch', 'smpa_ros', 'llm.launch.py', 'participants_only:=true',
                        'service:=speech', f'world_model_dir:={memory.directory}', f'run_id:={identity}',
