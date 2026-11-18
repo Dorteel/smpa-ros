@@ -1,6 +1,7 @@
 """Expose existing sensory acquisition as an independent cognitive action."""
 from functools import partial
 import fcntl
+import hashlib
 import json
 from pathlib import Path
 from threading import Event
@@ -15,9 +16,9 @@ from rclpy.node import Node
 from rclpy.parameter_client import AsyncParameterClient
 import yaml
 
-from memory import locked_run, reserve_invocation
+from memory import MemoryManager, locked_run, reserve_invocation
 from smpa_ros.sense import capture_once, observe, record_observation
-from smpa_ros_interfaces.action import DescribeImage, DescribeStructuredImage, Listen, Sense
+from smpa_ros_interfaces.action import DescribeImage, DescribeStructuredImage, GenerateStructured, Listen, Sense
 
 
 class SenseNode(Node):
@@ -39,6 +40,7 @@ class SenseNode(Node):
         inference = self.get_parameter('inference_node').value.rstrip('/')
         self.image_client = ActionClient(self, DescribeImage, inference + '/describe_image', callback_group=self.group)
         self.structured_client = ActionClient(self, DescribeStructuredImage, inference + '/describe_structured_image', callback_group=self.group)
+        self.structured_text = ActionClient(self, GenerateStructured, inference + '/generate_structured', callback_group=self.group)
         self.listener = ActionClient(self, Listen, '/speech/listen', callback_group=self.group)
         self.parameters = AsyncParameterClient(self, inference, callback_group=self.group)
         self.server = ActionServer(self, Sense, 'smpa/sense', self.execute,
@@ -134,6 +136,68 @@ class SenseNode(Node):
         from smpa_ros.sense import describe_image
         return describe_image(self, image, prompt, run_id=run_id, directory=directory, pipeline=pipeline)
 
+    def identify_questions(self, observation, *, directory, run_id, pipeline):
+        """Persist the initial refinement entities and deterministic question queue.
+
+        Send the initial observation through the shared structured text action
+        using the run's frozen Sense settings. Validate unique entity identities,
+        then save one question per configured property with the frozen image hash.
+        No other cognitive action is invoked and no local model is loaded.
+        """
+        from PIL import Image as PILImage
+        from smpa_ros.backends.base import stage_generation, validate_output
+        from smpa_ros.plan import refinement_settings
+        settings = stage_generation(pipeline, 'sense')
+        if settings.get('reasoning_effort') is not None:
+            raise ValueError('The shared inference server does not expose reasoning_effort')
+        timeout = self.get_parameter('timeout').value
+        if not self.parameters.wait_for_services(timeout_sec=timeout):
+            raise TimeoutError('Inference parameter services are unavailable')
+        response = self.result(self.parameters.get_parameters(['experiment_run_id', 'active_model']), timeout, 'inference ownership')
+        if response.values[0].string_value != run_id or not response.values[1].string_value:
+            raise RuntimeError('Inference server is not frozen for this experiment')
+        alias = response.values[1].string_value
+        names = [f'models.{alias}.{field}' for field in ('max_new_tokens', 'temperature', 'seed', 'top_p')]
+        response = self.result(self.parameters.get_parameters(names), timeout, 'inference settings')
+        actual = (response.values[0].integer_value, response.values[1].double_value,
+                  response.values[2].integer_value, response.values[3].double_value)
+        expected = (settings.get('max_output_tokens'), settings.get('temperature'),
+                    settings.get('seed') if settings.get('seed') is not None else -1, 1.0)
+        if actual != expected:
+            raise ValueError(f'Inference parameters do not match frozen Sense settings: expected {expected}, got {actual}')
+        schema = {'type': 'object', 'properties': {'entities': {'type': 'array', 'items': {
+            'type': 'object', 'properties': {'id': {'type': 'string'}, 'description': {'type': 'string'}},
+            'required': ['id', 'description'], 'additionalProperties': False}}},
+            'required': ['entities'], 'additionalProperties': False}
+        prompt = ('Identify distinct visible entities in this initial observation. Assign unique stable entity identifiers. '
+                  'Do not invent entities. Return JSON.\n' + observation)
+        if not self.structured_text.wait_for_server(timeout_sec=timeout):
+            raise TimeoutError('Structured inference action is unavailable')
+        goal = GenerateStructured.Goal(prompt=prompt, json_schema=json.dumps(schema), run_id=run_id)
+        handle = self.result(self.structured_text.send_goal_async(goal), timeout, 'entity identification acceptance')
+        if not handle.accepted:
+            raise RuntimeError('Entity identification goal was rejected')
+        response = self.result(handle.get_result_async(), timeout, 'entity identification result')
+        if response.status != GoalStatus.STATUS_SUCCEEDED:
+            raise RuntimeError('Entity identification failed')
+        text = response.result.json_output
+        validate_output(text, 'json_schema', schema)
+        entities = json.loads(text)['entities']
+        if any(not entry['id'].strip() or not entry['description'].strip() for entry in entities) or len({entry['id'] for entry in entities}) != len(entities):
+            raise ValueError('Entity identification requires unique nonempty identifiers and descriptions')
+        questions = [dict(target=entry['id'], property=prop,
+            question=f"What is the {prop} of {entry['id']} ({entry['description']})?",
+            attempted=False, status='unanswered', answer=None)
+            for entry in entities for prop in refinement_settings(pipeline)['properties']]
+        with PILImage.open(directory / 'observations/vision/frozen_image.png') as image:
+            digest = hashlib.sha256(image.convert('RGB').tobytes()).hexdigest()
+        settings = dict(settings, response_format='json_schema', output_schema=schema)
+        state = dict(status='running', entities=entities, questions=questions,
+                     image='observations/vision/frozen_image.png', image_sha256=digest,
+                     identification=dict(prompt=prompt, generation_parameters=settings, output=text))
+        memory = MemoryManager.attach_active_run(self.get_parameter('memory_root').value, run_id)
+        memory.write_refinement(state)
+
     def execute(self, goal_handle):
         """Collect one run's configured modalities and persist their provenance.
 
@@ -169,10 +233,13 @@ class SenseNode(Node):
                 modalities and returns the combined text without starting a stage.
                 """
                 return observe(self, config, run, executor, timeout, service, self, capture=capture)[0]
+            from smpa_ros.plan import refinement_settings
             with (directory / '.sense.lock').open('a') as lock:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 observation, _ = record_observation(directory, cycle, collect,
                     record_name=name, provenance=provenance, prompt_name=prompt, configuration=config)
+                if refinement_settings(pipeline)['enabled'] and not (directory / 'state/refinement.json').exists():
+                    self.identify_questions(observation, directory=directory, run_id=request.run_id, pipeline=pipeline)
             result.observation = observation
             result.record_path = str(record_path.relative_to(directory))
             goal_handle.succeed()
@@ -196,6 +263,7 @@ class SenseNode(Node):
         """
         self.server.destroy()
         self.listener.destroy()
+        self.structured_text.destroy()
         self.image_client.destroy()
         self.structured_client.destroy()
         return super().destroy_node()

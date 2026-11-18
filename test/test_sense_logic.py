@@ -197,3 +197,45 @@ def test_refinement_image_is_frozen_for_shared_inference(monkeypatch, tmp_path):
     assert all(goal.run_id == memory.metadata['run_id'] for goal in calls)
     with PILImage.open(memory.directory / 'observations/vision/frozen_image.png') as saved:
         assert saved.getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_identification_creates_persisted_refinement_queue(sense_module, tmp_path, monkeypatch):
+    """Create refinement questions from mocked schema-constrained inference.
+
+    An active run has a frozen camera image and a fixed initial observation.
+    Verify the requested run and schema, ordered entity-property questions, image
+    hash and identification provenance without loading an inference model.
+    """
+    from PIL import Image as PILImage
+    from types import MethodType
+    pipeline = {'enabled_actions': ['observe'], 'scene_refinement': {'enabled': True, 'properties': ['color', 'shape']},
+        'stage_settings': {'sense': {'temperature': 0.0, 'max_output_tokens': 32, 'reasoning_effort': None,
+                                    'seed': None, 'response_format': 'json_schema', 'output_schema': {'type': 'object'}}}}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'pipeline': pipeline})
+    memory.begin_cycle()
+    PILImage.new('RGB', (1, 1), (255, 0, 0)).save(memory.directory / 'observations/vision/frozen_image.png')
+    monkeypatch.setattr(sense_module, 'GenerateStructured', SimpleNamespace(Goal=SimpleNamespace))
+    calls = []
+    def get_parameters(names):
+        """Return matching experiment ownership and frozen generation values."""
+        if names[0] == 'experiment_run_id':
+            return SimpleNamespace(values=[SimpleNamespace(string_value=memory.metadata['run_id']),
+                                           SimpleNamespace(string_value='fixture')])
+        return SimpleNamespace(values=[SimpleNamespace(integer_value=32), SimpleNamespace(double_value=0.0),
+                                       SimpleNamespace(integer_value=-1), SimpleNamespace(double_value=1.0)])
+    def send(goal):
+        """Return one fixed entity through a fake successful action result."""
+        calls.append(goal)
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(status=4,
+            result=SimpleNamespace(json_output='{"entities":[{"id":"cup","description":"red cup"}]}')))
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0 if name == 'timeout' else str(tmp_path)),
+        parameters=SimpleNamespace(wait_for_services=lambda timeout_sec: True, get_parameters=get_parameters),
+        structured_text=SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send),
+        result=lambda future, timeout, operation: future)
+    sense_module.SenseNode.identify_questions(node, 'visible cup', directory=memory.directory,
+                                            run_id=memory.metadata['run_id'], pipeline=pipeline)
+    state = json.loads((memory.directory / 'state/refinement.json').read_text())
+    assert [item['property'] for item in state['questions']] == ['color', 'shape']
+    assert all(not item['attempted'] for item in state['questions'])
+    assert state['entities'][0]['id'] == 'cup' and len(state['image_sha256']) == 64
+    assert calls[0].run_id == memory.metadata['run_id'] and json.loads(calls[0].json_schema)['required'] == ['entities']
