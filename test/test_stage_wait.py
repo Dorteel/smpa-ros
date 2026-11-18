@@ -107,3 +107,24 @@ def test_stage_discovery_and_result_have_separate_timeouts():
         return handle if future == 'acceptance' else SimpleNamespace(status=4, result='done')
     assert invoke_stage(client, object(), wait, 2.0, {}, result_timeout=20.0) == 'done'
     assert waits == [('stage acceptance', 2.0), ('stage result', 20.0)]
+
+
+def test_nonterminal_stage_result_keeps_freeze_owned():
+    """Do not treat an unknown action status as confirmed termination.
+
+    A transport can return a result without a terminal status. Both the normal
+    wait and cleanup must retain the goal so the experiment cannot release its
+    inference freeze while the stage might still be active.
+    """
+    handle = SimpleNamespace(accepted=True, get_result_async=lambda: 'result')
+    client = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=lambda goal: 'acceptance')
+    outstanding = {}
+    def wait(future, timeout, operation):
+        """Return an accepted handle followed by an unknown goal status."""
+        return handle if future == 'acceptance' else SimpleNamespace(status=0)
+    with pytest.raises(RuntimeError, match='not reported a terminal status'):
+        invoke_stage(client, object(), wait, 1.0, outstanding)
+    assert outstanding['result'] == 'result'
+    with pytest.raises(RuntimeError, match='not reported a terminal status'):
+        finish_outstanding_stage(outstanding, wait, 1.0)
+    assert outstanding['result'] == 'result'

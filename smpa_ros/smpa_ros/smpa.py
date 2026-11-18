@@ -117,6 +117,9 @@ def invoke_stage(client, goal, wait, timeout, outstanding, *, result_timeout=Non
     result_future = handle.get_result_async()
     outstanding['result'] = result_future
     response = wait(result_future, result_timeout if result_timeout is not None else timeout, 'stage result')
+    if getattr(response, 'status', None) not in (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED,
+                                                GoalStatus.STATUS_CANCELED):
+        raise RuntimeError('Cognitive stage has not reported a terminal status')
     outstanding.clear()
     if response.status != GoalStatus.STATUS_SUCCEEDED:
         raise RuntimeError(f'Cognitive stage action failed with status {response.status}')
@@ -130,8 +133,10 @@ def finish_outstanding_stage(outstanding, wait, timeout):
     it first; a rejected goal is already terminal. For an accepted goal wait for
     its terminal result, using the existing result future when available. Clear
     the outstanding state only after termination is confirmed. Propagate a
-    timeout or transport error so the caller keeps the inference freeze in place.
+    timeout, transport error or nonterminal status so the caller keeps the
+    inference freeze in place.
     """
+    from action_msgs.msg import GoalStatus
     if not outstanding:
         return
     handle = outstanding.get('handle')
@@ -143,7 +148,10 @@ def finish_outstanding_stage(outstanding, wait, timeout):
         outstanding['handle'] = handle
     if 'result' not in outstanding:
         outstanding['result'] = handle.get_result_async()
-    wait(outstanding['result'], timeout, 'terminal stage result')
+    response = wait(outstanding['result'], timeout, 'terminal stage result')
+    if getattr(response, 'status', None) not in (GoalStatus.STATUS_SUCCEEDED, GoalStatus.STATUS_ABORTED,
+                                                GoalStatus.STATUS_CANCELED):
+        raise RuntimeError('Cognitive stage has not reported a terminal status')
     outstanding.clear()
 
 
