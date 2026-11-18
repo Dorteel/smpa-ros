@@ -327,3 +327,26 @@ def test_transferred_configuration_matches_existing_runner(tmp_path):
     assert transferred.limit == previous.limit == 3
     assert transferred.action_timeout == previous.action_timeout
     assert transferred.options == previous.options
+
+
+def test_transferred_model_selection_matches_runner():
+    """Preserve API model selection without creating a backend instance.
+
+    Compare the transferred catalogue-selection function with the prior Runner
+    logic for the same configured API model. Neither path opens an API client or
+    performs inference, and both retain the same identities for cognitive stages.
+    """
+    from copy import deepcopy
+    from runner import Runner
+    from smpa_ros.smpa import resolve_experiment_models
+    config = {'model': {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture/vision'}}
+    def profile():
+        """Create independent mutable selection inputs for the two paths."""
+        return SimpleNamespace(config=deepcopy(config), options=SimpleNamespace(model_root='/tmp/models'),
+                               modalities={'hear': False})
+    previous, transferred = profile(), profile()
+    Runner.initialize_backends(previous)
+    resolve_experiment_models(transferred)
+    assert transferred.config == previous.config and transferred.selected == previous.selected
+    assert transferred.models == previous.models
+    assert transferred.model_identifier == previous.model_identifier == 'fixture/vision'
