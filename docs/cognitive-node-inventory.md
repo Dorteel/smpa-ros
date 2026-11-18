@@ -48,3 +48,28 @@ not a claim that the independent nodes have already been implemented.
 - Existing Runner callers include the experiment, lifecycle worker, and multiple
   regression tests. Conversation has a separate belief path. Remove old code
   only after these callers have migrated and compatibility checks pass.
+
+## Migration status after conversation delegation
+
+The explicit experiment sequence and the four stage action servers are present.
+The Model action now accepts the `belief` capability and `messages_json`; it
+attaches to the active run and calls the existing belief writer. The inference
+server exposes `llm/generate_structured_chat` using `GenerateStructuredChat`:
+its goal has `messages_json`, optional `json_schema`, and `run_id`, and its
+result has `json_output`. An empty schema permits a plain response; a supplied
+schema uses the existing backend enforcement and output validation.
+
+Conversation belief updates require a running `model_stage` with `memory_root`
+matching the conversation root and `belief_ontology` matching the configured
+ontology, plus a loaded `/llm` server with the configured belief model and
+generation controls. Each exchange acquires and records its server freeze,
+checks it for every Model call, and releases it only after requests terminate.
+A server restart or changed snapshot stops continuation rather than replacing
+recorded provenance. Conversation replies still use the existing selectable
+lazy backend; they may load a separate model in addition to the belief server.
+
+The legacy Runner and compatibility entry points remain until the regenerated
+ROS interfaces and complete mocked multi-process action sequence are tested.
+The new and modified action definitions require a ROS interface rebuild before
+their transport can be exercised; callback tests using stand-ins do not establish
+ROS wire compatibility. No model weights or simulation were used for these checks.

@@ -866,12 +866,14 @@ class ConversationTests(unittest.TestCase):
 
         Verify that conversational-only controls remain rejected by robot calls,
         while the existing canonical robot temperature control is still forwarded.
+        Mock local asset inspection so the test never needs model weights.
         """
         from smpa_ros.model import load_backend
         agents, default, config, config_path = self.configured_agents()
         repository = Path(__file__).resolve().parents[1]
         config['modeling'] = {'model': 'qwen3-0.6b', 'backend': 'transformers'}
-        with patch('smpa_ros.backends.transformers.TransformersBackend') as local:
+        with (patch('smpa_ros.backends.transformers.TransformersBackend') as local,
+              patch('smpa_llm.models.loading.local_model_info', return_value={'status': 'complete', 'path': '/mock/model', 'model_id': 'fixture'})):
             generate, _ = load_backend(config, config_path, repository / 'models', repository / 'models', conversation=True)
             generate('First', max_new_tokens=32, temperature=0.2, seed=1)
             generate('Second', max_new_tokens=64, temperature=0.8, seed=2)
