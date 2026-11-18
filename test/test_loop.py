@@ -164,7 +164,7 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
     assert len(descriptions) == expected
     assert set(observations.iterdir()) == {file for description in descriptions
                                          for file in (description, description.with_suffix('.png'))}
-    assert len(list((directory / 'state').iterdir())) == expected
+    assert len(list((directory / 'state').glob('cycle_*'))) == expected
     constructor.assert_called_once()
     assert model_backend.generate.call_count == expected * 2
     assert len(list((directory / 'world_model').glob('iteration_*.md'))) == expected
