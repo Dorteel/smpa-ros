@@ -292,10 +292,10 @@ implemented by `smpa_llm` and the SMPA endpoints by `smpa_ros`.
 
 | ROS name | Type | Goal or request | Result or response | Feedback or behavior |
 |---|---|---|---|---|
-| `/llm/generate` | action `GenerateText` | `string prompt` | `string text` | `string partial_text`; generate text |
-| `/llm/generate_structured` | action `GenerateStructured` | `string prompt`, `string json_schema` | `string json_output` | `string partial_text`; generate schema-constrained JSON |
-| `/llm/describe_image` | action `DescribeImage` | `sensor_msgs/Image image`, `string prompt` | `string description` | `string partial_text`; describe the supplied image |
-| `/llm/describe_structured_image` | action `DescribeStructuredImage` | `sensor_msgs/Image image`, `string prompt`, `string json_schema` | `string json_output` | `string partial_text`; describe the image with constrained JSON |
+| `/llm/generate` | action `GenerateText` | `string prompt`, `string run_id` | `string text` | `string partial_text`; generate text |
+| `/llm/generate_structured` | action `GenerateStructured` | `string prompt`, `string json_schema`, `string run_id` | `string json_output` | `string partial_text`; generate schema-constrained JSON |
+| `/llm/describe_image` | action `DescribeImage` | `sensor_msgs/Image image`, `string prompt`, `string run_id` | `string description` | `string partial_text`; describe the supplied image |
+| `/llm/describe_structured_image` | action `DescribeStructuredImage` | `sensor_msgs/Image image`, `string prompt`, `string json_schema`, `string run_id` | `string json_output` | `string partial_text`; describe the image with constrained JSON |
 | `/llm/load_model` | action `LoadModel` | `string model_id` | `bool success`, `string error_message` | `string stage`; load a registered alias |
 | `/llm/unload_model` | action `UnloadModel` | empty | `bool success`, `string error_message` | `string stage`; release the active backend |
 | `/llm/set_active_model` | action `SetActiveModel` | `string model_id` | `bool success`, `string error_message` | `string stage`; select and load a registered alias |
@@ -306,6 +306,14 @@ implemented by `smpa_llm` and the SMPA endpoints by `smpa_ros`.
 | `/smpa/stop` | service `StopSmpa` | empty | `bool accepted` | Request interruption of the child |
 | `/smpa/get_status` | service `GetSmpaStatus` | empty | `string state`, `string run_id`, `string active_stage` | Return the latest observed lifecycle state |
 | `/smpa/events` | topic `SmpaEvent` | — | `string run_id`, `string stage`, `string event` | Report observed run and stage transitions |
+
+Inference goal `run_id` is empty for standalone use. A nonempty ID must match
+the inference server's `experiment_run_id` at goal acceptance. Setting that
+parameter on an idle server with a ready model freezes model configuration and
+rejects model-management goals until the parameter is cleared. Experiment
+lifecycle acquisition and recording of the frozen settings are not yet wired up.
+These goal fields change the ROS wire definitions: rebuild the interfaces and
+all clients before using this branch.
 
 The legacy `Listen`, `Talk`, `DescribeScene`, `EvaluateVisualDecision`, and
 `SegmentImage` definitions remain registered.
