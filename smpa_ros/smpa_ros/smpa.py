@@ -172,3 +172,71 @@ def release_inference(parameters, run_id, wait, timeout, outstanding):
         Parameter('experiment_run_id', value='release:' + run_id)]), timeout, 'inference release')
     if not response.result.successful:
         raise RuntimeError(f'Inference release failed: {response.result.reason}')
+
+
+def acquire_inference(parameters, memory, wait, timeout, acquisition):
+    """Acquire this run's inference freeze and persist the server's snapshot.
+
+    Send the run identity to the inference server and retain the pending future
+    until its outcome is known. After acceptance, read the server-captured JSON,
+    verify its identity and required fields, and write those exact settings into
+    run metadata before any cognitive inference begins. An existing snapshot
+    must match, including the server instance, so a restarted or replaced server
+    cannot silently continue an earlier experiment. On failure the caller owns
+    cleanup; an unconfirmed acquisition must be resolved before release.
+    """
+    import json
+    from rclpy.parameter import Parameter
+    if acquisition:
+        raise RuntimeError('Inference acquisition is already pending')
+    if not parameters.wait_for_services(timeout_sec=timeout):
+        raise TimeoutError('Inference parameter services are unavailable')
+    identity = memory.metadata['run_id']
+    future = parameters.set_parameters_atomically([Parameter('experiment_run_id', value=identity)])
+    acquisition['future'] = future
+    response = wait(future, timeout, 'inference acquisition')
+    acquisition.clear()
+    if not response.result.successful:
+        raise RuntimeError(f'Inference acquisition failed: {response.result.reason}')
+    acquisition['owned'] = True
+    response = wait(parameters.get_parameters(['frozen_settings_json']), timeout, 'frozen inference settings')
+    snapshot = json.loads(response.values[0].string_value)
+    if (not isinstance(snapshot, dict) or snapshot.get('run_id') != identity
+            or not snapshot.get('server_instance_id') or not snapshot.get('active_model')
+            or not isinstance(snapshot.get('loading'), dict) or not isinstance(snapshot.get('generation'), dict)):
+        raise ValueError('Inference server returned an invalid frozen settings snapshot')
+    existing = memory.metadata.get('inference')
+    if existing is not None and existing != snapshot:
+        raise RuntimeError('Inference server or frozen settings changed during this experiment')
+    memory.metadata['inference'] = snapshot
+    memory.write_metadata()
+    return snapshot
+
+
+def resolve_inference_acquisition(acquisition, wait, timeout):
+    """Resolve a timed-out freeze request before attempting experiment cleanup.
+
+    A timed-out parameter request may still acquire the server. Wait for its
+    actual response and remember whether it succeeded. If its outcome remains
+    unknown, propagate the error and keep the future so cleanup cannot release
+    prematurely or claim that the server is free.
+    """
+    if 'future' not in acquisition:
+        return
+    response = wait(acquisition['future'], timeout, 'late inference acquisition')
+    acquisition.clear()
+    acquisition['owned'] = response.result.successful
+
+
+def verify_inference(parameters, memory, wait, timeout):
+    """Verify the server still owns this run with the recorded frozen settings.
+
+    Read the authoritative server snapshot and compare it to the snapshot saved
+    in run metadata. Missing ownership, changed settings, or a new server instance
+    abort the experiment before it sends another cognitive action.
+    """
+    import json
+    response = wait(parameters.get_parameters(['frozen_settings_json']), timeout, 'inference verification')
+    value = response.values[0].string_value
+    if not value or json.loads(value) != memory.metadata.get('inference'):
+        raise RuntimeError('Inference server ownership or frozen settings changed')
