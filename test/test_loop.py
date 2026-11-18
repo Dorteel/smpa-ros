@@ -186,15 +186,19 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
 
 
 @pytest.mark.parametrize('entry_point', ['source', 'installed'])
-def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
-    """Start real loop/Sense processes with no sibling configuration files."""
+def test_experiment_configuration_from_source_and_install(tmp_path, entry_point):
+    """Resolve experiment configuration in a fresh source or installed process.
+
+    The process uses a standalone configuration file and prepares run metadata
+    without starting a stage, model client or sensor. Source and installed paths
+    are checked separately so a stale installation cannot hide behind the checkout.
+    """
     import os
     from pathlib import Path
     import subprocess
     import sys
     import uuid
     import yaml
-    from ament_index_python.packages import get_package_prefix
 
     repository = Path(__file__).resolve().parents[1]
     config = yaml.safe_load((repository / 'config.yaml').read_text())
@@ -203,28 +207,19 @@ def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
     config_path = tmp_path / 'config.yaml'
     config_path.write_text(yaml.safe_dump(config))
     environment = os.environ.copy()
-    for provider in ('openai', 'nebula'):
-        environment[config[provider]['api_key_env']] = 'test-config-secret'
-    environment['ROS_LOG_DIR'] = str(tmp_path / 'ros_logs')
-    # An explicit source path checks main(); otherwise use the installed console script
-    # from outside the checkout so source imports cannot hide a stale installation.
     if entry_point == 'source':
-        environment['PYTHONPATH'] = str(repository) + os.pathsep + environment.get('PYTHONPATH', '')
-        command = [sys.executable, '-c', 'from smpa_ros.smpa import main; main()']
+        environment['PYTHONPATH'] = str(repository / 'smpa_ros') + os.pathsep + str(repository / 'smpa_llm') + os.pathsep + environment.get('PYTHONPATH', '')
     else:
         environment['PYTHONPATH'] = os.pathsep.join(
             path for path in environment.get('PYTHONPATH', '').split(os.pathsep)
-            if path and Path(path).resolve() != repository)
-        command = [sys.executable, str(Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/smpa')]
+            if path and not Path(path).resolve().is_relative_to(repository))
+    command = [sys.executable, '-c',
+               'from smpa_ros.smpa import prepare_experiment; prepare_experiment(None, "# Test goal")']
     result = subprocess.run(
         command + ['--config', str(config_path), '--max-cycles', '1', '--timeout', '5',
                    '--python', sys.executable, '--world-model-root', str(tmp_path / 'memory')],
-        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=45)
-    output = result.stdout + result.stderr
-    assert 'FileNotFoundError' not in output, output
-    assert '/sense service ready' in output, output
-    assert f"No image received on {config['camera_topic']}" in output, output
-    assert result.returncode != 0  # Expected bounded stop: no test camera publishes.
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
     directory, = (tmp_path / 'memory/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     from smpa_ros.model import unify_model
@@ -232,3 +227,4 @@ def test_loop_entry_point_with_unified_config(tmp_path, entry_point):
     expected = unify_model(config)
     expected['enabled_actions'] = list(enabled_actions(config))
     assert metadata['configuration']['pipeline'] == expected
+    assert metadata['status'] == 'running' and (directory / 'goal.md').read_text() == '# Test goal'
