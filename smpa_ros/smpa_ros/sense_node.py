@@ -98,19 +98,32 @@ class SenseNode(Node):
 
         Wait for the server, acceptance and terminal response with bounded waits.
         Reject unsuccessful results instead of inventing a transcript. On a
-        timeout request cancellation if the accepted goal handle is available.
+        failure resolve late acceptance when possible, request cancellation, and
+        wait briefly for the terminal result. Log an unconfirmed termination.
         """
         timeout = self.get_parameter('timeout').value
         if not client.wait_for_server(timeout_sec=timeout):
             raise TimeoutError('Listen action is unavailable')
-        handle = self.result(client.send_goal_async(goal), timeout, 'Listen acceptance')
-        if not handle.accepted:
-            raise RuntimeError('Listen goal was rejected')
+        pending = client.send_goal_async(goal)
+        handle = None
+        terminal = False
         try:
-            response = self.result(handle.get_result_async(), timeout, 'Listen result')
-        except Exception:
-            handle.cancel_goal_async()
-            raise
+            handle = self.result(pending, timeout, 'Listen acceptance')
+            if not handle.accepted:
+                raise RuntimeError('Listen goal was rejected')
+            response_future = handle.get_result_async()
+            response = self.result(response_future, timeout, 'Listen result')
+            terminal = True
+        finally:
+            if not terminal:
+                try:
+                    if handle is None:
+                        handle = self.result(pending, 5.0, 'late Listen acceptance')
+                    if handle.accepted:
+                        self.result(handle.cancel_goal_async(), 5.0, 'Listen cancellation')
+                        self.result(handle.get_result_async(), 5.0, 'terminal Listen result')
+                except Exception as error:
+                    self.get_logger().error(f'Could not confirm Listen termination: {error}')
         if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
             raise RuntimeError(response.result.error_message or 'Listen action failed')
         return response.result

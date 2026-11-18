@@ -125,3 +125,31 @@ def test_camera_capture_uses_injected_description(assigned_test_run):
         camera.destroy_node()
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_listen_failure_requests_cancellation(sense_module):
+    """Cancel an accepted Listen goal when waiting for its result times out.
+
+    Supply a fake action client and future responses. The first result wait
+    fails; cleanup must request cancellation and wait for the terminal response,
+    while the original timeout still reaches the caller.
+    """
+    handle = SimpleNamespace(accepted=True, get_result_async=Mock(side_effect=['first', 'terminal']),
+                             cancel_goal_async=Mock(return_value='cancel'))
+    client = SimpleNamespace(wait_for_server=Mock(return_value=True),
+                             send_goal_async=Mock(return_value='accepted'))
+    operations = []
+    def result(future, timeout, operation):
+        """Return mocked responses, failing the first terminal result wait."""
+        operations.append(operation)
+        if future == 'accepted':
+            return handle
+        if future == 'first':
+            raise TimeoutError('fixture timeout')
+        return SimpleNamespace()
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=1.0), result=result,
+                           get_logger=lambda: Mock())
+    with pytest.raises(TimeoutError, match='fixture timeout'):
+        sense_module.SenseNode.perform(node, client, SimpleNamespace())
+    handle.cancel_goal_async.assert_called_once()
+    assert operations[-2:] == ['Listen cancellation', 'terminal Listen result']
