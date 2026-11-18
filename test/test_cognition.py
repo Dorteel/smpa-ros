@@ -6,67 +6,85 @@ import pytest
 
 from smpa_ros.backends.ollama import OllamaBackend
 from smpa_ros.backends.transformers import TransformersBackend
-from runner import Runner
 
 
-def test_cycle_order_and_independent_backends():
-    from smpa_ros.smpa import run
-    runner = MagicMock()
-    runner.experiment_complete = False
-    run(runner, 2)
-    assert [call[0] for call in runner.method_calls] == [
-        'start', 'cycle', 'sense', 'model', 'plan', 'act',
-        'cycle', 'sense', 'model', 'plan', 'act', 'finish']
-    runner.model.assert_called_with(runner.sense.return_value, prompt='default')
-    runner.plan.assert_called_with(runner.model.return_value, prompt='default')
-    runner.act.assert_called_with(runner.plan.return_value, prompt='default')
+def test_cycle_order_and_independent_backends(tmp_path):
+    """Keep two complete cycles explicitly ordered by the experiment script.
+
+    Provide deterministic action results and inspect the actual goals sent to
+    Model, Plan, and Act. The mock implements no cognitive sequencing of its own.
+    """
+    from types import SimpleNamespace
+    from memory import MemoryManager
+    from smpa_ros.smpa import run_actions
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    calls = []
+    results = {'sense': SimpleNamespace(observation='seen', record_path='sense'),
+               'model': SimpleNamespace(world_model='world', record_path='model', snapshot_path='world.md'),
+               'plan': SimpleNamespace(action_json='{"action":"look_left"}', record_path='plan'),
+               'act': SimpleNamespace(success=True)}
+    def invoke(stage, action_type, goal):
+        """Record each requested stage and return its independent fixture result."""
+        calls.append((stage, goal))
+        return results[stage]
+    run_actions(memory, 2, invoke)
+    assert [stage for stage, goal in calls] == ['sense', 'model', 'plan', 'act'] * 2
+    assert calls[1][1].observation == 'seen'
+    assert calls[2][1].world_model == 'world'
+    assert calls[3][1].action_json == '{"action":"look_left"}'
+    assert all(goal.run_id == memory.metadata['run_id'] for stage, goal in calls)
+    memory.finalize('completed')
 
 
 @pytest.mark.parametrize('complete, expected', [(False, 3), (True, 1)])
 def test_experiment_completion_between_full_cycles(tmp_path, complete, expected):
-    from smpa_ros.smpa import run
+    """Finish the whole current cycle before respecting refinement completion.
+
+    Mark refinement complete during Sense when requested. The script still sends
+    Model, Plan and Act before stopping; a separate new run starts independently.
+    """
+    from types import SimpleNamespace
+    from memory import MemoryManager
+    from smpa_ros.smpa import run_actions
+    memory = MemoryManager(tmp_path, goal='Find cup')
     events = []
-
-    def sense(directory, cycle):
-        events.append('sense')
-        # Even a flag set during Sense must allow the full cycle to finish.
-        runner.experiment_complete = complete
-        return 'A red cup.'
-
-    def model(prompt, **settings):
-        events.append('model')
-        return '# World Model\nA red cup.'
-
-    def plan(prompt, **settings):
-        events.append('plan')
-        return '{"action":"look_left"}'
-
-    def act(action, record):
-        events.append('act')
-        record.update(goal_accepted=True, result_status=4, success=True)
-
-    with Runner(root=tmp_path, max_cycles=3, sense=sense, model=model, plan=plan, act=act) as runner:
-        assert runner.experiment_complete is False
-        run(runner, runner.limit)
-        assert events == ['sense', 'model', 'plan', 'act'] * expected
-        assert runner.memory.metadata['completed_cycles'] == expected
-        assert runner.memory.metadata['status'] == 'completed'
-        assert runner.memory.in_cycle is False
-        assert runner.limit == 3
-        runner.experiment_complete = True
-        runner.start(goal='# Another experiment')
-        assert runner.experiment_complete is False
+    results = {'sense': SimpleNamespace(observation='seen', record_path='sense'),
+               'model': SimpleNamespace(world_model='world', record_path='model', snapshot_path='world.md'),
+               'plan': SimpleNamespace(action_json='{"action":"look_left"}', record_path='plan'),
+               'act': SimpleNamespace(success=True)}
+    def invoke(stage, action_type, goal):
+        """Record a stage and optionally complete refinement during Sense."""
+        events.append(stage)
+        if stage == 'sense' and complete:
+            (memory.directory / 'state/refinement.json').write_text(json.dumps({'status': 'completed'}))
+        return results[stage]
+    run_actions(memory, 3, invoke)
+    memory.finalize('completed')
+    assert events == ['sense', 'model', 'plan', 'act'] * expected
+    assert memory.metadata['completed_cycles'] == expected
+    assert memory.metadata['status'] == 'completed' and not memory.in_cycle
+    another = MemoryManager(tmp_path, goal='# Another experiment')
+    assert another.metadata['status'] == 'running' and another.metadata['run_id'] != memory.metadata['run_id']
+    another.finalize('completed')
 
 
-def test_failed_stage_stops_cycle():
-    from smpa_ros.smpa import run
-    runner = MagicMock()
-    runner.sense.side_effect = RuntimeError('inference failed')
+def test_failed_stage_stops_cycle(tmp_path):
+    """Stop after a failed Sense action and leave its cycle incomplete.
+
+    The experiment propagates the failure and must not invoke Model, Plan or Act.
+    """
+    from memory import MemoryManager
+    from smpa_ros.smpa import run_actions
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    calls = []
+    def invoke(stage, action_type, goal):
+        """Raise a simulated Sense failure before any later stage can run."""
+        calls.append(stage)
+        raise RuntimeError('inference failed')
     with pytest.raises(RuntimeError, match='inference failed'):
-        run(runner, 1)
-    runner.model.assert_not_called()
-    runner.plan.assert_not_called()
-    runner.act.assert_not_called()
+        run_actions(memory, 1, invoke)
+    assert calls == ['sense'] and memory.metadata['completed_cycles'] == 0
+    memory.finalize('failed')
 
 
 def test_ollama_request_without_server(monkeypatch):
