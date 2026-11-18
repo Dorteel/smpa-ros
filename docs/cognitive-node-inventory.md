@@ -184,5 +184,7 @@ and persisted before inference. A stage temperature must be explicit; null is
 not representable by the current server controls and is rejected. A mismatch
 fails rather than recording settings that were not used. Unit tests with
 mocked backends cover isolation, inheritance, freezing, ownership and forwarding.
+A local ROS parameter-service test also verifies atomic stage initialization and
+conflict rejection with a fake backend.
 Generated action types and end-to-end ROS behavior for the new selector remain
 unverified until the isolated interface build can be completed without throttling.

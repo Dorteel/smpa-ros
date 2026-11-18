@@ -633,3 +633,55 @@ def test_installed_experiment_preserves_camera_evidence(tmp_path):
                 process.terminate()
                 process.join(timeout=5)
         assert all(process.exitcode == 0 for process in processes)
+
+
+def test_stage_initialization_uses_real_parameter_transport(tmp_path):
+    """Acquire stage settings over ROS and reject a conflicting next run.
+
+    Run the actual parameter services and a fake model loader in one local ROS
+    domain. Verify the experiment settings reach the frozen server snapshot,
+    release the owner, and confirm that a conflicting later run cannot change
+    either the explicit override or the server ownership.
+    """
+    import yaml
+    from rclpy.parameter_client import AsyncParameterClient
+    from smpa_llm.server import InferenceServer
+    from smpa_ros.smpa import acquire_inference, release_inference
+    registry = tmp_path / 'models.yaml'
+    registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
+    stages = {name: {'max_output_tokens': tokens, 'temperature': 0.0, 'seed': None,
+                     'reasoning_effort': None} for name, tokens in
+              [('sense', 30), ('model', 40), ('plan', 50)]}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'stage_settings': stages})
+    rclpy.init(args=[])
+    server = InferenceServer(loader=fake_backend_loader,
+                             parameter_overrides=[Parameter('registry_file', value=str(registry))])
+    server.replace_model('fixture')
+    node = Node('stage_initialization_transport_test')
+    parameters = AsyncParameterClient(node, '/llm')
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(server)
+    executor.add_node(node)
+    thread = Thread(target=executor.spin, daemon=True)
+    thread.start()
+    def wait(future, timeout, operation):
+        """Wait for a real parameter service response with a fixed deadline."""
+        return wait_future(future, timeout)
+    try:
+        snapshot = acquire_inference(parameters, memory, wait, 10, {})
+        assert snapshot['stages']['sense']['max_new_tokens'] == 30
+        assert snapshot['stages']['model']['max_new_tokens'] == 40
+        assert snapshot['stages']['plan']['max_new_tokens'] == 50
+        release_inference(parameters, memory.metadata['run_id'], wait, 10, {})
+        stages['model']['max_output_tokens'] = 41
+        other = MemoryManager(tmp_path, goal='Find another cup', configuration={'stage_settings': stages})
+        with pytest.raises(RuntimeError, match='conflicts'):
+            acquire_inference(parameters, other, wait, 10, {})
+        assert server.get_parameter('experiment_run_id').value == ''
+        assert server.get_parameter('models.fixture.stages.model.max_new_tokens').value == 40
+    finally:
+        executor.shutdown(timeout_sec=10)
+        thread.join(timeout=10)
+        node.destroy_node()
+        server.destroy_node()
+        rclpy.shutdown()
