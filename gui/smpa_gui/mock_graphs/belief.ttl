@@ -1,0 +1,21 @@
+# MOCK DATA for GUI development. Not a belief held by SMPA.
+@prefix mock: <https://example.invalid/smpa-gui-mock/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+mock:graph rdfs:comment "Mock Belief graph. Not recorded by SMPA." .
+
+mock:thing_cup a mock:MockEntity ;
+    rdfs:label "mock cup" ;
+    mock:on mock:thing_table ;
+    mock:confidence 0.5 .
+
+mock:thing_table a mock:MockEntity ;
+    rdfs:label "mock table" ;
+    mock:in mock:place_room .
+
+mock:place_room a mock:MockPlace ;
+    rdfs:label "mock room" .
+
+mock:speaker a mock:MockAgent ;
+    rdfs:label "mock speaker" ;
+    mock:refersTo mock:thing_cup .

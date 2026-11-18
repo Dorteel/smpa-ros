@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run the GUI's own tests. Requires ./install_gui.sh --dev.
-#   ./test_gui.sh              unit tests and ROS integration tests (real fixture nodes and action servers)
+#   ./test_gui.sh              unit tests, ROS integration tests (real fixture nodes, action servers, parameter
+#                              and service fixtures) and packaging tests (colcon build, ros2 run, ros2 launch)
 #   ./test_gui.sh --browser    also drive the frontend in a headless browser; needs
 #                              Playwright with Chromium in the interpreter named by
 #                              SMPA_GUI_BROWSER_PYTHON (default: python3)
@@ -16,7 +17,7 @@ if ! "$gui/.venv/bin/python" -c 'import rclpy' 2>/dev/null; then
 fi
 "$gui/.venv/bin/python" -c 'import pytest, httpx' 2>/dev/null || fail 'Test packages are missing; run ./install_gui.sh --dev.'
 cd "$gui"
-"$gui/.venv/bin/python" -m pytest tests/test_units.py tests/test_frontend_logic.py tests/test_ros_integration.py tests/test_actions.py tests/test_smpa_runs.py tests/test_smpa_integration.py -v
+"$gui/.venv/bin/python" -m pytest test/test_units.py test/test_frontend_logic.py test/test_ros_integration.py test/test_actions.py test/test_smpa_runs.py test/test_smpa_integration.py test/test_management.py test/test_dialogue_units.py test/test_conversation.py test/test_workspace.py test/test_dialogue_coordinator.py test/test_ros_clients.py test/test_dialogue_ros.py test/test_packaging.py -v
 if [[ "${1:-}" == --browser ]]; then
-    GUI_TEST_PYTHON="$gui/.venv/bin/python" "${SMPA_GUI_BROWSER_PYTHON:-python3}" -m pytest tests/test_browser.py tests/test_browser_actions.py tests/test_browser_smpa.py -v
+    GUI_TEST_PYTHON="$gui/.venv/bin/python" "${SMPA_GUI_BROWSER_PYTHON:-python3}" -m pytest test/test_browser.py test/test_browser_actions.py test/test_browser_smpa.py test/test_browser_management.py test/test_browser_dialogue.py test/test_browser_cognition.py test/test_browser_workspace.py -v
 fi

@@ -1,11 +1,37 @@
-# Gateway API, contract version 1.2
+# Gateway API, contract version 1.8
 
 Base URL: `http://127.0.0.1:8765/api/v1`. All routes are read-only (HTTP `GET` or
-WebSocket) except the two `POST` routes under [Action execution](#action-execution).
-Version 1.1 added the `/actions/...` routes and 1.2 the read-only `/smpa/...` routes;
-nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
+WebSocket) except the `POST` routes for sending and cancelling action goals
+([Action execution](#action-execution)), [setting parameters](#parameter-management),
+[calling services](#service-management), the [SMPA conversation](#smpa-conversation)
+routes, which relay to SMPA's own conversation server, and the [Dialogue](#dialogue-over-ros-2)
+routes and the robot-run and model-loading routes, which call SMPA's stage actions, run control
+and inference server over ROS 2. All of them follow the same
+[access rules](#access-rules-for-the-post-routes).
+Version 1.1 added the `/actions/...` routes, 1.2 the read-only `/smpa/...` session
+routes, 1.3 (GUI v4 patch) the conversation, layout, model and graph routes, and 1.4
+(GUI v5) the parameter-change and service routes, parameter descriptors, `/session` and
+`/smpa/status.enabled`. Version 1.5 (GUI v6) combines 1.3 and 1.4 and adds `candidates`
+and `fallback` to transcript and graph answers. Version 1.6 (GUI v7) adds the read-only
+parameter overview `GET /ros/parameters` ([Parameter management](#parameter-management))
+for the ROS 2 Workspace. Version 1.7 adds [`GET /smpa/ros`](#get-smparos) and the
+[Dialogue routes](#dialogue-over-ros-2) (the SMPA section formerly called Dashboard is
+now called Dialogue; no route changed name). Version 1.8 (GUI v9) calls SMPA's merged stage
+actions, adds the Act decision route, the [robot run and model loading](#robot-run-and-model-loading-confirmed-changes)
+routes, the [recorded cognitive history](#recorded-cognitive-history) routes, `stages`,
+`model_load` and `live` in `GET /smpa/ros`, and the `steps`, `confirm_act` and new event
+fields of the Dialogue. Nothing earlier changed. Every JSON response contains `contract_version`. ROS names are passed as
 URL-encoded query parameters because they contain slashes. A machine-readable
 description of the HTTP routes is served at `/api/openapi.json`.
+
+**Non-finite numbers.** JSON has no NaN or infinity, but ROS values can hold them (a
+double parameter, an element of a double array, the bounds of a floating-point range).
+Every JSON answer, at any depth, carries them as the strings `"nan"`, `"inf"` and
+`"-inf"`, the names the topic echo already used. Finite numbers, integers and types are
+unchanged, so a parameter of type `double` whose value is `"nan"` is NaN, while a
+`string` parameter with the text `"nan"` is text. These names are for display: a change
+request whose value is such a name, or a raw `NaN`/`Infinity` token, is refused with
+`422` (`must be a finite number`); the GUI does not set non-finite values.
 
 Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
 `404` unknown topic, `415` data that cannot be drawn, `503` ROS gateway unavailable,
@@ -16,7 +42,7 @@ Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
 ### `GET /health`
 
 ```json
-{"contract_version": "1.2", "status": "ok",
+{"contract_version": "1.4", "status": "ok",
  "ros": {"ok": true, "node": "/smpa_gui", "domain_id": 0, "rmw": "rmw_fastrtps_cpp", "distro": "jazzy"},
  "active_subscriptions": [{"topic": "/scan", "type": "sensor_msgs/msg/LaserScan", "viewers": 1}]}
 ```
@@ -26,7 +52,7 @@ Errors use HTTP status codes with a JSON body `{"detail": "..."}`:
 ### `GET /ros/graph`
 
 ```json
-{"contract_version": "1.2", "stamp": 1794679890.5,
+{"contract_version": "1.4", "stamp": 1794679890.5,
  "nodes":   [{"id": "node:/talker", "name": "talker", "namespace": "/", "full_name": "/talker",
               "hidden": false, "is_gateway": false}],
  "topics":  [{"id": "topic:/chatter", "name": "/chatter", "types": ["std_msgs/msg/String"],
@@ -63,10 +89,17 @@ The result is cached for one second.
 ### `GET /ros/nodes/parameters?node=<full node name>&timeout=<seconds, 0.2–10, default 2>`
 
 ```json
-{"contract_version": "1.2", "node": "/talker", "state": "ok",
- "parameters": [{"name": "use_sim_time", "type": "bool", "value": false,
-                 "description": "", "read_only": false}]}
+{"contract_version": "1.4", "node": "/talker", "state": "ok",
+ "parameters": [{"name": "level", "type": "integer", "value": 4,
+                 "description": "Even level from 0 to 10", "read_only": false, "dynamic_typing": false,
+                 "additional_constraints": "", "declared_type": "integer",
+                 "integer_range": {"from": 0, "to": 10, "step": 2}, "floating_point_range": null,
+                 "descriptor_known": true}]}
 ```
+
+The descriptor fields come from the node's `describe_parameters` answer. When the node
+gave no descriptor, `descriptor_known` is `false` and `read_only`/`dynamic_typing` are
+`null`.
 
 `state` is `ok`, `not_responding` (the node did not answer in time; it may be busy or
 not spinning) or `unavailable` (the node offers no parameter services or does not
@@ -148,27 +181,30 @@ are sent as `null`.
 
 ## Action execution
 
-These routes are the only way the gateway acts on ROS. They send and cancel action
-goals; there is no route for publishing, service calls or parameter writes.
+These routes send and cancel action goals. Together with the parameter-change and
+service-call routes below, they are the only ways the gateway acts on ROS; there is no
+route for publishing on topics.
 
 ### Access rules for the `POST` routes
 
-A `POST` is accepted only if all of the following hold; otherwise the status is `403`
-(or `415`/`422` for a body that is not declared as JSON):
+A `POST` (goal, cancellation, parameter change, service call or conversation change) is accepted only if all
+of the following hold; otherwise the status is `403` (or `415`/`422` for a body that is
+not declared as JSON):
 
-1. Action execution is enabled (the server was not started with `--read-only`).
+1. Changes are enabled (the server was not started with `--read-only`).
 2. The TCP connection comes from a loopback address.
 3. The `Host` header names `127.0.0.1`, `localhost` or `::1`.
 4. An `Origin` header, if present, is a local origin.
 5. `Content-Type` is `application/json`.
 6. The header `X-SMPA-GUI-Token` carries the current session token.
 
-`GET /actions/session` is subject to rules 2–4.
+`GET /session` is subject to rules 2–4.
 
-### `GET /actions/session`
+### `GET /session` (also `GET /actions/session`)
 
 `{"enabled": true, "token": "<session token>", "cancel_on_exit": true}`. The token is
-random per gateway process. In read-only mode `enabled` is `false` and `token` is `null`.
+random per gateway process and authorises every `POST` route (goals, parameters, services, conversation). In read-only mode
+`enabled` is `false` and `token` is `null`. `/actions/session` is the original name.
 
 ### `GET /actions/servers`
 
@@ -256,18 +292,116 @@ exist for goals sent by this gateway process since it started (at most 200).
 | `failed` | Sending or waiting failed inside the gateway (`error` explains) |
 | `lost` | The action server disappeared while the goal was active; outcome unknown |
 
-## SMPA sessions (read-only)
+## Parameter management
+
+### `GET /ros/parameters?timeout=<seconds, 0.2–5, default 1>`
+
+Read-only overview of every visible node's parameters (hidden nodes are left out), used
+by the ROS 2 Workspace. Each node is read exactly like `GET /ros/nodes/parameters`, up to
+eight nodes at a time, so an unresponsive node costs one timeout and does not hide the
+others. The GUI's own node is listed with `is_gateway: true` and `state: "unavailable"`
+without being asked (it offers no parameter services).
+
+```json
+{"contract_version": "1.8", "timeout": 1.0,
+ "nodes": [{"node": "/fixture_ns/fixture_parameters", "state": "ok", "is_gateway": false,
+            "parameters": [<as in GET /ros/nodes/parameters>]},
+           {"node": "/fixture_silent", "state": "not_responding", "is_gateway": false, "parameters": []},
+           {"node": "/smpa_gui", "state": "unavailable", "is_gateway": true, "parameters": []}]}
+```
+
+`state` is `ok`, `not_responding`, `unavailable`, or `error` (with `detail`) when reading
+that node failed in the gateway. Nodes keep the order of `GET /ros/nodes`. A timeout
+outside 0.2–5 s gives `422`.
+
+### `POST /ros/parameters/set`
+
+```json
+{"node": "/fixture_mgmt/settings", "atomic": true, "request_id": "param0123abcd",
+ "changes": [{"name": "level", "type": "integer", "value": 6},
+             {"name": "names", "type": "string_array", "value": ["x", "y"]}]}
+```
+
+`type` is one of `bool`, `integer`, `double`, `string`, `byte_array` (list of 0–255),
+`bool_array`, `integer_array`, `double_array`, `string_array`; at most 50 changes, each
+parameter once. The gateway first reads the node's parameters and descriptors afresh
+and checks every change: the parameter exists, is not read-only, keeps its type unless
+dynamic typing allows a change, the value fits the type, and integer/floating-point
+ranges with their step are respected. Any problem answers `422`
+`{"detail", "errors": [{"path", "message"}]}` and nothing is sent. A node that does not
+answer answers `409` and nothing is sent. Otherwise the changes are sent once through
+`set_parameters_atomically` (`atomic: true`) or `set_parameters` and the answer is:
+
+```json
+{"change": {"change_id": "param0123abcd", "node": "/fixture_mgmt/settings", "atomic": true,
+  "outcome": "applied|rejected|partial|unknown|unavailable", "requested_at": 1794000000.0,
+  "results": [{"name": "level", "type": "integer", "value": 6, "previous_type": "integer",
+               "previous_value": 4, "successful": true, "reason": ""}],
+  "parameters": [<parameters read back, as in GET /ros/nodes/parameters>], "read_back_state": "ok"}}
+```
+
+`unknown` means the node did not answer in time: the changes may or may not have been
+applied; they are not retried (`successful` is `null`). Repeating a `request_id`
+returns the first record with `"duplicate": true` and changes nothing.
+
+### `GET /ros/parameters/changes`
+
+`{"changes": [<change record>, ...]}` made through this GUI process, newest first (at most 200).
+
+## Service management
+
+### `GET /ros/services`
+
+```json
+{"services": [{"name": "/fixture/add_two_ints", "types": ["example_interfaces/srv/AddTwoInts"],
+               "kind": "other", "hidden": false,
+               "providers": ["/fixture_mgmt/services"], "clients": []}]}
+```
+
+`kind` is `parameter` (standard parameter services), `action` (action plumbing),
+`type_description`, or `other`. Providers and clients are node names.
+
+### `GET /ros/services/interface?type=<pkg/srv/Name>`
+
+`{"type", "request": <schema>, "request_default": {...}, "response": <schema>}` with
+schemas as for action goals. `404` when the type is not available in the GUI's environment.
+
+### `POST /ros/services/call`
+
+`{"service": "/fixture/add_two_ints", "type": "example_interfaces/srv/AddTwoInts",
+"request": {"a": 2, "b": 40}, "request_id": "svc0123abcd", "timeout": 10}` (timeout
+0.5–60 s). Invalid values answer `422` with `errors`; an unavailable type `404`; no
+provider within two seconds `409` (nothing sent). Otherwise the request is sent once
+and the answer is the call record:
+
+```json
+{"call": {"call_id": "…", "request_id": "svc0123abcd", "service": "…", "type": "…", "request": {…},
+          "state": "succeeded|timed_out|server_lost|failed", "response": {"sum": 42}, "error": null,
+          "timeout": 10, "created_at": 1794000000.0, "finished_at": 1794000000.1}}
+```
+
+`timed_out` (no response in time) and `server_lost` (the provider left the ROS graph
+while waiting) answer `504`: the outcome is unknown and the call is not repeated.
+Repeating a `request_id` returns the first record with `"duplicate": true`.
+
+### `GET /ros/services/calls`, `GET /ros/services/calls/{call_id}`
+
+`{"calls": [<call record>, ...]}` newest first (at most 200), or `{"call": <call record>}`.
+
+## SMPA sessions (read-only, optional)
 
 These routes read SMPA's memory directory (`--memory-root`, `SMPA_GUI_MEMORY_ROOT`, or
-`memory/` beside `gui/`). They never write. When no memory directory is configured,
+`memory/` beside the source checkout). They never write. With SMPA integration
+disabled (`--no-smpa`) `/smpa/status` says `"enabled": false` and the other routes
+answer `404` saying so. When no memory directory is configured,
 `/smpa/status` says so and the other routes answer `404` with an explanation. The data
 sources behind each field are listed in [SMPA_CONTRACTS.md](SMPA_CONTRACTS.md).
 
 ### `GET /smpa/status`
 
-`{"configured": true, "memory_root": "/…/smpa-ros/memory", "demonstration": false}`.
+`{"enabled": true, "configured": true, "memory_root": "/…/smpa-ros/memory", "demonstration": false}`.
 `demonstration` is true when the directory carries the GUI marker `.smpa-gui-demo`
-(written only by `tests/fixtures/smpa_memory.py --demo`).
+(written only by `test/fixtures/smpa_memory.py --demo`).
 
 ### `GET /smpa/sessions`, `GET /smpa/sessions/{session_id}`
 
@@ -332,3 +466,313 @@ changes; clients can skip redrawing when it is unchanged.
 One recorded file of the session (`.png`, `.wav`, `.md`, `.json`, `.txt`) with its media
 type; byte ranges are supported. Paths outside the session directory, through links
 leading outside, or with other suffixes give `404`.
+
+## SMPA conversation
+
+The GUI implements no conversation logic. These routes start (on demand) and relay to
+SMPA's own `smpa_ros.conversation_web` server, or to an external one when
+`conversation_url` is configured. The `POST` routes follow the
+[access rules](#access-rules-for-the-post-routes) of the action routes, with the same
+session token; with `--read-only` they answer `403`. With SMPA integration disabled
+(`--no-smpa`) every `/smpa/...` Dialogue route answers `404` saying so. Each `POST` answers with
+`{"conversation": <status>}`; on failure the status code says why and `detail` carries
+SMPA's or the GUI's explanation, together with the current `conversation`.
+
+| Status | Meaning |
+|---|---|
+| `403` | Not local, no token, or read-only |
+| `404` | Unknown session (resume) or no SMPA agent for that model source |
+| `409` | Busy with another request; no conversation active; SMPA refused (for example missing weights); server prerequisites missing; port in use |
+| `502` | SMPA's server failed: it could not start (see `log`), or inference failed (the message is saved) |
+| `503`, `504` | SMPA's server is unreachable or did not start in time |
+
+### `GET /smpa/layout`
+
+The effective paths: `smpa_root`, `config`, `python`, `model_root`, `memory_root`,
+`conversation_port`, `conversation_url`, `mock_graphs`, `smpa_layout` (`packages`, `flat`
+or `null` when no SMPA checkout is configured), `files` (`conversation`, `sense`,
+`belief`, `plan`: each a list of candidate paths relative to a run directory, the first
+existing one is used), the layout file used (`source`), and
+`python_present`, `config_present`, `conversation_server_present`.
+
+### `GET /smpa/models`
+
+```json
+{"models": [{"source": "api:openai", "kind": "api", "name": "openai", "provider": "openai", "backend": "api",
+             "model_id": "gpt-4.1-mini", "revision": null,
+             "description": "API provider openai, model gpt-4.1-mini, endpoint https://api.openai.com/v1, credentials from OPENAI_API_KEY.",
+             "availability": {"state": "likely|available|unavailable|unknown", "verified": false, "detail": "…"},
+             "default": false, "modelling_agent": false, "agent_id": null, "label": "…(when verified)"}],
+ "problems": [], "config": "/…/config.yaml", "verified_by": "gui_precheck|conversation_server"}
+```
+
+`source` is SMPA's name for the choice. Until SMPA's server runs, availability is the
+GUI's precheck (`verified: false`); afterwards it is SMPA's verdict and `agent_id` is
+SMPA's agent id. Secrets are never returned, only the name of the credential variable.
+
+### `GET /smpa/conversation`
+
+The conversation status:
+
+```json
+{"conversation": {"mode": "managed|external", "url": "http://127.0.0.1:8766",
+  "phase": "stopped|starting|ready|busy|failed|unreachable",
+  "operation": {"kind": "start|resume|model|message|stop", "elapsed_s": 3.1, "text": "…(message)"},
+  "pid": 1234, "error": null, "exit_code": null, "run_id": "…", "session_id": "…",
+  "active_agent": {"id": "api:openai:…", "source": "api:openai", "label": "API · openai · …"},
+  "agents": [{"source": "…", "id": "…", "label": "…", "available": true, "availability": "…"}],
+  "messages": [{"index": 1, "role": "user|assistant", "content": "…", "thinking": null,
+                "agent": {"source": "…", "label": "…", "provider": "…", "model_id": "…", "backend": "…", "model_revision": null}}],
+  "modelling_error": null, "prerequisites_missing": [], "writes_enabled": true, "log": ["…server output…"]}}
+```
+
+`run_id` (equal to `session_id` of `/smpa/sessions`) is the active conversation. While
+SMPA generates a reply, `phase` is `busy` and the last known messages are returned.
+
+### `POST /smpa/conversation/start` `{"source": "api:openai", "request_id": "…"}`
+
+Starts a new SMPA conversation run, then selects the model (`source` optional: SMPA's
+configured default). If SMPA's server is not running it is started, which creates the
+run. Repeating a `request_id` returns the first outcome and starts nothing.
+
+### `POST /smpa/conversation/resume` `{"session_id": "…", "request_id": "…", "source": null}`
+
+Reopens a recorded conversation session in SMPA (starting the server with `--resume`
+or switching a running one). SMPA restores the model recorded in the run.
+
+### `POST /smpa/conversation/model` `{"source": "local:qwen3-4b"}`
+
+Switches the active conversation's model; SMPA records the change in the run.
+
+### `POST /smpa/conversation/messages` `{"text": "…", "request_id": "…"}`
+
+Sends one message and answers when SMPA has saved it and its reply (this can take
+minutes for local models). Repeating a `request_id` does not send twice.
+
+### `POST /smpa/conversation/stop` `{}`
+
+Stops the server the GUI started (SIGINT; SMPA finalizes the run). For an external
+server only the GUI's state is cleared.
+
+### `GET /smpa/sessions/{session_id}/conversation`
+
+The recorded transcript at the first existing `files.conversation` candidate in that run,
+read-only: `{"state": "ok|partial|missing|unavailable", "path", "configured_path"` (the
+candidate used), `"candidates", "fallback"` (true when it is not the first candidate),
+`"revision",
+"active", "messages": [as above], "problem"}`. `partial` means the complete messages
+before an incomplete or invalid entry.
+
+### `GET /smpa/graphs/{view}?source=real|mock&session_id=`
+
+`view` is `sense`, `belief` or `plan`. `real` reads the first existing `files.<view>`
+candidate in the session's run (`configured_path` names it, `candidates` lists all,
+`fallback` is true when it is not the first; when none exists the first is reported as
+`missing`);
+`mock` reads `<mock_graphs>/<view>.ttl` and is always marked `"mock": true`.
+
+```json
+{"view": "belief", "source": "real", "mock": false, "session_id": "…",
+ "configured_path": "world_model/belief.ttl", "path": "/…/runs/…/world_model/belief.ttl",
+ "candidates": ["world_model/belief.ttl", "belief-state.ttl"], "fallback": false,
+ "state": "ok|missing|empty|malformed|unavailable", "revision": "sha1 prefix of the content",
+ "modified_at": "…", "size": 123, "triples": 6, "truncated": false, "error": null,
+ "prefixes": {"ex": "http://example.org/"},
+ "nodes": [{"id": "http://example.org/cup", "label": "ex:cup", "iri": "…", "blank": false,
+            "literals": [{"predicate": "…", "predicate_label": "ex:colour", "value": "red", "datatype": null, "language": null}]}],
+ "edges": [{"id": "…", "source": "…", "target": "…", "predicate": "…", "label": "ex:on"}]}
+```
+
+No vocabulary is interpreted. `revision` changes exactly when the file content changes,
+so clients redraw only then. At most 5000 triples are returned (`truncated`).
+
+## SMPA over ROS 2
+
+These routes use SMPA's interface package `smpa_ros_interfaces` from the ROS environment
+the GUI was started in. Without it (SMPA's workspace not sourced) every answer below
+names the state `interface_missing`; nothing else is affected. Endpoint names come from
+the layout file's `ros.endpoints` section (defaults: `/smpa/get_status`, `/smpa/events`, `/smpa/start`,
+`/smpa/stop`, `/llm/list_models`, `/llm/get_model_status`, `/llm/inference_status`,
+`/llm/load_model`; the stage actions are `/smpa/sense|model|plan|act`; see
+`layouts/dialogue-ros.yaml`). With `--no-smpa` they answer `404` like the other SMPA routes.
+
+A failed ROS call is described by a **state**: `interface_missing`, `invalid_request`,
+`unavailable` (no server answered within about one second), `rejected` (the action
+server refused the goal), `timed_out` (no answer in time; the outcome is unknown),
+`aborted`, `canceled`, `failed`, or, for a Dialogue stage, `pending` (marked as not
+available in the layout file). Nothing is retried automatically.
+
+### `GET /smpa/ros`
+
+**Live.** Asks SMPA's run control (`GetSmpaStatus`) and inference server (`ListModels`,
+`GetModelStatus`) once each, side by side, with a two-second timeout, and reads the ROS
+graph for the four stage action servers. Read-only: nothing is started, stopped or loaded.
+
+```json
+{"live": true,
+ "endpoints": {"smpa_get_status": "/smpa/get_status", "smpa_start": "/smpa/start", "...": "..."},
+ "robot": {"state": "ok", "endpoint": "/smpa/get_status", "run_state": "running",
+           "run_id": "…", "active_stage": "model"},
+ "inference": {"models": {"state": "ok", "endpoint": "/llm/list_models", "model_ids": ["qwen3-4b"]},
+               "status": {"state": "ok", "endpoint": "/llm/get_model_status", "server_state": "ready",
+                          "active_model": "qwen3-4b", "...": "..."}},
+ "stages": {"sense": {"endpoint": "/smpa/sense", "type": "smpa_ros_interfaces/action/Sense",
+                      "available": true, "servers": ["/sense_stage"]}, "model": {}, "plan": {}, "act": {}},
+ "model_load": null}
+```
+
+`model_load` is the last load started from this GUI: `{"model_id", "state":
+"loading"|"loaded"|"failed"|<call state>, "started_at", "finished_at", "error"}`.
+`server_state: "error"` means SMPA's inference server reported a backend failure; it
+refuses new runs and conversation belief updates until a request succeeds or a model is
+loaded again.
+
+### Robot run and model loading (confirmed changes)
+
+These routes follow the [access rules](#access-rules-for-the-post-routes) (local page,
+`X-SMPA-GUI-Token`, request id, refused in read-only mode). The page asks for a
+confirmation first; a repeated `request_id` returns the first answer with `"duplicate": true`.
+A failed ROS call answers `503` (no server), `504` (timed out) or `502`, with the reason.
+
+- `POST /smpa/ros/run/start` `{"goal": "…", "request_id": "…"}` → `{"run": {"accepted": true, "run_id": "…"}}`.
+  Calls SMPA's `StartSmpa`. **SMPA's experiment then senses, plans and acts on its own;
+  it may move the robot.**
+- `POST /smpa/ros/run/stop` `{"request_id": "…"}` → `{"run": {"accepted": true}}`. Calls `StopSmpa`.
+- `POST /smpa/ros/llm/load` `{"model_id": "…", "request_id": "…"}` → `202 {"model_load": {…}}`.
+  Sends SMPA's `LoadModel` action and follows it in the background (`GET /smpa/ros`
+  `model_load`, stream event `model_load`). `409` while a load from this GUI runs.
+
+## Recorded cognitive history
+
+**Persisted, read-only.** Read from the session's run directory as SMPA's stages wrote it;
+nothing is inferred or written.
+
+### `GET /smpa/sessions/{session_id}/records?stage=sense|model|plan|act`
+
+All stage records (`state/cycle_*/*.json`), or one stage's, in SMPA's invocation order
+(`sequence`), at most the latest 500; `revision` changes whenever a record file changes.
+
+```json
+{"session_id": "…", "stage": "plan", "revision": "3f2a…", "file_url": "…",
+ "records": [{"path": "state/cycle_000001/plan.json", "cycle": 1, "stage": "plan",
+   "kind": "stage"|"belief_update"|"conversation", "status": "generated"|"failed"|"…"|"unreadable",
+   "sequence": 3, "invocation": 1, "started_at": "…", "prompt_name": "default", "error": null,
+   "links": [{"relation": "source"|"previous"|"evidence"|"produced_snapshot"|"previous_snapshot"|"observation",
+              "path": "state/cycle_000001/model.json", "kind": "record"|"snapshot"|"image"|"audio"|"text"|"json"|"file",
+              "exists": true, "outside": false}],
+   "summary": {"selected_action": "observe", "parameters": {}, "available_actions": ["observe"], "...": "..."},
+   "record": {<the record, long texts shortened>}, "truncated": false}]}
+```
+
+`links` are only those the record states (`source_record`, `previous_record`,
+`source_observations`, `iteration`, `previous_iteration`, `observation_record`). A link
+outside the run is reported with `outside: true` and is never served. `summary` fields per
+stage: Sense `output`, `read_cursor`; Model `iteration`, `previous_iteration`,
+`model_identifier`, `output` (belief updates: `proposals`, `agent`, `ontology_sha256`);
+Plan `selected_action`, `parameters`, `available_actions`, `output`; Act
+`requested_action`, `parameters`, `goal`, `goal_accepted`, `result_status`, `success`,
+`result`, `feedback`, `reason`, `output`, `observation_record`. Belief updates of a
+conversation (`prompt_name: conversation-belief`) are Model records of kind `belief_update`.
+Files are opened through `GET /smpa/sessions/{id}/files?path=…`.
+
+### `GET /smpa/sessions/{session_id}/world-model`
+
+The world-model snapshot history (`world_model/iteration_*.md`), oldest first, each with
+`path`, `size`, `modified_at`, `text` (shortened when long), `truncated` and
+`produced_by` (the Model record whose `iteration` names it, or `null`). SMPA keeps no
+history of the RDF belief graph (only the current `belief-state.ttl`); it is drawn by
+`GET /smpa/graphs/belief`.
+
+## Dialogue over ROS 2
+
+Typed messages always go to SMPA's conversation server ([SMPA conversation](#smpa-conversation));
+its Model stage updates the conversation's beliefs (capability `belief`). Separately, a
+**cognitive step** (a *turn*) calls SMPA's four stage actions once, in order, on the
+robot's running run, exactly as SMPA's experiment does: Sense (`/smpa/sense`), Model
+(`/smpa/model`, with the latest snapshot as `previous_snapshot`), Plan (`/smpa/plan`), Act
+(`/smpa/act`). The GUI only calls them and reads their records; it does not sense, model,
+plan, act or write anything itself.
+
+Steps need the **shared** context and a running robot run with an active cycle (SMPA's
+stages refuse otherwise; only SMPA's experiment creates cycles). **Act waits for a local
+approval** (`confirm_act`, default true). Stage adapters are configured in the layout
+file's `dialogue` section; without one they use SMPA's merged contracts
+(`layouts/dialogue-ros.yaml`). A stage can be marked `pending`, which refuses steps.
+
+### `GET /smpa/dialogue`
+
+```json
+{"dialogue": {"path": "conversation_server", "ros_path_ready": true,
+  "steps": "available"|"independent_context"|"pending_stages", "pending_stages": [],
+  "confirm_act": true,
+  "stages": [{"stage": "sense", "adapter": "ros", "kind": "action", "endpoint": "/smpa/sense",
+              "type": "smpa_ros_interfaces/action/Sense", "request": {}, "outputs": {}, "timeout_s": 120}, "…"],
+  "context": {"mode": "shared", "run_id": null, "session_id": null},
+  "active_turn": null, "turns": [<turn>, "…"]}}
+```
+
+### `POST /smpa/dialogue/context` `{"mode": "shared"|"independent", "run_id": null, "session_id": null}`
+
+**Independent**: the conversation keeps its own beliefs; steps are refused (`409`) with
+that explanation. **Shared**: steps work on `run_id` when given, otherwise on the run
+SMPA's run control reports as running when the step starts (`409` "no running run" when
+there is none).
+
+### `POST /smpa/dialogue/turns` `{"text": "", "request_id": "…"}` → `202 {"turn": <turn>}`
+
+Starts a step in the background and answers at once (`text` is an optional note). `409`
+while a stage is pending, another step runs, or the context cannot be resolved. A repeated
+`request_id` returns the first turn with `"duplicate": true`.
+
+### `POST /smpa/dialogue/turns/{turn_id}/act` `{"approve": true|false, "request_id": "…"}`
+
+The local decision for a turn waiting in `awaiting_act`. Approving calls Act; declining
+ends the turn as `declined` and calls nothing. A second decision is refused (`409`).
+
+### `GET /smpa/dialogue/turns/{turn_id}`, `POST /smpa/dialogue/turns/{turn_id}/retry` `{"request_id": "…"}`
+
+A retry runs a **failed** turn again from the stage that failed, reusing the outputs of
+the stages that succeeded (shown as `skipped`); the new turn has `retry_of`.
+
+### Turn record
+
+```json
+{"turn_id": "…", "message": "", "state": "running"|"awaiting_act"|"completed"|"failed"|"declined"|"interrupted",
+ "retry_of": null, "failed_stage": null, "error": null, "created_at": 0, "finished_at": 0,
+ "values": {"run_id": "…", "context_mode": "shared", "previous_snapshot": "world_model/iteration_001.md",
+            "observation": "…", "sense_record": "state/cycle_000001/sense.json",
+            "world_model": "…", "model_record": "…", "snapshot_path": "…",
+            "action_json": "{…}", "plan_record": "…", "act_success": true, "act_record": "…"},
+ "stages": {"sense": {"state": "succeeded", "started_at": 0, "finished_at": 0, "outputs": {}, "error": null},
+            "model": {}, "plan": {}, "act": {}},
+ "act_decision": {"action": "observe", "...": "..."},
+ "snapshot": {"path": "world_model/iteration_002.md", "model_record": "…"},
+ "belief_before": {"state": "ok", "revision": "…", "...": "..."}, "belief": {"changed": false, "...": "..."}}
+```
+
+Stage states: `waiting`, `running`, `succeeded`, `skipped`, `declined` (Act), or a failure
+state. SMPA's stages abort without a message but record the reason; the GUI appends it
+(`… — recorded reason: …`) from the stage's failed record.
+
+### `WS /smpa/dialogue/stream`
+
+**Live.** Local pages only. First `{"kind": "status", "state": "ok", "relays_unavailable": [],
+"dialogue": <as GET /smpa/dialogue>}`, then the recent events and every new one as
+`{"kind": "data", "event": "…", "at": <time>, …}`:
+
+| `event` | Fields |
+|---|---|
+| `turn_started` | `turn_id`, `message`, `retry_of`, `context` |
+| `stage_started`, `stage_accepted` (`goal_id`), `stage_feedback` (`feedback`), `stage_completed` (`outputs`), `stage_failed` (`state`, `error`) | `turn_id`, `stage` |
+| `model_snapshot` | `turn_id`, `snapshot`, `belief` (as in the turn record) |
+| `act_confirmation_required` | `turn_id`, `run_id`, `action`, `plan_record` |
+| `act_decision` | `turn_id`, `approved` |
+| `turn_completed` | `turn_id`, `run_id`, `sense_record`, `model_record`, `snapshot_path`, `plan_record`, `action_json`, `act_record`, `act_success` |
+| `turn_failed` | `turn_id`, `stage`, `error` |
+| `turn_declined` | `turn_id` |
+| `model_load` | the `model_load` fields of `GET /smpa/ros` |
+| `stage_status` | `stage`, `goals` (`goal_id`, `status`), `active`: the stage action's goal status topic, from any client (also SMPA's experiment) |
+| `smpa_event` | `message`: SMPA's `SmpaEvent` (`run_id`, `stage`, `event`) |
+| `inference_status` | `message`: SMPA's `InferenceStatus` (`state`, `active_model`) |
+
+The relay subscriptions exist only while at least one stream is open.

@@ -1,0 +1,7 @@
+# Test-only model registry: one local model whose weights are deliberately absent,
+# to check that the GUI reports it as unavailable. Not for real use.
+models:
+  absent-local-model:
+    backend: transformers
+    model_id: example/absent-local-model
+    path: text/absent-local-model

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Start the standalone SMPA-ROS GUI. This launcher never installs or builds anything.
-#   ./run_gui.sh [--host 127.0.0.1] [--port 8765]
+#   ./run_gui.sh [--host 127.0.0.1] [--port 8765] [--read-only] [--no-smpa] [--memory-root DIR]
+#                [--smpa-root SMPA_CHECKOUT] [--layout LAYOUT.yaml]
+# This runs the package from its source folder without building it. For the ROS 2 way
+# (colcon build, ros2 run / ros2 launch smpa_gui gui.launch.py) see README.md.
 # Environment:
 #   SMPA_GUI_ROS_SETUP  ROS 2 setup.bash to source (default: /opt/ros/$ROS_DISTRO or jazzy)
 #   SMPA_GUI_OVERLAY    workspace install/setup.bash providing custom message types,
@@ -42,4 +45,4 @@ else
 fi
 
 cd "$gui"
-exec "$gui/.venv/bin/python" -m backend "$@"
+exec "$gui/.venv/bin/python" -m smpa_gui "$@"

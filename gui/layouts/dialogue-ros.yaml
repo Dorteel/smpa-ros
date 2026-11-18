@@ -1,0 +1,33 @@
+# Dialogue over ROS 2: the ROS endpoints of SMPA's interfaces and the Dialogue's stage adapters.
+# Use it with:
+#   ros2 launch smpa_gui gui.launch.py smpa_layout:=$(ros2 pkg prefix smpa_gui)/share/smpa_gui/layouts/dialogue-ros.yaml
+# Every entry is optional. This file states the defaults; copy it and change what differs
+# (for example when SMPA's nodes run in a namespace).
+ros:
+  endpoints:                                    # SMPA's nodes launched without a namespace use these names
+    smpa_get_status: /smpa/get_status           # smpa_control, smpa_ros_interfaces/srv/GetSmpaStatus
+    smpa_events: /smpa/events                   # smpa_control, smpa_ros_interfaces/msg/SmpaEvent
+    smpa_start: /smpa/start                     # smpa_control, smpa_ros_interfaces/srv/StartSmpa (confirmed in the GUI)
+    smpa_stop: /smpa/stop                       # smpa_control, smpa_ros_interfaces/srv/StopSmpa (confirmed in the GUI)
+    llm_list_models: /llm/list_models           # llm_server, smpa_ros_interfaces/srv/ListModels
+    llm_get_model_status: /llm/get_model_status # llm_server, smpa_ros_interfaces/srv/GetModelStatus
+    llm_inference_status: /llm/inference_status # llm_server, smpa_ros_interfaces/msg/InferenceStatus
+    llm_load_model: /llm/load_model             # llm_server, smpa_ros_interfaces/action/LoadModel (confirmed in the GUI)
+dialogue:
+  context: independent      # independent: the conversation keeps its own beliefs; shared: steps work on the robot's running run
+  confirm_act: true         # Act waits for a local approval in the GUI before SMPA's Act stage is called
+  # Without entries, every stage uses SMPA's merged stage actions, with the requests SMPA's experiment sends:
+  #   sense  /smpa/sense  smpa_ros_interfaces/action/Sense  {run_id}                                 -> observation, record_path
+  #   model  /smpa/model  smpa_ros_interfaces/action/Model  {run_id, observation, source_record,
+  #                                                          previous_snapshot}                      -> world_model, record_path, snapshot_path
+  #   plan   /smpa/plan   smpa_ros_interfaces/action/Plan   {run_id, world_model, source_record}     -> action_json, record_path
+  #   act    /smpa/act    smpa_ros_interfaces/action/Act    {run_id, action_json, source_record}     -> success, record_path
+  # An entry replaces parts of a stage's adapter, for example another endpoint or a prompt:
+  #   stages:
+  #     plan:
+  #       endpoint: /robot/smpa/plan
+  #       request: {run_id: '{run_id}', capability: '', prompt_name: 'plan-careful', world_model: '{world_model}',
+  #                 source_record: '{model_record}'}
+  #       timeout_s: 300
+  # "pending" marks a stage as not available (steps are refused and say so):
+  #   stages: {act: pending}

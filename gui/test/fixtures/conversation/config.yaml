@@ -1,0 +1,17 @@
+# Test-only SMPA configuration for the GUI's conversation tests.
+# It selects a local OpenAI-compatible stub (tests/fixtures/openai_stub.py) as the
+# conversation provider, so SMPA's real conversation server runs without weights or
+# credentials. The base_url port is replaced by the tests. Not for real use.
+stub:
+  base_url: http://127.0.0.1:STUB_PORT/v1
+  api_key_env: SMPA_GUI_STUB_API_KEY
+  models:
+    text: stub-model
+    vision: stub-model
+  timeout: 30
+conversation:
+  agent: api:stub
+  modelling_agent: api:stub
+stage_settings:
+  model:
+    max_output_tokens: 256
