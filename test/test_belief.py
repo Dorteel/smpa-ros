@@ -12,8 +12,23 @@ from rdflib import Graph, URIRef
 from rdflib.namespace import RDF, DCTERMS, OWL, RDFS
 
 from smpa_ros.belief import ontology_graph, read_graph, validate_triples, graph_view, triple_schema
-from smpa_ros.conversation import exchange, open_conversation, read_messages
+from smpa_ros.conversation import exchange as conversation_exchange, open_conversation, read_messages
 from smpa_ros.conversation_web import make_server
+
+
+def exchange(memory, message, generate, settings, *, modelling=None, **options):
+    """Exercise conversation and the belief writer with a local test callback.
+
+    The production conversation delegates to ROS Model. This test adapter calls
+    the same existing writer directly so its graph and persistence contracts can
+    still be checked without a generated ROS interface or model backend.
+    """
+    from smpa_ros.belief import model_messages
+    def update_belief(active_memory, messages):
+        """Pass each saved history to the supplied fake belief model."""
+        model_messages(active_memory, modelling, messages)
+    return conversation_exchange(memory, message, generate, settings,
+                                 modelling=update_belief if modelling is not None else None, **options)
 
 
 class BeliefTests(unittest.TestCase):

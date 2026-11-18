@@ -1,8 +1,8 @@
-"""Local browser transport for one conversational run; no ROS initialization.
+"""Local browser transport for conversation and its independent Model action.
 
 A single HTTP server serializes exchanges and owns the transcript lock. The
-existing lazy text-backend loader supplies conversation and belief inference;
-physical robot stages are not invoked.
+existing lazy text backend supplies replies, while the Model and inference
+servers own belief updates. Physical robot stages are not invoked.
 """
 import argparse
 from copy import deepcopy
@@ -220,6 +220,97 @@ def update_generation(memory, agents, overrides):
     memory.write_metadata()
 
 
+def exchange_with_model(memory, message, generate, settings, *, agent, modelling):
+    """Run one conversation exchange while Model owns its belief updates.
+
+    Create an isolated ROS client context and acquire the run's inference freeze.
+    Persist the exact server snapshot, then confirm that the selected belief model,
+    generation controls, memory root and ontology match the configured services.
+    Delegate each saved conversation history through the Model action, retaining
+    outstanding goals until they reach a terminal state. Finally release only this
+    run's freeze after acquisition and stage completion are confirmed. If either
+    remains uncertain, leave the freeze held and report the cleanup failure.
+    """
+    import rclpy
+    from rclpy.action import ActionClient
+    from rclpy.context import Context
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.node import Node
+    from rclpy.parameter_client import AsyncParameterClient
+    from smpa_ros_interfaces.action import Model
+    from smpa_ros.smpa import (acquire_inference, finish_outstanding_stage, invoke_stage,
+        release_inference, resolve_inference_acquisition, verify_inference)
+
+    timeout = 120.0
+    acquisition, outstanding = {}, {}
+    context = Context()
+    rclpy.init(context=context)
+    node = Node('conversation_model_client', context=context)
+    parameters = AsyncParameterClient(node, '/llm')
+    model_parameters = AsyncParameterClient(node, '/model_stage')
+    client = ActionClient(node, Model, '/smpa/model')
+    executor = SingleThreadedExecutor(context=context)
+    executor.add_node(node)
+    def wait(future, seconds, operation):
+        """Wait for a ROS response on this isolated client node."""
+        if seconds <= 0:
+            raise ValueError('ROS operation timeout must be positive')
+        executor.spin_until_future_complete(future, timeout_sec=seconds)
+        if not future.done():
+            raise TimeoutError(f'Timed out waiting for {operation}')
+        return future.result()
+    try:
+        snapshot = acquire_inference(parameters, memory, wait, timeout, acquisition)
+        expected = modelling['agent']['model_id']
+        if snapshot['loading'].get('model_id') != expected:
+            raise RuntimeError('Loaded inference model does not match the conversation belief model')
+        controls = modelling['settings']
+        generation = snapshot['generation']
+        for key in ('max_new_tokens', 'temperature', 'top_p', 'seed'):
+            if key in controls and controls[key] is not None and controls[key] != generation.get(key):
+                raise RuntimeError(f'Frozen inference {key} does not match conversation belief settings')
+        if controls.get('do_sample') is False and generation.get('top_p', 1.0) != 1.0:
+            raise RuntimeError('Frozen inference sampling does not match conversation belief settings')
+        if not model_parameters.wait_for_services(timeout_sec=timeout):
+            raise TimeoutError('Model parameter services are unavailable')
+        response = wait(model_parameters.get_parameters(['memory_root', 'belief_ontology']), timeout, 'Model configuration')
+        root, ontology = (value.string_value for value in response.values)
+        if Path(root).expanduser().resolve() != memory.directory.parent.parent.resolve():
+            raise RuntimeError('Model memory root does not match the conversation run')
+        if (str(Path(ontology).expanduser().resolve()) if ontology else '') != (modelling.get('ontology') or ''):
+            raise RuntimeError('Model ontology does not match the conversation configuration')
+        def update_belief(active_memory, messages):
+            """Send the current persisted conversation history to Model.
+
+            Verify the saved freeze before each request, then preserve message
+            roles and retain any action whose terminal result is unconfirmed.
+            """
+            verify_inference(parameters, active_memory, wait, timeout)
+            goal = Model.Goal(run_id=active_memory.metadata['run_id'], capability='belief',
+                              messages_json=json.dumps(messages, ensure_ascii=False))
+            failures = len(active_memory.metadata.get('belief_failed_records', []))
+            try:
+                invoke_stage(client, goal, wait, timeout, outstanding, result_timeout=timeout * 16 + 30)
+            except RuntimeError:
+                active_memory.write_metadata()
+                if outstanding or len(active_memory.metadata.get('belief_failed_records', [])) == failures:
+                    raise
+                return
+            active_memory.write_metadata()
+        return exchange(memory, message, generate, settings, agent=agent, modelling=update_belief)
+    finally:
+        try:
+            resolve_inference_acquisition(acquisition, wait, 3.0)
+            finish_outstanding_stage(outstanding, wait, 3.0)
+            if acquisition.get('owned'):
+                release_inference(parameters, memory.metadata['run_id'], wait, 3.0, outstanding)
+        finally:
+            executor.shutdown()
+            client.destroy()
+            node.destroy_node()
+            rclpy.shutdown(context=context)
+
+
 def make_server(memory, generate, settings, port=8000, *, agents=None, root=None,
                 configuration=None, default=None, lock=None, modelling=None):
     """Serialize selection and inference requests on the loopback interface."""
@@ -385,9 +476,15 @@ def make_server(memory, generate, settings, port=8000, *, agents=None, root=None
                     snapshot = dict(selected['agent'], model_revision=selected.get('revision'), generation_overrides=deepcopy(profile['overrides']),
                                     generation_defaults=deepcopy(profile['defaults']),
                                     generation_origins=deepcopy(profile['origins']))
-                    exchange(memory, data['message'], selected['generate'], profile['values'], agent=snapshot, modelling=modelling)
+                    if modelling is not None:
+                        exchange_with_model(memory, data['message'], selected['generate'], profile['values'], agent=snapshot, modelling=modelling)
+                    else:
+                        exchange(memory, data['message'], selected['generate'], profile['values'], agent=snapshot)
                 else:
-                    exchange(memory, data['message'], generate, settings, modelling=modelling)
+                    if modelling is not None:
+                        exchange_with_model(memory, data['message'], generate, settings, agent=None, modelling=modelling)
+                    else:
+                        exchange(memory, data['message'], generate, settings)
             except Exception:
                 # Detailed backend errors live in the run record, not browser output.
                 self.reply(500, dict(self.state(), error='Response failed. Your message is saved. Check the selected agent’s generation settings, credentials, local weights or service, and the run record. No fallback was used.'))
@@ -451,8 +548,7 @@ def main(args=None):
     model_settings = dict(selected_model['defaults'], max_new_tokens=2048)
     if 'do_sample' in selected_model['supported']:
         model_settings['do_sample'] = False
-    modelling = dict(generate=selected_model['generate'], agent=selected_model['agent'],
-                     settings=model_settings, ontology=ontology)
+    modelling = dict(agent=selected_model['agent'], settings=model_settings, ontology=ontology)
     lock = None
     memory = None
     server = None
