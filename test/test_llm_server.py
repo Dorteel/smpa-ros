@@ -452,3 +452,19 @@ def test_experiment_release_checks_owner_atomically(server):
                                                   Parameter('experiment_run_id', value='run-c')]).successful
     assert server.get_parameter('experiment_run_id').value == 'run-b'
     assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-b')]).successful
+
+
+def test_shutdown_releases_owned_freeze_after_callbacks_drain(server):
+    """Release an idle experiment freeze when its inference server shuts down.
+
+    Use a second mocked server in the existing ROS context. Destruction must
+    clear ownership and unload its backend without relying on the experiment to
+    have sent a separate release request. No model weights are loaded.
+    """
+    registry = server.get_parameter('registry_file').value
+    other = InferenceServer(loader=lambda values, root, config: SimpleNamespace(),
+                            parameter_overrides=[Parameter('registry_file', value=registry)])
+    other.replace_model('qwen3_4b')
+    assert other.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
+    other.destroy_node()
+    assert other.backend is None

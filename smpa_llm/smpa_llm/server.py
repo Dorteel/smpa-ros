@@ -568,10 +568,18 @@ class InferenceServer(Node):
     def destroy_node(self):
         """Release idle model resources after the executor has drained callbacks.
 
-        Callers must stop and join the executor before destruction. Then unload
-        the sole backend, destroy action servers and let ROS release node handles.
-        This never unloads weights concurrently with a running inference callback.
+        Callers must stop and join the executor before destruction. Release an
+        existing experiment freeze using its owner-checked command, then unload
+        the sole backend, destroy action servers and release ROS node handles.
+        Reject cleanup if an operation is still active rather than unloading its
+        backend. Restarting the server always starts without an experiment owner.
         """
+        from rclpy.parameter import Parameter
+        owner = self.get_parameter('experiment_run_id').value
+        if owner:
+            result = self.set_parameters_atomically([Parameter('experiment_run_id', value='release:' + owner)])
+            if not result.successful:
+                raise RuntimeError(f'Cannot release experiment during shutdown: {result.reason}')
         if self.backend is not None:
             self.release_model()
         for action in self.actions:
