@@ -57,3 +57,25 @@ def test_late_acquisition_must_be_resolved_before_release(tmp_path):
         return SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))
     resolve_inference_acquisition(acquisition, success, 1.0)
     assert acquisition == {'owned': True}
+
+
+def test_acquisition_rejects_a_different_loaded_model(tmp_path):
+    """Reject an inference server whose loaded model differs from the run.
+
+    The server may already own a model with valid sampling values but the wrong
+    identity. Preserve ownership for caller cleanup and do not persist a false
+    snapshot as the experiment's configured model.
+    """
+    memory = MemoryManager(tmp_path, goal='Find cup', models={'model': {'model_id': 'expected'}})
+    snapshot = dict(run_id=memory.metadata['run_id'], server_instance_id='server-a', active_model='fixture',
+                    loading={'model_id': 'other'}, generation={})
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True,
+        set_parameters_atomically=lambda values: SimpleNamespace(result=SimpleNamespace(successful=True, reason='')),
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value=json.dumps(snapshot))]))
+    def wait(future, timeout, operation):
+        """Return each mocked ROS response without executing a model."""
+        return future
+    acquisition = {}
+    with pytest.raises(RuntimeError, match='does not match'):
+        acquire_inference(parameters, memory, wait, 1.0, acquisition)
+    assert acquisition == {'owned': True} and 'inference' not in memory.metadata

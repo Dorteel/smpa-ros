@@ -205,6 +205,11 @@ def acquire_inference(parameters, memory, wait, timeout, acquisition):
             or not snapshot.get('server_instance_id') or not snapshot.get('active_model')
             or not isinstance(snapshot.get('loading'), dict) or not isinstance(snapshot.get('generation'), dict)):
         raise ValueError('Inference server returned an invalid frozen settings snapshot')
+    models = memory.metadata.get('models', {})
+    expected = {models[stage].get('model_id') for stage in ('vision', 'model', 'plan')
+                if isinstance(models.get(stage), dict) and models[stage].get('model_id')}
+    if expected and expected != {snapshot['loading'].get('model_id')}:
+        raise RuntimeError('Loaded inference model does not match the experiment configuration')
     existing = memory.metadata.get('inference')
     if existing is not None and existing != snapshot:
         raise RuntimeError('Inference server or frozen settings changed during this experiment')
