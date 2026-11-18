@@ -26,7 +26,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import yaml
 
-from smpa_ros_interfaces.action import (DescribeImage, DescribeStructuredImage, GenerateStructured, GenerateText,
+from smpa_ros_interfaces.action import (DescribeImage, DescribeStructuredImage, GenerateStructured, GenerateStructuredChat, GenerateText,
                                         LoadModel, SetActiveModel, UnloadModel)
 from smpa_ros_interfaces.msg import InferenceStatus
 from smpa_ros_interfaces.srv import GetModelStatus, ListModels
@@ -157,10 +157,12 @@ class InferenceServer(Node):
                 callback_group=self.group))
         for action_type, name, field in [(GenerateText, 'generate', 'text'),
                 (GenerateStructured, 'generate_structured', 'json_output'),
+                (GenerateStructuredChat, 'generate_structured_chat', 'json_output'),
                 (DescribeImage, 'describe_image', 'description'),
                 (DescribeStructuredImage, 'describe_structured_image', 'json_output')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
-                partial(self.infer, action_type=action_type, result_field=field),
+                partial(self.infer, action_type=action_type, result_field=field,
+                        chat=(name == 'generate_structured_chat')),
                 goal_callback=partial(self.reserve, inference=True), cancel_callback=self.cancel,
                 callback_group=self.group))
         self.change_state('unloaded')
@@ -489,7 +491,7 @@ class InferenceServer(Node):
                 self.busy = False
         return result
 
-    def infer(self, goal_handle, *, action_type, result_field):
+    def infer(self, goal_handle, *, action_type, result_field, chat=False):
         """Generate through the existing backend using one parameter snapshot.
 
         Require a ready backend, then capture generation controls and the immutable
@@ -498,6 +500,8 @@ class InferenceServer(Node):
         before passing it to the backend's constrained generation path. Structured
         image requests forward that schema to the existing vision backend. Decode images
         with the same converter used by legacy Sense. Never synthesize feedback.
+        For chat, validate the role-preserving message list and allow an empty
+        schema for plain responses. Preserve message roles in supported backends.
         Existing blocking backends reject cancellation; successful completion uses
         the native success state and failures abort with a logged diagnostic because
         the agreed minimal inference results contain no error field. Keep weights
@@ -511,13 +515,26 @@ class InferenceServer(Node):
                 values = self.settings(self.active_alias)
                 backend_kind = self.loaded_settings['backend']
             request = goal_handle.request
-            if not request.prompt.strip():
-                raise ValueError('prompt must be nonempty')
+            if chat:
+                prompt = json.loads(request.messages_json)
+                if (not isinstance(prompt, list) or not prompt or any(
+                        not isinstance(message, dict) or set(message) != {'role', 'content'}
+                        or message['role'] not in ('system', 'user', 'assistant')
+                        or not isinstance(message['content'], str)
+                        for message in prompt)):
+                    raise ValueError('messages_json must be a nonempty list of role and content strings')
+                if backend_kind not in ('transformers', 'api'):
+                    raise ValueError('Backend cannot preserve chat roles')
+            else:
+                prompt = request.prompt
+                if not prompt.strip():
+                    raise ValueError('prompt must be nonempty')
             is_image = action_type in (DescribeImage, DescribeStructuredImage)
             if not is_image and not callable(getattr(self.backend, 'generate', None)):
                 raise ValueError('The active model does not support text generation')
-            schema = json.loads(request.json_schema) if result_field == 'json_output' else None
-            if result_field == 'json_output':
+            schema = (json.loads(request.json_schema) if result_field == 'json_output'
+                      and (not chat or request.json_schema.strip()) else None)
+            if result_field == 'json_output' and (not chat or request.json_schema.strip()):
                 validate_generation(dict(response_format='json_schema', output_schema=schema))
                 if backend_kind not in ('transformers', 'api'):
                     raise ValueError('Backend cannot enforce the requested schema')
@@ -535,23 +552,28 @@ class InferenceServer(Node):
                     raise ValueError('The existing image backend does not expose top_p')
                 from smpa_llm.inference.images import image_to_pil
                 output = self.backend.describe(image_to_pil(request.image), request.prompt, **options)
+            elif chat and backend_kind == 'api':
+                output = self.backend.generate_conversation(prompt,
+                    max_new_tokens=values['max_new_tokens'], schema=schema,
+                    temperature=values['temperature'], top_p=values['top_p'],
+                    **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
             elif values['top_p'] != 1.0:
                 if backend_kind == 'transformers':
                     controls = dict(temperature=values['temperature'], top_p=values['top_p'],
                                     do_sample=values['temperature'] > 0)
                     if values['seed'] != -1:
                         controls['seed'] = values['seed']
-                    output = self.backend.generate(request.prompt, **options,
+                    output = self.backend.generate(prompt, **options,
                                                    _conversation_settings=controls)
                 elif backend_kind == 'api':
-                    output = self.backend.generate_conversation(request.prompt,
+                    output = self.backend.generate_conversation(prompt,
                         max_new_tokens=values['max_new_tokens'], schema=schema,
                         temperature=values['temperature'], top_p=values['top_p'],
                         **({'seed': values['seed']} if values['seed'] != -1 else {}))['response']
                 else:
                     raise ValueError('Backend does not expose top_p')
             else:
-                output = self.backend.generate(request.prompt, **options)
+                output = self.backend.generate(prompt, **options)
             output = validate_output(output, 'json_schema' if schema is not None else 'text', schema)
             setattr(result, result_field, output)
             goal_handle.succeed()

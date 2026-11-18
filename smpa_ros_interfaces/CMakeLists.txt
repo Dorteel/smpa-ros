@@ -12,6 +12,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/Talk.action"
   "action/GenerateText.action"
   "action/GenerateStructured.action"
+  "action/GenerateStructuredChat.action"
   "action/DescribeImage.action"
   "action/DescribeStructuredImage.action"
   "action/Sense.action"
