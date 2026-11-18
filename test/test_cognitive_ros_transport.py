@@ -1,6 +1,7 @@
 """Exercise generated cognitive actions over ROS with mocked external operations."""
 import json
 from itertools import count
+import os
 from threading import Event, Thread
 
 import pytest
@@ -16,18 +17,41 @@ from smpa_ros.smpa import run_actions
 from smpa_ros_interfaces.action import Sense, Model, Plan, Act
 
 
-_TEST_DOMAINS = count(110)
+_TEST_DOMAINS = count(os.getpid())
 
 
 @pytest.fixture(autouse=True)
 def isolate_ros_domain(monkeypatch):
-    """Give each transport test a fresh local DDS discovery domain.
+    """Lease a distinct DDS domain across tests and simultaneous pytest invocations.
 
-    Stage processes inherit the same domain as their parent. A new domain for
-    each test prevents recently stopped service endpoints from a previous ROS
-    context from receiving a subsequent experiment's requests.
+    The former counter restarted at domain 110 in every invocation, allowing
+    overlapping runs to discover each other's identically named services.
+    Start at a process-specific domain below the host's ephemeral UDP port
+    range and hold a cooperative filesystem lease until the test has stopped
+    its children and ROS contexts. Skip the user's configured domain. Spawned stage
+    processes inherit the selected domain and do not acquire another lease.
     """
-    monkeypatch.setenv('ROS_DOMAIN_ID', str(next(_TEST_DOMAINS)))
+    import fcntl
+    from pathlib import Path
+    configured_domain = os.environ.get('ROS_DOMAIN_ID', '0')
+    for _ in range(80):
+        domain = 10 + next(_TEST_DOMAINS) % 80
+        if str(domain) == configured_domain:
+            continue
+        lease = (Path('/tmp') / f'smpa-test-dds-domain-{domain}.lock').open('a')
+        try:
+            fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lease.close()
+            continue
+        break
+    else:
+        pytest.fail('No isolated DDS test domain is available')
+    monkeypatch.setenv('ROS_DOMAIN_ID', str(domain))
+    try:
+        yield
+    finally:
+        lease.close()
 
 
 def wait_future(future, timeout=10):
@@ -412,7 +436,9 @@ def test_installed_smpa_command_runs_complete_experiment(tmp_path):
     Start one real stage server per process and a real inference server with a
     weight-free backend. Run the installed console script with an API selection
     that names that fixture, then inspect the completed run, stage records and
-    authoritative freeze. Stop and join every owned participant on all paths.
+    authoritative freeze. Keep the Model and Plan inference clients intact and
+    require their distinct frozen settings to reach the one shared fake backend.
+    Stop and join every owned participant on all paths.
     """
     import multiprocessing
     import os
@@ -424,7 +450,7 @@ def test_installed_smpa_command_runs_complete_experiment(tmp_path):
     context = multiprocessing.get_context('spawn')
     stop = context.Event()
     names = ('sense', 'model', 'plan', 'act')
-    processes = [context.Process(target=stage_process, args=(name, str(tmp_path), stop)) for name in names]
+    processes = [context.Process(target=stage_process, args=(name, str(tmp_path), stop), kwargs={'real_inference': True}) for name in names]
     for process in processes:
         process.start()
     registry = tmp_path / 'models.yaml'
@@ -434,10 +460,22 @@ def test_installed_smpa_command_runs_complete_experiment(tmp_path):
     configuration['model'] = {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture'}
     configuration['sensing'] = {'vision': False, 'hear': False}
     configuration.pop('scene_refinement', None)
+    configuration['stage_settings']['model']['max_output_tokens'] = 40
+    configuration['stage_settings']['plan']['max_output_tokens'] = 50
     config = tmp_path / 'config.yaml'
     config.write_text(yaml.safe_dump(configuration))
     rclpy.init(args=[])
-    server = InferenceServer(loader=fake_backend_loader,
+    generations, loads = [], []
+    def generate(prompt, **settings):
+        """Record actual frozen controls and return schema-valid fixture output."""
+        generations.append(settings)
+        return '{"action":"look_left"}' if 'schema' in settings else 'world with cup'
+    def loader(values, *args):
+        """Record the single server-owned model load without opening weights."""
+        from types import SimpleNamespace
+        loads.append(dict(values))
+        return SimpleNamespace(generate=generate)
+    server = InferenceServer(loader=loader,
                              parameter_overrides=[Parameter('registry_file', value=str(registry))])
     server.replace_model('fixture')
     executor = MultiThreadedExecutor(num_threads=2)
@@ -460,6 +498,11 @@ def test_installed_smpa_command_runs_complete_experiment(tmp_path):
         records = [json.loads((directory / f'{stage}.json').read_text()) for stage in names]
         assert [item['sequence'] for item in records] == [1, 2, 3, 4]
         assert server.get_parameter('experiment_run_id').value == ''
+        assert len(loads) == 1
+        assert [settings['max_new_tokens'] for settings in generations] == [40, 50]
+        assert 'schema' in generations[1]
+        assert metadata['inference']['stages']['model']['max_new_tokens'] == 40
+        assert metadata['inference']['stages']['plan']['max_new_tokens'] == 50
     finally:
         executor.shutdown(timeout_sec=10)
         thread.join(timeout=10)
@@ -480,7 +523,9 @@ def test_installed_smpa_command_interrupts_and_releases_freeze(tmp_path):
     Wait until the real Sense action reaches a held observation, signal the
     experiment, then allow that action to finish. Confirm the run is marked
     interrupted, the active inference owner is released only after completion,
-    and every independently launched stage process terminates cleanly.
+    and every independently launched stage process terminates cleanly. Preserve
+    child output in a file so startup failures remain diagnosable and cannot
+    block on an unread output pipe.
     """
     import multiprocessing
     import os
@@ -517,15 +562,23 @@ def test_installed_smpa_command_interrupts_and_releases_freeze(tmp_path):
     thread.start()
     executable = Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/smpa'
     process = None
+    log_path = tmp_path / 'interruption-experiment.log'
+    log_stream = log_path.open('w', encoding='utf-8')
     try:
         process = subprocess.Popen([str(executable), '--config', str(config), '--world-model-root', str(tmp_path),
                                     '--max-cycles', '1', '--timeout', '15'], cwd=tmp_path,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=os.environ.copy())
-        assert sensing_started.wait(timeout=30), 'Sense action did not begin'
+                                   stdout=log_stream, stderr=subprocess.STDOUT, text=True, env=os.environ.copy())
+        from time import monotonic
+        deadline = monotonic() + 30
+        while not sensing_started.wait(timeout=0.1) and process.poll() is None and monotonic() < deadline:
+            pass
+        if not sensing_started.is_set():
+            status = 'still running' if process.poll() is None else f'exited with {process.returncode}'
+            pytest.fail(f'Sense action did not begin; experiment {status}\n{log_path.read_text()}')
         process.send_signal(signal.SIGINT)
         allow_sensing.set()
-        stdout, stderr = process.communicate(timeout=30)
-        assert process.returncode != 0, stdout + stderr
+        process.wait(timeout=30)
+        assert process.returncode != 0, log_path.read_text()
         metadata_path, = (tmp_path / 'runs').glob('*/metadata.yaml')
         metadata = yaml.safe_load(metadata_path.read_text())
         assert metadata['status'] == 'interrupted'
@@ -535,7 +588,8 @@ def test_installed_smpa_command_interrupts_and_releases_freeze(tmp_path):
         allow_sensing.set()
         if process is not None and process.poll() is None:
             process.kill()
-            process.communicate(timeout=10)
+            process.wait(timeout=10)
+        log_stream.close()
         executor.shutdown(timeout_sec=10)
         thread.join(timeout=10)
         server.destroy_node()
