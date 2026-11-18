@@ -79,14 +79,16 @@ def record_observation(directory, cycle, sense, *, record_name='sense.json',
     return value, observations
 
 
-def observe(node, config, directory, executor, timeout, service, speech=None):
+def observe(node, config, directory, executor, timeout, service, speech=None, *, capture=None):
     """Collect enabled modalities sequentially with independent source timestamps.
 
     Preserve legacy vision/speech output keys and append attributed Read results
     only when explicitly enabled. Vision and Hear own their existing evidence;
     Read only observes the selected conversation and proposes a consumption
     cursor. The stage record commits that cursor after every modality succeeds.
-    No conversational inference or RDF operation is invoked here.
+    An optional capture callable sends vision requests through an independent
+    inference server; the legacy capture is used when none is supplied. No
+    conversational inference or RDF operation is invoked here.
     """
     from sense import modalities
     from sense.hear import observe as hear
@@ -94,7 +96,7 @@ def observe(node, config, directory, executor, timeout, service, speech=None):
     enabled = modalities(config, service)
     outputs, transcript = {}, ''
     if enabled['vision']:
-        outputs['vision'] = capture_once(node, config, directory, executor, timeout).read_text()
+        outputs['vision'] = (capture or capture_once)(node, config, directory, executor, timeout).read_text()
     if enabled['hear']:
         if speech is None:
             raise RuntimeError('Hear requires its assigned Listen action client')

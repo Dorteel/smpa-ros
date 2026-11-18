@@ -169,7 +169,7 @@ class SenseService(Node):
 
 
 def capture_once(node: Node, config: dict, output_dir: Path,
-                 executor: SingleThreadedExecutor, timeout: float = 120) -> Path:
+                 executor: SingleThreadedExecutor, timeout: float = 120, *, describe=None) -> Path:
     """Capture one image and description inside the assigned run's observations.
 
     Receive the first camera frame and its UTC receipt time, then unsubscribe
@@ -177,7 +177,9 @@ def capture_once(node: Node, config: dict, output_dir: Path,
     Embed source header and UTC receipt metadata in that PNG. On success save
     the exact description under the same timestamp; on inference error retain
     the image without fabricating a description. Create files exclusively; the
-    existing caller records them as sources of one Sense invocation. Always destroy the subscription and service client before returning.
+    existing caller records them as sources of one Sense invocation. An optional
+    description callable uses the shared inference server instead of the legacy
+    service. Always destroy the subscription and any service client before returning.
     """
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.task import Future
@@ -190,12 +192,13 @@ def capture_once(node: Node, config: dict, output_dir: Path,
     prompt = (selected['text'] if config['prompt'] == selected.get('name') else
               files('smpa_ros').joinpath('prompts/sense/' + config['prompt'] + '.txt')
               .read_text(encoding='utf-8').strip())
-    client = node.create_client(DescribeScene, '/sense')
+    client = node.create_client(DescribeScene, '/sense') if describe is None else None
     subscription = None
     try:
-        node.get_logger().info('Waiting for /sense service')
-        if not client.wait_for_service(timeout_sec=timeout):
-            raise TimeoutError(f'/sense is unavailable after {timeout:g}s')
+        if client is not None:
+            node.get_logger().info('Waiting for /sense service')
+            if not client.wait_for_service(timeout_sec=timeout):
+                raise TimeoutError(f'/sense is unavailable after {timeout:g}s')
         image_future = Future()
 
         def receive(image: Image) -> None:
@@ -232,19 +235,19 @@ def capture_once(node: Node, config: dict, output_dir: Path,
             output.flush()
             os.fsync(output.fileno())
         started = perf_counter()
-        response_future = client.call_async(
-            DescribeScene.Request(image=image, prompt=prompt),
-        )
-        node.get_logger().info('Request sent to /sense')
-        executor.spin_until_future_complete(response_future, timeout_sec=timeout)
-        if not response_future.done():
-            raise TimeoutError(f'/sense response timed out after {timeout:g}s')
-        response = response_future.result()
-        node.get_logger().info(f'/sense response received after {perf_counter() - started:.2f}s')
-        if response.error:
-            raise RuntimeError(response.error)
+        if describe is None:
+            response_future = client.call_async(DescribeScene.Request(image=image, prompt=prompt))
+            executor.spin_until_future_complete(response_future, timeout_sec=timeout)
+            if not response_future.done():
+                raise TimeoutError(f'/sense response timed out after {timeout:g}s')
+            response = response_future.result()
+            if response.error:
+                raise RuntimeError(response.error)
+            description = response.description
+        else:
+            description = describe(image, prompt)
         with path.open('x', encoding='utf-8', newline='') as output:
-            output.write(response.description)
+            output.write(description)
         node.get_logger().info(f'Markdown file saved: {path.resolve()}')
         return path
     except Exception as error:
@@ -253,7 +256,8 @@ def capture_once(node: Node, config: dict, output_dir: Path,
     finally:
         if subscription is not None:
             node.destroy_subscription(subscription)
-        node.destroy_client(client)
+        if client is not None:
+            node.destroy_client(client)
 
 
 def main(args=None):
