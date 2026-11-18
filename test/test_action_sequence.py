@@ -217,3 +217,89 @@ def test_experiment_keeps_freeze_when_stage_termination_unknown(stage_types, tmp
     with pytest.raises(RuntimeError, match='cleanup was not confirmed'):
         execute_experiment(memory, 1, {'sense': client}, parameters, wait, 1.0)
     assert changes == [identity] and memory.metadata['status'] == 'failed'
+
+
+def test_ros_entry_point_uses_independent_action_clients(stage_types, monkeypatch, tmp_path):
+    """Exercise the command entry path using mocked ROS clients and inference.
+
+    The real experiment lifecycle must acquire and persist its snapshot, send
+    all four stage goals in script order, release ownership and destroy clients.
+    No stage server, speech process, model or simulator is started.
+    """
+    import rclpy
+    import rclpy.action
+    import rclpy.node
+    import rclpy.parameter_client
+    from unittest.mock import Mock
+    import smpa_ros.smpa as script
+    memory = MemoryManager(tmp_path, goal='Find cup')
+    identity = memory.metadata['run_id']
+    profile = SimpleNamespace(limit=1, modalities={'hear': False}, options=SimpleNamespace(timeout=1.0))
+    monkeypatch.setattr(script, 'prepare_experiment', lambda args, goal: (profile, memory))
+    monkeypatch.setattr(rclpy, 'init', lambda **kwargs: None)
+    monkeypatch.setattr(rclpy, 'ok', lambda: True)
+    monkeypatch.setattr(rclpy, 'shutdown', lambda: None)
+    node = SimpleNamespace(destroy_node=Mock())
+    monkeypatch.setattr(rclpy.node, 'Node', lambda name: node)
+    stages, changes, clients = [], [], []
+    responses = {'sense': SimpleNamespace(observation='seen', record_path='sense'),
+                 'model': SimpleNamespace(world_model='world', record_path='model', snapshot_path='snapshot'),
+                 'plan': SimpleNamespace(action_json='{"action":"look_left"}', record_path='plan'),
+                 'act': SimpleNamespace(success=True)}
+    def action_client(node, action_type, endpoint):
+        """Create a fake client for the requested cognitive action endpoint."""
+        stage = endpoint.rsplit('/', 1)[-1]
+        def send(goal):
+            """Return the fixed response after recording the action order."""
+            stages.append(stage)
+            return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(status=4, result=responses[stage]))
+        client = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send, destroy=Mock())
+        clients.append(client)
+        return client
+    monkeypatch.setattr(rclpy.action, 'ActionClient', action_client)
+    snapshot = dict(run_id=identity, server_instance_id='server-a', active_model='fixture', loading={}, generation={})
+    def set_parameters(values):
+        """Record the actual freeze acquisition and owner-checked release."""
+        changes.append(values[0].value)
+        return SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True, set_parameters_atomically=set_parameters,
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value=json.dumps(snapshot))]))
+    monkeypatch.setattr(rclpy.parameter_client, 'AsyncParameterClient', lambda node, endpoint: parameters)
+    monkeypatch.setattr(script, 'wait_for_ros', lambda node, future, timeout, operation: future)
+    events = []
+    def notify(run_id, stage, event):
+        """Retain the run identity and lifecycle outcome for assertions."""
+        events.append((run_id, stage, event))
+    script.run_ros_experiment(['smpa'], goal='Find cup', notify=notify)
+    assert stages == ['sense', 'model', 'plan', 'act']
+    assert changes == [identity, 'release:' + identity]
+    assert memory.metadata['status'] == 'completed' and memory.metadata['inference'] == snapshot
+    assert events[0] == (identity, '', 'run_started') and events[-1] == (identity, '', 'run_completed')
+    assert len(clients) == 4 and all(client.destroy.call_count == 1 for client in clients)
+    node.destroy_node.assert_called_once()
+
+
+def test_prepare_experiment_preserves_configuration_without_loading_model(monkeypatch, tmp_path):
+    """Create run metadata from the existing parser without constructing a backend.
+
+    Use the repository configuration and replace only catalogue resolution with
+    a fixed model identity. Verify the requested cycle limit, goal and frozen
+    stage prompts are persisted for the independent stage servers.
+    """
+    from pathlib import Path
+    from smpa_ros import smpa as script
+    def resolve(profile):
+        """Supply a resolved model identity without reading or loading weights."""
+        profile.models = {stage: {'model_id': 'fixture/model', 'backend': 'transformers'}
+                          for stage in ('vision', 'model', 'plan')}
+    monkeypatch.setattr(script.Runner, 'initialize_backends', resolve)
+    configuration = Path(__file__).resolve().parents[1] / 'smpa_ros/config.yaml'
+    profile, memory = script.prepare_experiment(['smpa', '--config', str(configuration),
+        '--world-model-root', str(tmp_path), '--max-cycles', '2'], '# Requested goal')
+    assert profile.limit == 2 and memory.metadata['max_cycles'] == 2
+    assert memory.metadata['models']['model']['model_id'] == 'fixture/model'
+    assert (memory.directory / 'goal.md').read_text() == '# Requested goal'
+    import yaml
+    frozen = yaml.safe_load((memory.directory / 'parameters.yaml').read_text())
+    assert set(frozen['stage_prompts']) >= {'sense', 'model', 'plan', 'act'}
+    assert frozen['_run']['max_cycles'] == 2

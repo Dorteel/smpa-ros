@@ -196,3 +196,33 @@ def test_focused_refinement_failure_retains_attempt(act_node_class, tmp_path, mo
     record = json.loads((memory.directory / 'state/cycle_000001/act.json').read_text())
     assert entry['attempted'] and entry['status'] == 'unanswered' and 'vision unavailable' in entry['error']
     assert record['status'] == 'failed' and not record['success']
+
+
+def test_demo_talk_uses_assigned_run_and_latest_transcript(act_node_class, tmp_path, monkeypatch):
+    """Repeat the persisted Hear transcript through the run-specific Talk action.
+
+    Mock the ROS client while exercising the real Act speech helper. The goal
+    must use the original demo phrase and the client must be cleaned up.
+    """
+    import sys
+    memory = MemoryManager(tmp_path, goal='Listen')
+    memory.begin_cycle()
+    (memory.directory / 'state/cycle_000001/sense.json').write_text(json.dumps({
+        'status': 'generated', 'sequence': 1, 'output': '{"speech":"hello"}'}))
+    calls, endpoints = [], []
+    def send(goal):
+        """Record one mock Talk goal and return successful completion."""
+        calls.append(goal.text)
+        return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(
+            status=4, result=SimpleNamespace(success=True, error_message='')))
+    client = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send, destroy=Mock())
+    def action_client(node, kind, endpoint, callback_group):
+        """Record which Talk endpoint belongs to this experiment run."""
+        endpoints.append(endpoint)
+        return client
+    monkeypatch.setattr(sys.modules[act_node_class.__module__], 'ActionClient', action_client)
+    node = SimpleNamespace(group=object(), result=lambda future, timeout, operation: future, get_logger=lambda: Mock())
+    act_node_class.speak_transcript(node, memory.directory, memory.metadata['run_id'], 2, 1.0)
+    assert calls == ['I heard hello']
+    assert endpoints == ['/run_' + memory.metadata['run_id'].replace('-', '_') + '/act/talk']
+    client.destroy.assert_called_once()

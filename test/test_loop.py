@@ -151,8 +151,9 @@ def test_main_owns_run_and_uses_cycle_limit(tmp_path, monkeypatch, configured, o
             '--timeout', '5']
     if override is not None:
         args += ['--max-cycles', str(override)]
-    from smpa_ros.smpa import main
-    main(args)
+    from smpa_ros.smpa import run
+    with module.Runner(args) as runner:
+        run(runner, runner.limit)
     directory, = (tmp_path / 'world_model/runs').iterdir()
     metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
     assert metadata['completed_cycles'] == expected and metadata['status'] == 'completed'

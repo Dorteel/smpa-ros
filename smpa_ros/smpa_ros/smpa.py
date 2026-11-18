@@ -1,4 +1,5 @@
 """Edit this program to choose goals, prompts, repetitions, and stage order."""
+from functools import partial
 from runner import Runner
 
 GOAL = '# Goal\n\nExplore the environment to discover previously unobserved objects and relationships.\n'
@@ -19,8 +20,13 @@ def run(runner, cycles, *, goal=GOAL):
 
 
 def main(args=None):
-    with Runner(args) as runner:
-        run(runner, runner.limit)
+    """Run the explicitly scripted cognitive actions from the command line.
+
+    Resolve the existing experiment configuration and hand it to the direct ROS
+    action execution path. The four stage servers and inference server are
+    independent participants and must already be running.
+    """
+    run_ros_experiment(args=args)
 
 
 def run_actions(memory, cycles, invoke, *, notify=None):
@@ -247,7 +253,7 @@ def verify_inference(parameters, memory, wait, timeout):
         raise RuntimeError('Inference server ownership or frozen settings changed')
 
 
-def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, notify=None):
+def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, notify=None, cleanup=None):
     """Run the explicit cognitive sequence under one recorded inference freeze.
 
     The caller creates the run, ROS clients and bounded wait function. Acquire
@@ -257,7 +263,8 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
 
     On completion or failure, resolve any late acquisition and wait briefly for
     a previously accepted stage to terminate. Release the freeze only when both
-    outcomes are known; otherwise leave it in place for safe recovery. Finalize
+    outcomes are known; otherwise leave it in place for safe recovery. Limit
+    each cleanup wait to three seconds. Finalize
     run metadata and notify the lifecycle observer of the actual terminal state.
     Propagate the original error, or a cleanup error when cleanup is incomplete.
     """
@@ -285,12 +292,18 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
     except BaseException as error:
         status, failure = 'failed', error
     try:
-        resolve_inference_acquisition(acquisition, wait, timeout)
-        finish_outstanding_stage(outstanding, wait, timeout)
+        cleanup_timeout = min(timeout, 3.0)
+        resolve_inference_acquisition(acquisition, wait, cleanup_timeout)
+        finish_outstanding_stage(outstanding, wait, cleanup_timeout)
         if acquisition.get('owned'):
-            release_inference(parameters, memory.metadata['run_id'], wait, timeout, outstanding)
+            release_inference(parameters, memory.metadata['run_id'], wait, cleanup_timeout, outstanding)
     except BaseException as error:
         status, cleanup_error = 'failed', error
+    if cleanup is not None:
+        try:
+            cleanup()
+        except BaseException as error:
+            status, cleanup_error = 'failed', cleanup_error or error
     try:
         memory.finalize(status)
     except BaseException as error:
@@ -302,3 +315,171 @@ def execute_experiment(memory, cycles, clients, parameters, wait, timeout, *, no
         raise RuntimeError(f'Experiment cleanup was not confirmed: {cleanup_error}') from failure or cleanup_error
     if failure is not None:
         raise failure
+
+
+def prepare_experiment(args, goal):
+    """Resolve the existing experiment settings without loading any model.
+
+    Reuse the established configuration and model-catalogue resolution while
+    the remaining Runner responsibilities are migrated. Construct the same
+    frozen run configuration and metadata as the legacy entry point, then
+    create a new run. Resolving configuration does not create a backend or start
+    a stage; the shared inference server owns its already-loaded model.
+    """
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from memory import MemoryManager
+    from smpa_ros.plan import ACTION_SCHEMA, enabled_actions, refinement_settings
+    from smpa_ros.model import validate_settings as validate_model_settings
+    from smpa_ros.plan import validate_settings as validate_plan_settings
+
+    profile = SimpleNamespace()
+    Runner.configure(profile, args)
+    Runner.initialize_backends(profile)
+    if isinstance(profile.limit, bool) or not isinstance(profile.limit, int) or profile.limit < 1:
+        raise ValueError('max_cycles must be a positive integer')
+    refinement_settings(profile.config)
+    validate_model_settings(profile.config.get('modeling', {}))
+    validate_plan_settings(profile.config.get('planning', {}))
+    configuration = dict(pipeline=profile.config, service=profile.options.service, demo=profile.options.demo, max_cycles=profile.limit,
+        available_actions=deepcopy(enabled_actions(profile.config)),
+        output_schema=deepcopy(profile.config['stage_settings']['plan'].get('output_schema', ACTION_SCHEMA)))
+    configuration['stage_settings'] = deepcopy(profile.config['stage_settings'])
+    configuration['stage_models'] = {
+        'sense': deepcopy(profile.models.get('vision', {})),
+        'model': deepcopy(profile.models.get('model', {})),
+        'plan': deepcopy(profile.models.get('plan', profile.models.get('model', {}))),
+        'act': dict(backend='ros_action', model_id=None, provider=None)}
+    for stage, model in configuration['stage_models'].items():
+        model.setdefault('provider', None)
+        if stage == 'sense':
+            model.setdefault('backend', profile.config.get('vision', {}).get('backend', 'transformers'))
+    if 'stage_prompts' not in profile.original_config:
+        configuration['stage_prompts'] = profile.config['stage_prompts']
+    memory = MemoryManager(profile.options.world_model_root, profile.options.run_name,
+                           models=profile.models, configuration=configuration, goal=goal)
+    memory.metadata['max_cycles'] = profile.limit
+    memory.write_metadata()
+    return profile, memory
+
+
+def run_ros_experiment(args=None, *, goal=GOAL, notify=None):
+    """Run the experiment through independent stage and inference ROS servers.
+
+    Create a run using existing configuration rules, optionally launch its
+    established speech participants, and construct direct clients for all four
+    stage actions. The script acquires and records inference ownership, invokes
+    its explicit sequence, and cleans up the owned clients and speech process.
+    The optional observer receives the run identity and lifecycle events. No
+    cognitive backend or other stage is loaded in this process.
+    """
+    import os
+    import signal
+    import subprocess
+    import rclpy
+    from rclpy.action import ActionClient
+    from rclpy.node import Node
+    from rclpy.parameter_client import AsyncParameterClient
+    from rclpy.signals import SignalHandlerOptions
+    from smpa_ros_interfaces.action import Sense, Model, Plan, Act
+
+    profile, memory = prepare_experiment(args, goal)
+    identity = memory.metadata['run_id']
+    participant = None
+    node = None
+    clients = {}
+    initialized = False
+    announced_terminal = False
+    closed = False
+    def publish(stage, event):
+        """Relay one observed lifecycle event with this persisted run identity."""
+        nonlocal announced_terminal
+        if event in ('run_completed', 'run_interrupted', 'run_failed'):
+            announced_terminal = True
+        if notify is not None:
+            notify(identity, stage, event)
+    def stop_participant():
+        """Stop only the speech process group launched for this experiment.
+
+        Request graceful interruption first, then terminate or kill only that
+        owned process if its bounded waits expire. An already exited participant
+        needs no further action.
+        """
+        if participant is None or participant.poll() is not None:
+            return
+        for signum, timeout in ((signal.SIGINT, 2), (signal.SIGTERM, 2), (signal.SIGKILL, 2)):
+            os.killpg(participant.pid, signum)
+            try:
+                participant.wait(timeout=timeout)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+        raise RuntimeError('Speech participant did not terminate')
+    def cleanup_owned_resources():
+        """Close every resource owned by this run and report cleanup failures.
+
+        Stop the speech child, destroy all stage clients and the experiment node,
+        and shut down the ROS context even when an earlier cleanup step fails.
+        Retain the first error so the run cannot be finalized as successful.
+        """
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        errors = []
+        try:
+            stop_participant()
+        except BaseException as error:
+            errors.append(error)
+        for client in clients.values():
+            try:
+                client.destroy()
+            except BaseException as error:
+                errors.append(error)
+        if node is not None:
+            try:
+                node.destroy_node()
+            except BaseException as error:
+                errors.append(error)
+        if initialized:
+            try:
+                if rclpy.ok():
+                    rclpy.shutdown()
+            except BaseException as error:
+                errors.append(error)
+        if errors:
+            raise RuntimeError(f'Owned resource cleanup failed: {errors[0]}') from errors[0]
+    try:
+        if profile.modalities['hear']:
+            command = ['ros2', 'launch', 'smpa_ros', 'llm.launch.py', 'participants_only:=true',
+                       'service:=speech', f'world_model_dir:={memory.directory}', f'run_id:={identity}',
+                       f'config:={profile.options.config.resolve()}', f'python:={profile.options.python}',
+                       f'model_root:={profile.options.model_root}']
+            for name in ('audio_lock', 'input_device', 'output_device'):
+                value = getattr(profile.options, name)
+                if value:
+                    command.append(f'{name}:={value}')
+            participant = subprocess.Popen(command, start_new_session=True)
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        initialized = True
+        node = Node('smpa_experiment')
+        for stage, kind in (('sense', Sense), ('model', Model), ('plan', Plan), ('act', Act)):
+            clients[stage] = ActionClient(node, kind, '/smpa/' + stage)
+        parameters = AsyncParameterClient(node, '/llm')
+        wait = partial(wait_for_ros, node)
+        execute_experiment(memory, profile.limit, clients, parameters, wait, profile.options.timeout,
+                           notify=publish, cleanup=cleanup_owned_resources)
+    except BaseException as error:
+        status = 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'
+        cleanup_error = None
+        try:
+            cleanup_owned_resources()
+        except BaseException as cleanup_failure:
+            status, cleanup_error = 'failed', cleanup_failure
+        if memory.metadata['status'] == 'running':
+            memory.finalize(status)
+        if not announced_terminal:
+            publish('', 'run_interrupted' if status == 'interrupted' else 'run_failed')
+        if cleanup_error is not None:
+            raise RuntimeError(f'Experiment cleanup was not confirmed: {cleanup_error}') from error
+        raise

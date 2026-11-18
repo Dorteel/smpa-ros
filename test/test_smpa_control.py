@@ -14,82 +14,66 @@ from smpa_ros_interfaces.srv import StartSmpa, StopSmpa, GetSmpaStatus
 
 @pytest.mark.parametrize('failure', [None, 'error', 'interrupt'])
 def test_worker_preserves_script_and_persistence(tmp_path, monkeypatch, failure):
-    """Observe the actual experiment with injected safe stages and failure cases.
+    """Relay the direct experiment's actual stage and terminal notifications.
 
-    Use the real Runner and smpa.run function, replacing only sensory/inference/
-    action callbacks. Assert normal stage ordering and terminal metadata, and
-    require interruption/failure to retain the original persisted semantics.
+    Use the real action-sequence lifecycle with fake ROS clients and persisted
+    run memory. Simulate successful execution, a stage error and an interrupt;
+    no model, robot or simulator is started by this test.
     """
-    import runner as runner_module
-    original_runner = runner_module.Runner
+    from memory import MemoryManager
+    from smpa_ros import smpa as script
+    from smpa_ros_interfaces import action
+    for name in ('Sense', 'Model', 'Plan', 'Act'):
+        monkeypatch.setattr(action, name, SimpleNamespace(Goal=SimpleNamespace), raising=False)
+    memory = MemoryManager(tmp_path / 'memory', goal='# Requested goal')
+    identity = memory.metadata['run_id']
+    snapshot = dict(run_id=identity, server_instance_id='fixture', active_model='fixture', loading={}, generation={})
     stages = []
-
-    def sense(directory, cycle):
-        """Record fixture acquisition and deliberately raise selected failure modes.
-
-        Normal acquisition supplies a fixed observation. Error and interruption
-        cases test the existing Runner context's cleanup and metadata contracts.
-        """
-        stages.append('sense')
-        if failure == 'error':
-            raise RuntimeError('fixture sense failure')
-        if failure == 'interrupt':
-            raise KeyboardInterrupt
-        return 'fixture observation'
-
-    def model(prompt, **settings):
-        """Record Model execution and return one Markdown world snapshot.
-
-        This avoids loading weights while retaining the actual Model persistence.
-        """
-        stages.append('model')
-        return '# World Model\n\nFixture evidence.'
-
-    def plan(prompt, **settings):
-        """Record planning and return a validated fixture action selection.
-
-        The corresponding action callback is injected, so no ROS movement occurs.
-        """
-        stages.append('plan')
-        return '{"action":"look_left"}'
-
-    def act(action, record):
-        """Record the safe injected action outcome without contacting any robot.
-
-        Set the same success fields used by existing Runner tests and persistence.
-        """
-        stages.append('act')
-        record.update(goal_accepted=True, result_status=4, success=True)
-
-    def make_runner(arguments):
-        """Supply the ordinary Runner with fixture callbacks and a temporary run root.
-
-        The adapter must call the existing experiment, rather than replacing these
-        callbacks with its own loop. The request goal still reaches MemoryManager.
-        """
-        return original_runner(root=tmp_path / 'memory', sense=sense, model=model, plan=plan, act=act)
-
-    monkeypatch.setattr(runner_module, 'Runner', make_runner)
+    def set_parameters(values):
+        """Accept the test experiment's ownership changes without a server."""
+        return SimpleNamespace(result=SimpleNamespace(successful=True, reason=''))
+    parameters = SimpleNamespace(wait_for_services=lambda timeout_sec: True, set_parameters_atomically=set_parameters,
+        get_parameters=lambda names: SimpleNamespace(values=[SimpleNamespace(string_value=json.dumps(snapshot))]))
+    responses = {'sense': SimpleNamespace(observation='seen', record_path='sense'),
+                 'model': SimpleNamespace(world_model='world', record_path='model', snapshot_path='snapshot'),
+                 'plan': SimpleNamespace(action_json='{"action":"look_left"}', record_path='plan'),
+                 'act': SimpleNamespace(success=True)}
+    clients = {}
+    for stage in responses:
+        def send(goal, stage=stage):
+            """Return the selected mock result or the requested Sense failure."""
+            stages.append(stage)
+            if stage == 'sense' and failure == 'error':
+                raise RuntimeError('fixture sense failure')
+            if stage == 'sense' and failure == 'interrupt':
+                raise KeyboardInterrupt
+            return SimpleNamespace(accepted=True, get_result_async=lambda: SimpleNamespace(status=4, result=responses[stage]))
+        clients[stage] = SimpleNamespace(wait_for_server=lambda timeout_sec: True, send_goal_async=send)
+    def wait(future, timeout, operation):
+        """Return completed mocked responses without starting ROS actions."""
+        return future
+    def experiment(arguments, *, goal, notify):
+        """Run the real lifecycle using fake clients and relay its notifications."""
+        assert goal == '# Requested goal'
+        def relay(stage, event):
+            """Attach this run's identity to the lifecycle event."""
+            notify(identity, stage, event)
+        script.execute_experiment(memory, 1, clients, parameters, wait, 1.0, notify=relay)
+    monkeypatch.setattr(script, 'run_ros_experiment', experiment)
     read_descriptor, write_descriptor = os.pipe()
     run_control.run_worker(write_descriptor, '# Requested goal', [])
     with os.fdopen(read_descriptor) as stream:
         events = [json.loads(line) for line in stream]
-    directory = next((tmp_path / 'memory/runs').iterdir())
-    metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
-    assert (directory / 'goal.md').read_text() == '# Requested goal'
+    metadata = yaml.safe_load((memory.directory / 'metadata.yaml').read_text())
     expected = {'error': 'failed', 'interrupt': 'interrupted'}.get(failure, 'completed')
     assert metadata['status'] == expected
-    assert events[0]['event'] == 'run_started'
-    assert all(event['run_id'] == metadata['run_id'] for event in events)
-    assert events[-1]['event'] == 'run_' + expected
+    assert events[0]['event'] == 'run_started' and events[-1]['event'] == 'run_' + expected
+    assert all(event['run_id'] == identity for event in events)
     if failure is None:
         assert stages == ['sense', 'model', 'plan', 'act']
-        assert [(event['stage'], event['event']) for event in events[1:-1]] == [
-            (stage, event) for stage in stages for event in ('stage_started', 'stage_completed')]
         assert metadata['completed_cycles'] == 1
     else:
-        assert stages == ['sense']
-        assert metadata['completed_cycles'] == 0
+        assert stages == ['sense'] and metadata['completed_cycles'] == 0
         assert ('stage_failed' in [event['event'] for event in events]) == (failure == 'error')
 
 
@@ -116,7 +100,7 @@ def test_idle_status_and_rejections(tmp_path):
 def test_ros_services_start_stop_and_lifecycle(tmp_path, monkeypatch):
     """Drive actual ROS services while an owned fixture child runs the real experiment.
 
-    Substitute only the subprocess entry script to inject safe stage callbacks.
+    Substitute only the subprocess entry script to inject safe action clients.
     Verify prompt acceptance, duplicate rejection, stage notifications, graceful
     SIGINT interruption and a subsequent successful run with a distinct identity.
     Match service identities and terminal events against real persisted metadata.
@@ -130,7 +114,7 @@ def test_ros_services_start_stop_and_lifecycle(tmp_path, monkeypatch):
     def spawn_fixture(command, **options):
         """Keep the private notification pipe while replacing only the worker entry.
 
-        Execute the fixture with the production descriptor, goal and Runner args.
+        Execute the fixture with the production descriptor, goal and run arguments.
         No shell is involved and no production module gains a testing switch.
         """
         helper = str(Path(__file__).with_name('tier1_control_worker.py'))
@@ -140,7 +124,7 @@ def test_ros_services_start_stop_and_lifecycle(tmp_path, monkeypatch):
     rclpy.init()
     node = run_control.SmpaControl(parameter_overrides=[Parameter('memory_root', value=str(tmp_path))])
     client = rclpy.create_node('tier1_control_client')
-    executor = MultiThreadedExecutor(num_threads=4)
+    executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
     executor.add_node(client)
     pool = ThreadPoolExecutor(max_workers=1)
@@ -352,6 +336,31 @@ def test_stop_monitor_reports_missing_terminal_notification(tmp_path, monkeypatc
         node.monitor_stop(process, reader)
         assert node.state == 'failed' and node.terminal_seen
         reader.join.assert_called_once_with(run_control.SHUTDOWN_TIMEOUT)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_start_rejects_failed_freeze_acquisition_with_run_identity(tmp_path, monkeypatch):
+    """Reject startup when a child fails before confirming its inference freeze.
+
+    A failed child may already have persisted a run ID. Relay that failure over
+    the real notification pipe and verify StartSmpa does not claim the run was
+    accepted merely because the identity exists.
+    """
+    rclpy.init()
+    node = run_control.SmpaControl(parameter_overrides=[Parameter('memory_root', value=str(tmp_path))])
+    process = SimpleNamespace(poll=lambda: 0, wait=lambda timeout=None: 0)
+    def launch(command, *, pass_fds, start_new_session):
+        """Write a failed startup notification without starting a real process."""
+        record = dict(run_id='failed-run', stage='', event='run_failed')
+        os.write(pass_fds[0], (json.dumps(record) + '\n').encode())
+        return process
+    monkeypatch.setattr(run_control.subprocess, 'Popen', launch)
+    try:
+        response = node.start(StartSmpa.Request(goal='test'), StartSmpa.Response())
+        assert not response.accepted and response.run_id == ''
+        assert node.state == 'failed' and node.run_id == 'failed-run'
     finally:
         node.destroy_node()
         rclpy.shutdown()

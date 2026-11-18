@@ -18,7 +18,7 @@ import yaml
 from memory import MemoryManager, locked_run, reserve_invocation
 from smpa_ros.act import execute_action, perform_action
 from smpa_ros.plan import refinement_settings
-from smpa_ros_interfaces.action import Act, DescribeImage, DescribeStructuredImage
+from smpa_ros_interfaces.action import Act, DescribeImage, DescribeStructuredImage, Talk
 
 
 class ActNode(Node):
@@ -101,6 +101,59 @@ class ActNode(Node):
             raise ValueError('Act timeout must be positive')
         executor = SimpleNamespace(spin_until_future_complete=self.wait)
         execute_action(self, executor, action, record, timeout, configuration=pipeline)
+        from sense import modalities
+        run_settings = pipeline.get('_run', {})
+        if run_settings.get('demo') == 'true' and modalities(pipeline, run_settings.get('service', 'vision'))['hear']:
+            self.speak_transcript(directory, run_id, record.get('sequence', 0), timeout)
+
+    def speak_transcript(self, directory, run_id, sequence, timeout):
+        """Repeat the latest heard transcript through this run's Talk endpoint.
+
+        Recover the most recent successful Sense observation preceding this Act
+        operation, including a cached refinement observation. Send the original
+        demo phrase to the assigned Talk action and wait for its real result.
+        On interruption request cancellation and report unconfirmed termination;
+        always destroy this invocation's client without stopping the Talk server.
+        """
+        from action_msgs.msg import GoalStatus
+        records = []
+        for path in (directory / 'state').glob('cycle_*/sense*.json'):
+            saved = json.loads(path.read_text())
+            if saved.get('status') == 'generated' and saved.get('sequence', 0) < sequence:
+                records.append(saved)
+        transcript = ''
+        if records:
+            observation = json.loads(max(records, key=lambda item: item.get('sequence', 0))['output'])
+            if 'initial_observation' in observation:
+                observation = json.loads(observation['initial_observation'])
+            transcript = observation.get('speech', '')
+        endpoint = '/run_' + run_id.replace('-', '_') + '/act/talk'
+        client = ActionClient(self, Talk, endpoint, callback_group=self.group)
+        handle = None
+        pending = None
+        terminal = False
+        try:
+            if not client.wait_for_server(timeout_sec=timeout):
+                raise TimeoutError('Talk action is unavailable')
+            pending = client.send_goal_async(Talk.Goal(text=f'I heard {transcript}'))
+            handle = self.result(pending, timeout, 'Talk acceptance')
+            if not handle.accepted:
+                raise RuntimeError('Talk goal was rejected')
+            response = self.result(handle.get_result_async(), timeout, 'Talk result')
+            terminal = True
+            if response.status != GoalStatus.STATUS_SUCCEEDED or not response.result.success:
+                raise RuntimeError(response.result.error_message or 'Talk action failed')
+        finally:
+            if pending is not None and not terminal:
+                try:
+                    if handle is None:
+                        handle = self.result(pending, 5.0, 'late Talk acceptance')
+                    if handle.accepted:
+                        self.result(handle.cancel_goal_async(), 5.0, 'Talk cancellation')
+                        self.result(handle.get_result_async(), 5.0, 'terminal Talk result')
+                except Exception as error:
+                    self.get_logger().error(f'Could not confirm Talk termination: {error}')
+            client.destroy()
 
     def focus(self, record, *, pipeline, directory, run_id, cycle):
         """Answer a planned question using the latest persisted visual evidence.
