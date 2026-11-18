@@ -208,6 +208,7 @@ class SenseNode(Node):
         A run-specific lock serializes Sense writers so evidence and Read cursor
         attribution cannot overlap. Return the observation and record path on
         success; persist failures and abort without invoking another stage.
+        Use the requested prompt name when supplied, or the frozen default.
         """
         result = Sense.Result()
         record_path = None
@@ -220,7 +221,8 @@ class SenseNode(Node):
                 raise ValueError('Sense timeout must be positive')
             with locked_run(self.get_parameter('memory_root').value, request.run_id) as directory:
                 pipeline = yaml.safe_load((directory / 'parameters.yaml').read_text())
-                prompt = pipeline.get('stage_prompts', {}).get('sense', {}).get('name', pipeline.get('prompt', 'describe_scene'))
+                prompt = (getattr(request, 'prompt_name', '') or
+                          pipeline.get('stage_prompts', {}).get('sense', {}).get('name', pipeline.get('prompt', 'describe_scene')))
                 cycle, name, provenance = reserve_invocation(directory, request.run_id, 'sense', prompt)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name
             config = dict(pipeline, run_id=request.run_id, prompt=prompt)

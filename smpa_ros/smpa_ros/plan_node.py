@@ -123,7 +123,8 @@ class PlanNode(Node):
     def execute(self, goal_handle):
         """Plan once for the requested run and persist the complete decision.
 
-        Resolve the run ID using the configured memory root, validate an optional
+        Select the requested prompt name or the configured default. Resolve the
+        run ID using the configured memory root, validate an optional
         source record, and reserve one unique Plan invocation. Read the frozen run
         configuration and invoke the existing planner with the request's world
         model. Return its validated JSON and record path; log and abort failures.
@@ -143,7 +144,8 @@ class PlanNode(Node):
                         raise ValueError('Plan source record must exist within the run')
                 pipeline = yaml.safe_load((directory / 'parameters.yaml').read_text())
                 metadata = yaml.safe_load((directory / 'metadata.yaml').read_text())
-                prompt_name = pipeline.get('stage_prompts', {}).get('plan', {}).get('name', 'default')
+                prompt_name = (getattr(request, 'prompt_name', '') or
+                               pipeline.get('stage_prompts', {}).get('plan', {}).get('name', 'default'))
                 cycle, name, provenance = reserve_invocation(
                     directory, request.run_id, 'plan', prompt_name, request.source_record or None)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name

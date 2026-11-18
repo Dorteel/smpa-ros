@@ -194,7 +194,8 @@ class ModelNode(Node):
         For belief requests, delegate the history to the existing belief writer
         and return after it completes. For world-model requests, resolve the active
         run, validate the source record and previous
-        snapshot as paths inside it, and reserve a durable invocation. Invoke the
+        snapshot as paths inside it, and reserve a durable invocation. Select
+        the requested prompt name or use the configured default. Invoke the
         existing generator with frozen run settings, preserving its snapshot and
         provenance record. Return both paths on success. Record and abort errors
         without replacing a record already written by the generator.
@@ -225,7 +226,8 @@ class ModelNode(Node):
                     if not isinstance(observations, list) or any(not isinstance(item, str) for item in observations):
                         raise ValueError('Model source observations must be a list of paths')
                 pipeline = yaml.safe_load((directory / 'parameters.yaml').read_text())
-                prompt_name = pipeline.get('stage_prompts', {}).get('model', {}).get('name', 'default')
+                prompt_name = (getattr(request, 'prompt_name', '') or
+                               pipeline.get('stage_prompts', {}).get('model', {}).get('name', 'default'))
                 cycle, name, provenance = reserve_invocation(directory, request.run_id, 'model', prompt_name,
                                                               request.source_record or None)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name

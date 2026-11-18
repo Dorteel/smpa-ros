@@ -252,7 +252,8 @@ class ActNode(Node):
     def execute(self, goal_handle):
         """Execute one persisted decision for the requested active run.
 
-        Validate the optional source record and reserve an invocation under the
+        Select the requested prompt name or the configured default. Validate
+        the optional source record and reserve an invocation under the
         run lock. Use the frozen pipeline and the existing action implementation;
         preserve decision parameters and return the resulting record path. A
         refinement completion may produce a deliberate no-op. Persist failures
@@ -272,7 +273,8 @@ class ActNode(Node):
                     if Path(request.source_record).is_absolute() or not source.is_relative_to(directory) or not source.is_file():
                         raise ValueError('Act source record must exist within the run')
                 pipeline = yaml.safe_load((directory / 'parameters.yaml').read_text())
-                prompt_name = pipeline.get('stage_prompts', {}).get('act', {}).get('name', 'default')
+                prompt_name = (getattr(request, 'prompt_name', '') or
+                               pipeline.get('stage_prompts', {}).get('act', {}).get('name', 'default'))
                 cycle, name, provenance = reserve_invocation(directory, request.run_id, 'act', prompt_name,
                                                               request.source_record or None)
                 record_path = directory / 'state' / f'cycle_{cycle:06d}' / name

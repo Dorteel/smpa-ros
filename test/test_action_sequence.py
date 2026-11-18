@@ -74,12 +74,14 @@ def test_failed_action_keeps_cycle_incomplete(stage_types, tmp_path):
     assert events[-1] == ('act', 'stage_failed')
 
 
-def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch, tmp_path):
+@pytest.mark.parametrize('prompt_name', ['', 'default'])
+def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch, tmp_path, prompt_name):
     """Execute the full script sequence against real stage callback functions.
 
     Fake only the ungenerated action messages, inference, sensors and robot
     operation. The actual stage implementations and run memory write their
-    normal records. Confirm source links and cycle completion across all stages.
+    normal records. Confirm source links, selected prompt names and cycle
+    completion across all stages for configured and explicit prompts.
     """
     import importlib
     import sys
@@ -130,6 +132,7 @@ def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch
                  'plan': plan.PlanNode.execute, 'act': act.ActNode.execute}
     def invoke(stage, action_type, goal):
         """Deliver one action goal to the real stage callback and check success."""
+        goal.prompt_name = prompt_name
         handle = SimpleNamespace(request=goal, succeed=Mock(), abort=Mock())
         result = callbacks[stage](nodes[stage], handle)
         handle.succeed.assert_called_once()
@@ -144,6 +147,7 @@ def test_sequence_runs_real_stage_callbacks_with_mocked_dependencies(monkeypatch
         assert records['plan']['source_record'] == 'state/cycle_000001/model.json'
         assert records['act']['source_record'] == 'state/cycle_000001/plan.json'
         assert records['act']['status'] == 'succeeded' and memory.metadata['completed_cycles'] == 1
+        assert all(record['prompt_name'] == (prompt_name or 'chosen') for record in records.values())
     finally:
         for name in module_names:
             sys.modules.pop(name, None)
@@ -308,48 +312,49 @@ def test_prepare_experiment_preserves_configuration_without_loading_model(monkey
     assert frozen['_run']['max_cycles'] == 2
 
 
-def test_transferred_configuration_matches_existing_runner(tmp_path):
-    """Retain Runner's configuration, modality and command-line semantics.
+def test_transferred_configuration_matches_legacy_snapshot(tmp_path):
+    """Preserve legacy configuration and argument handling without Runner.
 
-    Resolve the same repository configuration through the previous parser and the
-    transferred experiment function. Compare the frozen settings and selected
-    limits without creating a run, loading a model or starting ROS participants.
+    Compare the experiment parser's complete configuration, original input,
+    modality selection and execution limits against a snapshot captured from
+    Runner before its removal. Verify the path and cycle overrides separately;
+    the test never starts ROS participants or loads model weights.
     """
     from pathlib import Path
-    from runner import Runner
+    import yaml
     from smpa_ros.smpa import configure_experiment
-    configuration = Path(__file__).resolve().parents[1] / 'smpa_ros/config.yaml'
+    root = Path(__file__).resolve().parents[1]
+    configuration = root / 'smpa_ros/config.yaml'
     arguments = ['smpa', '--config', str(configuration), '--world-model-root', str(tmp_path),
                  '--max-cycles', '3', '--vision', 'false', '--hear', 'false']
-    previous, transferred = SimpleNamespace(), SimpleNamespace()
-    Runner.configure(previous, arguments)
-    configure_experiment(transferred, arguments)
-    assert transferred.config == previous.config
-    assert transferred.original_config == previous.original_config
-    assert transferred.modalities == previous.modalities
-    assert transferred.limit == previous.limit == 3
-    assert transferred.action_timeout == previous.action_timeout
-    assert transferred.options == previous.options
+    expected = yaml.safe_load((root / 'test/fixtures/legacy_experiment_config.yaml').read_text())
+    profile = SimpleNamespace()
+    configure_experiment(profile, arguments)
+    assert profile.config == expected['config']
+    assert profile.original_config == expected['original_config']
+    assert profile.modalities == expected['modalities']
+    assert profile.limit == expected['limit'] == 3
+    assert profile.action_timeout == expected['action_timeout']
+    import sys
+    assert vars(profile.options) == dict(config=configuration, world_model_root=tmp_path,
+        run_name='smpa', max_cycles=3, service='vision', hear='false', vision='false',
+        read_session=None, python=sys.executable, model_root=str(Path.cwd() / 'models'),
+        audio_lock='', input_device='', output_device='', demo='false', timeout=120)
 
 
-def test_transferred_model_selection_matches_runner():
-    """Preserve API model selection without creating a backend instance.
+def test_transferred_model_selection_preserves_api_identity():
+    """Resolve the existing API model identity without starting a backend.
 
-    Compare the transferred catalogue-selection function with the prior Runner
-    logic for the same configured API model. Neither path opens an API client or
-    performs inference, and both retain the same identities for cognitive stages.
+    Use the legacy comparison's selected model and require the complete shared
+    Sense, Model and Plan configuration to retain that identity and provider.
     """
-    from copy import deepcopy
-    from runner import Runner
     from smpa_ros.smpa import resolve_experiment_models
-    config = {'model': {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture/vision'}}
-    def profile():
-        """Create independent mutable selection inputs for the two paths."""
-        return SimpleNamespace(config=deepcopy(config), options=SimpleNamespace(model_root='/tmp/models'),
-                               modalities={'hear': False})
-    previous, transferred = profile(), profile()
-    Runner.initialize_backends(previous)
-    resolve_experiment_models(transferred)
-    assert transferred.config == previous.config and transferred.selected == previous.selected
-    assert transferred.models == previous.models
-    assert transferred.model_identifier == previous.model_identifier == 'fixture/vision'
+    selection = {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture/vision'}
+    profile = SimpleNamespace(config={'model': dict(selection)},
+                              options=SimpleNamespace(model_root='/tmp/models'),
+                              modalities={'hear': False})
+    resolve_experiment_models(profile)
+    assert profile.config['model'] == selection
+    assert profile.selected == selection
+    assert profile.models == {stage: selection for stage in ('vision', 'model', 'plan')}
+    assert profile.model_identifier == profile.plan_identifier == 'fixture/vision'

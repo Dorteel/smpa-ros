@@ -1,5 +1,6 @@
 """Exercise generated cognitive actions over ROS with mocked external operations."""
 import json
+from itertools import count
 from threading import Event, Thread
 
 import pytest
@@ -13,6 +14,20 @@ from rclpy.parameter import Parameter
 from memory import MemoryManager
 from smpa_ros.smpa import run_actions
 from smpa_ros_interfaces.action import Sense, Model, Plan, Act
+
+
+_TEST_DOMAINS = count(110)
+
+
+@pytest.fixture(autouse=True)
+def isolate_ros_domain(monkeypatch):
+    """Give each transport test a fresh local DDS discovery domain.
+
+    Stage processes inherit the same domain as their parent. A new domain for
+    each test prevents recently stopped service endpoints from a previous ROS
+    context from receiving a subsequent experiment's requests.
+    """
+    monkeypatch.setenv('ROS_DOMAIN_ID', str(next(_TEST_DOMAINS)))
 
 
 def wait_future(future, timeout=10):
@@ -86,7 +101,8 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
     Reject unsupported capabilities, then let the actual experiment script run
     two cycles using default and explicit capabilities. Check ROS terminal
     states, source records, shared run identity and completion. Invoke the same
-    nodes in an alternative explicit order to check stage independence before draining
+    nodes in an alternative explicit order with selected prompts, then reject
+    missing prompts. Check stage independence before draining
     and destroying every node and the ROS context.
     """
     import smpa_ros.sense_node as sense
@@ -133,6 +149,8 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
             assert goal.run_id == memory.metadata['run_id']
             if len(order) > 4:
                 goal.capability = stage
+            if len(order) > 8:
+                goal.prompt_name = 'default'
             handle = wait_future(clients[stage].send_goal_async(goal))
             assert handle.accepted
             response = wait_future(handle.get_result_async())
@@ -158,8 +176,22 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
         for stage, kind, goal in reordered:
             invoke(stage, kind, goal)
         memory.complete_cycle()
+        memory.in_cycle = False
         assert order[-4:] == ['plan', 'sense', 'model', 'act']
         assert memory.metadata['completed_cycles'] == 3
+        third = memory.directory / 'state/cycle_000003'
+        for stage in ('sense', 'model', 'plan', 'act'):
+            record = json.loads((third / f'{stage}.json').read_text())
+            assert record['prompt_name'] == 'default'
+        memory.begin_cycle()
+        missing = [('sense', Sense.Goal(run_id=identity, prompt_name='missing_prompt')),
+                   ('model', Model.Goal(run_id=identity, prompt_name='missing_prompt', observation='seen')),
+                   ('plan', Plan.Goal(run_id=identity, prompt_name='missing_prompt', world_model='world')),
+                   ('act', Act.Goal(run_id=identity, prompt_name='missing_prompt', action_json='{\"action\":\"look_left\"}'))]
+        for stage, goal in missing:
+            handle = wait_future(clients[stage].send_goal_async(goal))
+            assert handle.accepted
+            assert wait_future(handle.get_result_async()).status == GoalStatus.STATUS_ABORTED
         invalid = Sense.Goal(run_id='00000000-0000-0000-0000-000000000000', capability='sense')
         failed = wait_future(clients['sense'].send_goal_async(invalid))
         assert failed.accepted

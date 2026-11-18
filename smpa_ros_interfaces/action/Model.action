@@ -1,5 +1,6 @@
 string run_id
 string capability
+string prompt_name
 string observation
 string source_record
 string previous_snapshot
