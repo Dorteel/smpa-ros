@@ -16,6 +16,7 @@ import yaml
 from memory import MemoryManager, locked_run, reserve_invocation
 from smpa_ros.model import generate_world_model
 from smpa_ros.belief import model_messages
+from smpa_ros.conversation import read_messages
 from smpa_ros_interfaces.action import GenerateText, GenerateStructured, GenerateStructuredChat, Model
 
 
@@ -158,6 +159,8 @@ class ModelNode(Node):
 
         Validate the supplied role-preserving history, attach to its active run,
         and require the authoritative inference snapshot recorded for that run.
+        Match each role and message against the saved transcript before writing
+        belief provenance, so supplied text cannot be attributed to another source.
         Use the configured ontology and the server's recorded model and generation
         settings as provenance. The existing writer owns locking, graph updates,
         durable records and failure details; report a newly recorded failure.
@@ -173,6 +176,10 @@ class ModelNode(Node):
                 or not isinstance(snapshot.get('loading'), dict)
                 or not isinstance(snapshot.get('generation'), dict)):
             raise RuntimeError('Conversation has no recorded frozen inference settings')
+        saved = read_messages(memory.directory)
+        if ([{key: item[key] for key in ('role', 'content')} for item in messages] !=
+                [{key: item[key] for key in ('role', 'content')} for item in saved]):
+            raise ValueError('Belief history does not match the persisted conversation')
         failures = len(memory.metadata.get('belief_failed_records', []))
         model = dict(generate=partial(self.generate_belief, run_id=request.run_id, snapshot=snapshot),
                      agent=dict(snapshot['loading']), settings=dict(snapshot['generation']),

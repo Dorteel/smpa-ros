@@ -133,8 +133,11 @@ def test_belief_capability_reuses_writer_and_frozen_settings(model_node_class, t
     and that the action succeeds without invoking world-model generation.
     """
     import smpa_ros.model_node as module
-    memory = MemoryManager(tmp_path, goal='Conversation')
+    from smpa_ros.conversation import open_conversation, append_message
+    memory = open_conversation(tmp_path)
     memory.begin_cycle()
+    append_message(memory.directory, 'User', 'hello')
+    append_message(memory.directory, 'Assistant', 'hi')
     snapshot = dict(run_id=memory.metadata['run_id'], server_instance_id='server',
                     active_model='fixture', loading={'backend': 'transformers', 'model_id': 'fixture'},
                     generation={'temperature': 0.0, 'max_new_tokens': 42, 'top_p': 1.0, 'seed': -1})
@@ -169,4 +172,23 @@ def test_belief_rejects_unfrozen_run(model_node_class, tmp_path):
     node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)))
     request = SimpleNamespace(run_id=memory.metadata['run_id'], messages_json='[]')
     with pytest.raises(RuntimeError, match='no recorded frozen'):
+        model_node_class.update_beliefs(node, request)
+
+
+def test_belief_rejects_history_that_differs_from_transcript(model_node_class, tmp_path):
+    """Reject history that would attribute invented text to the saved transcript.
+
+    Persist a real conversation message and a frozen inference snapshot, then
+    supply a different message. The belief writer must not be reached.
+    """
+    from smpa_ros.conversation import open_conversation, append_message
+    memory = open_conversation(tmp_path)
+    memory.begin_cycle()
+    append_message(memory.directory, 'User', 'actual')
+    memory.metadata['inference'] = dict(run_id=memory.metadata['run_id'], loading={}, generation={})
+    memory.write_metadata()
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)))
+    request = SimpleNamespace(run_id=memory.metadata['run_id'],
+                              messages_json=json.dumps([{'role': 'user', 'content': 'invented'}]))
+    with pytest.raises(ValueError, match='does not match'):
         model_node_class.update_beliefs(node, request)
