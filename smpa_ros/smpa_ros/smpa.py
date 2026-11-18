@@ -138,3 +138,20 @@ def finish_outstanding_stage(outstanding, wait, timeout):
         outstanding['result'] = handle.get_result_async()
     wait(outstanding['result'], timeout, 'terminal stage result')
     outstanding.clear()
+
+
+def wait_for_ros(node, future, timeout, operation):
+    """Wait for one ROS response without blocking the experiment indefinitely.
+
+    Spin the experiment's own node for at most the requested interval. Return
+    the response or propagate its exception when the future completes. If it
+    does not complete, raise a named timeout without assuming the remote action
+    or parameter request has stopped.
+    """
+    import rclpy
+    if timeout <= 0:
+        raise ValueError('ROS operation timeout must be positive')
+    rclpy.spin_until_future_complete(node, future, timeout_sec=timeout)
+    if not future.done():
+        raise TimeoutError(f'Timed out waiting for {operation}')
+    return future.result()

@@ -49,3 +49,19 @@ def test_late_acceptance_is_drained_before_cleanup():
     with pytest.raises(TimeoutError, match='still running'):
         finish_outstanding_stage(outstanding, wait, 1.0)
     assert outstanding['handle'] is handle and outstanding['result'] == 'result'
+
+
+def test_ros_wait_returns_result_and_reports_timeout(monkeypatch):
+    """Bound ROS waiting and preserve the actual future outcome.
+
+    A completed future returns its response. An incomplete future raises an
+    operation-specific timeout, with no assumption that the remote work stopped.
+    """
+    import rclpy
+    from smpa_ros.smpa import wait_for_ros
+    monkeypatch.setattr(rclpy, 'spin_until_future_complete', lambda node, future, timeout_sec: None)
+    ready = SimpleNamespace(done=lambda: True, result=lambda: 'response')
+    pending = SimpleNamespace(done=lambda: False)
+    assert wait_for_ros(object(), ready, 1.0, 'fixture') == 'response'
+    with pytest.raises(TimeoutError, match='fixture'):
+        wait_for_ros(object(), pending, 1.0, 'fixture')
