@@ -83,3 +83,58 @@ def run_actions(memory, cycles, invoke, *, notify=None):
         refinement = memory.directory / 'state' / 'refinement.json'
         if refinement.exists() and json.loads(refinement.read_text()).get('status') == 'completed':
             break
+
+
+def invoke_stage(client, goal, wait, timeout, outstanding):
+    """Send one stage goal and retain any operation whose end is unconfirmed.
+
+    The client owns a single cognitive action endpoint. Wait for its server,
+    acceptance and terminal result through the supplied bounded wait function.
+    Keep the acceptance or result future in the shared outstanding dictionary
+    until the remote goal is known to have terminated. This lets experiment
+    cleanup retain inference ownership if a timeout leaves a stage still active.
+    Return the result only for a successful ROS action; propagate all failures.
+    """
+    from action_msgs.msg import GoalStatus
+    if outstanding:
+        raise RuntimeError('An earlier stage action has not reached a terminal state')
+    if not client.wait_for_server(timeout_sec=timeout):
+        raise TimeoutError('Cognitive stage action server is unavailable')
+    acceptance = client.send_goal_async(goal)
+    outstanding['acceptance'] = acceptance
+    handle = wait(acceptance, timeout, 'stage acceptance')
+    if not handle.accepted:
+        outstanding.clear()
+        raise RuntimeError('Cognitive stage action goal was rejected')
+    outstanding['handle'] = handle
+    result_future = handle.get_result_async()
+    outstanding['result'] = result_future
+    response = wait(result_future, timeout, 'stage result')
+    outstanding.clear()
+    if response.status != GoalStatus.STATUS_SUCCEEDED:
+        raise RuntimeError(f'Cognitive stage action failed with status {response.status}')
+    return response.result
+
+
+def finish_outstanding_stage(outstanding, wait, timeout):
+    """Confirm an interrupted stage has ended before releasing shared inference.
+
+    An acceptance response may have arrived after the original timeout. Resolve
+    it first; a rejected goal is already terminal. For an accepted goal wait for
+    its terminal result, using the existing result future when available. Clear
+    the outstanding state only after termination is confirmed. Propagate a
+    timeout or transport error so the caller keeps the inference freeze in place.
+    """
+    if not outstanding:
+        return
+    handle = outstanding.get('handle')
+    if handle is None:
+        handle = wait(outstanding['acceptance'], timeout, 'late stage acceptance')
+        if not handle.accepted:
+            outstanding.clear()
+            return
+        outstanding['handle'] = handle
+    if 'result' not in outstanding:
+        outstanding['result'] = handle.get_result_async()
+    wait(outstanding['result'], timeout, 'terminal stage result')
+    outstanding.clear()
