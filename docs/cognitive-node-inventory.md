@@ -68,45 +68,61 @@ A server restart or changed snapshot stops continuation rather than replacing
 recorded provenance. Conversation replies still use the existing selectable
 lazy backend; they may load a separate model in addition to the belief server.
 
-The legacy Runner and compatibility entry points remain until the regenerated
-ROS interfaces and complete mocked multi-process action sequence are tested.
-The new and modified action definitions require a ROS interface rebuild before
-their transport can be exercised; callback tests using stand-ins do not establish
-ROS wire compatibility. No model weights or simulation were used for these checks.
+## Generated interfaces and ROS transport verification
 
-## Remaining ROS integration gate
+The `smpa_ros_interfaces` package was built in `/tmp/cognitive-stage/install`
+with one build worker. The generated-action contract tests passed for the four
+cognitive actions, the inference actions including their approved `run_id`
+fields, `DescribeStructuredImage`, and `GenerateStructuredChat`. They also
+checked the existing management actions, lifecycle services and status messages.
+`ros2 interface show` resolved both `Model` and `GenerateStructuredChat` from
+the isolated overlay. This installation is a temporary verification artifact,
+not an installation into the normal workspace.
 
-The approved inference goals include `run_id`; `GenerateStructuredChat` and the
-four cognitive actions must be generated from this branch before testing them
-with ROS clients. Existing workspace installations may still contain the older
-Tier 1 action definitions. Source-level contract and mocked callback checks do
-not establish generated type support, message transport, or package installation.
-The legacy Runner remains required until those checks pass.
+Real ROS clients exercised the four stage servers with generated action types.
+A single-process test checked default and explicit capabilities, rejection of
+unsupported capabilities, two script-controlled cycles, source-record links,
+and an aborted request for an invalid run. A separate test started four stage
+processes and ran `execute_experiment` across DDS. It confirmed stage order,
+run identity, persistence links, the exact server-captured freeze, release,
+completed lifecycle state, and clean process termination. Sensing, text generation,
+planning output and robot execution were mocked. A further ROS test exercised
+freeze acquisition and release against the inference server with an injected
+weight-free backend: the server rejected standalone inference and a parameter
+change during the freeze, but accepted a request owned by the active run.
 
-When an authorized machine is stable, build the affected packages with one
-worker and source that installation. The following uses the existing isolated
-feature build directory and does not install models:
+These tests establish communication in the local DDS environment. They do not
+exercise real models, sensors, robot hardware, simulation, GPU operations, or a
+clean install of the two Python packages. Interruption and shutdown have focused
+mocked lifecycle coverage, but an operating-system interruption during a running
+interprocess inference call remains unverified. The conversation reply backend
+remains unchanged. The legacy Runner and compatibility entry points remain in the
+repository; removal is outside this verification task.
+
+To reproduce the generated interface build on a stable authorized host:
 
 ```bash
 cd /home/dorteel/ros2_ws/smpa-cognitive-nodes
 source /opt/ros/jazzy/setup.bash
 export CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-colcon --log-base /tmp/cognitive-stage/log build \
-  --base-paths "$PWD/smpa_ros_interfaces" "$PWD/smpa_llm" "$PWD/smpa_ros" \
-  --build-base /tmp/cognitive-stage/build --install-base /tmp/cognitive-stage/install \
-  --packages-select smpa_ros_interfaces smpa_llm smpa_ros \
-  --executor sequential --parallel-workers 1
-source /tmp/cognitive-stage/install/setup.bash
-PYTHONPATH="$PWD:$PWD/smpa_ros:$PWD/smpa_llm:$PYTHONPATH" \
-  /home/dorteel/ros2_ws/src/smpa-ros/.venv/bin/python -m pytest -q \
-  -c /dev/null -p no:cacheprovider test/test_tier1_interfaces.py
+colcon --log-base /tmp/cognitive-stage/colcon-log build \
+  --base-paths "$PWD/smpa_ros_interfaces" --packages-select smpa_ros_interfaces \
+  --executor sequential --parallel-workers 1 --build-base /tmp/cognitive-stage/build \
+  --install-base /tmp/cognitive-stage/install
 ```
 
-Then exercise actual ROS action clients and servers with mocked inference,
-sensors and robot execution. Verify independent stage calls, the complete
-script-controlled sequence, recorded run identity and inference snapshot,
-lifecycle failure and shutdown, and installed launch files and entry points.
-The current callback tests use action-message stand-ins and are not that transport
-test. Only after successful integration should the Runner implementations, their
-entry points and now-unused dependencies be removed and retested. The conversation
-reply backend remains unchanged.
+To run the generated-interface, ROS transport, script-sequence and lifecycle
+checks with local DDS discovery:
+
+```bash
+cd /home/dorteel/ros2_ws/smpa-cognitive-nodes
+source /opt/ros/jazzy/setup.bash
+source /home/dorteel/ros2_ws/install/setup.bash
+source /tmp/cognitive-stage/install/local_setup.bash
+export PYTHONPATH="$PWD:$PWD/smpa_ros:$PWD/smpa_llm:$PYTHONPATH"
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+/home/dorteel/ros2_ws/src/smpa-ros/.venv/bin/python -m pytest -q \
+  -c /dev/null -p no:cacheprovider test/test_cognitive_ros_transport.py \
+  test/test_tier1_interfaces.py test/test_action_sequence.py \
+  test/test_inference_freeze.py test/test_stage_wait.py test/test_smpa_control.py
+```
