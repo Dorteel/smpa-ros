@@ -1,0 +1,4 @@
+string goal
+---
+bool accepted
+string run_id

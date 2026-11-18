@@ -1,0 +1,6 @@
+string model_id
+---
+bool success
+string error_message
+---
+string stage

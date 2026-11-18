@@ -1,0 +1,4 @@
+---
+string state
+string run_id
+string active_stage

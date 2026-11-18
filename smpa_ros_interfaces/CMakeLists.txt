@@ -10,6 +10,19 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SegmentImage.srv"
   "action/Listen.action"
   "action/Talk.action"
+  "action/GenerateText.action"
+  "action/GenerateStructured.action"
+  "action/DescribeImage.action"
+  "action/LoadModel.action"
+  "action/UnloadModel.action"
+  "action/SetActiveModel.action"
+  "srv/ListModels.srv"
+  "srv/GetModelStatus.srv"
+  "srv/GetSmpaStatus.srv"
+  "srv/StartSmpa.srv"
+  "srv/StopSmpa.srv"
+  "msg/InferenceStatus.msg"
+  "msg/SmpaEvent.msg"
   DEPENDENCIES sensor_msgs action_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
