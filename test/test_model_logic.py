@@ -26,6 +26,7 @@ def model_node_class(monkeypatch):
             self.record_path = ''
             self.snapshot_path = ''
     monkeypatch.setattr(action, 'Model', SimpleNamespace(Result=Result), raising=False)
+    monkeypatch.setattr(action, 'GenerateStructuredChat', SimpleNamespace(Goal=SimpleNamespace), raising=False)
     sys.modules.pop('smpa_ros.model_node', None)
     module = importlib.import_module('smpa_ros.model_node')
     yield module.ModelNode
@@ -48,7 +49,7 @@ def test_model_persists_source_and_previous_snapshot(model_node_class, tmp_path)
         """Capture the generated prompt and return a fixed model response."""
         calls.append((prompt, settings))
         return 'new view'
-    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)),
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value='model' if name == 'default_capability' else str(tmp_path)),
                            generate=generate, get_logger=lambda: Mock())
     handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id'], observation='a cup',
                                source_record='state/cycle_000001/sense.json', previous_snapshot='world_model/previous.md'),
@@ -115,10 +116,57 @@ def test_model_completes_refinement_after_all_questions_attempted(model_node_cla
     def generate(prompt, **settings):
         """Return a fixed world model without invoking a model backend."""
         return 'world'
-    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)),
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value='model' if name == 'default_capability' else str(tmp_path)),
                            generate=generate, get_logger=lambda: Mock())
     handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id'], observation='cup',
                                source_record='', previous_snapshot=''), succeed=Mock(), abort=Mock())
     model_node_class.execute(node, handle)
     handle.succeed.assert_called_once()
     assert json.loads((memory.directory / 'state/refinement.json').read_text())['status'] == 'completed'
+
+
+def test_belief_capability_reuses_writer_and_frozen_settings(model_node_class, tmp_path, monkeypatch):
+    """Route a conversation history to the existing writer under its run freeze.
+
+    Attach a real temporary memory run, but replace belief generation and graph
+    updates. Check that message roles and recorded model settings reach the writer
+    and that the action succeeds without invoking world-model generation.
+    """
+    import smpa_ros.model_node as module
+    memory = MemoryManager(tmp_path, goal='Conversation')
+    memory.begin_cycle()
+    snapshot = dict(run_id=memory.metadata['run_id'], server_instance_id='server',
+                    active_model='fixture', loading={'backend': 'transformers', 'model_id': 'fixture'},
+                    generation={'temperature': 0.0, 'max_new_tokens': 42, 'top_p': 1.0, 'seed': -1})
+    memory.metadata['inference'] = snapshot
+    memory.write_metadata()
+    calls = []
+    def model_messages(attached, model, messages):
+        """Capture the attached identity, settings, and history without inference."""
+        calls.append((attached.metadata['run_id'], model, messages))
+    monkeypatch.setattr(module, 'model_messages', model_messages)
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path) if name == 'memory_root' else ''),
+                           generate_belief=Mock(), get_logger=lambda: Mock())
+    node.update_beliefs = lambda request: model_node_class.update_beliefs(node, request)
+    history = [{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'hi'}]
+    goal = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id'], capability='belief',
+                           messages_json=json.dumps(history)), succeed=Mock(), abort=Mock())
+    model_node_class.execute(node, goal)
+    goal.succeed.assert_called_once()
+    assert calls[0][0] == memory.metadata['run_id'] and calls[0][2] == history
+    assert calls[0][1]['settings'] == snapshot['generation']
+    assert calls[0][1]['agent'] == snapshot['loading']
+
+
+def test_belief_rejects_unfrozen_run(model_node_class, tmp_path):
+    """Refuse a belief update when no authoritative frozen settings were saved.
+
+    The existing run has an active cycle, but no inference snapshot. No writer
+    or inference operation may be started for that incomplete run context.
+    """
+    memory = MemoryManager(tmp_path, goal='Conversation')
+    memory.begin_cycle()
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)))
+    request = SimpleNamespace(run_id=memory.metadata['run_id'], messages_json='[]')
+    with pytest.raises(RuntimeError, match='no recorded frozen'):
+        model_node_class.update_beliefs(node, request)

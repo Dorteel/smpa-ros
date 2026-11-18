@@ -15,7 +15,8 @@ import yaml
 
 from memory import MemoryManager, locked_run, reserve_invocation
 from smpa_ros.model import generate_world_model
-from smpa_ros_interfaces.action import GenerateText, GenerateStructured, Model
+from smpa_ros.belief import model_messages
+from smpa_ros_interfaces.action import GenerateText, GenerateStructured, GenerateStructuredChat, Model
 
 
 class ModelNode(Node):
@@ -25,7 +26,7 @@ class ModelNode(Node):
         """Connect the Model action to existing memory and shared inference.
 
         Declare the run root, default capability, inference endpoint and timeout.
-        Create clients for text and schema-constrained generation. Starting this
+        Create clients for text, structured generation and role-preserving chat. Starting this
         node does not load a model, start a run or call another cognitive stage.
         """
         super().__init__('model_stage', **node_options)
@@ -33,23 +34,25 @@ class ModelNode(Node):
         self.declare_parameter('default_capability', 'model')
         self.declare_parameter('inference_node', '/llm')
         self.declare_parameter('timeout', 120.0)
+        self.declare_parameter('belief_ontology', '')
         self.group = ReentrantCallbackGroup()
         inference = self.get_parameter('inference_node').value.rstrip('/')
         self.text_client = ActionClient(self, GenerateText, inference + '/generate', callback_group=self.group)
         self.structured_client = ActionClient(self, GenerateStructured, inference + '/generate_structured', callback_group=self.group)
+        self.chat_client = ActionClient(self, GenerateStructuredChat, inference + '/generate_structured_chat', callback_group=self.group)
         self.parameters = AsyncParameterClient(self, inference, callback_group=self.group)
         self.server = ActionServer(self, Model, 'smpa/model', self.execute,
                                    goal_callback=self.accept_goal, cancel_callback=self.cancel,
                                    callback_group=self.group)
 
     def accept_goal(self, request):
-        """Accept the default or explicit world-model capability only.
+        """Accept the configured default, world-model or conversation-belief capability.
 
         An empty selection uses the configured default. Reject an unsupported
         selection before allocating a record or requesting inference.
         """
         selected = request.capability or self.get_parameter('default_capability').value
-        if selected != 'model':
+        if selected not in ('model', 'belief'):
             self.get_logger().error(f'Unsupported Model capability: {selected}')
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
@@ -122,10 +125,68 @@ class ModelNode(Node):
             raise RuntimeError('Inference action failed')
         return result.result.text if format_name == 'text' else result.result.json_output
 
-    def execute(self, goal_handle):
-        """Generate one world model from a supplied observation and prior snapshot.
+    def generate_belief(self, messages, *, run_id, snapshot, **settings):
+        """Send one belief prompt with its original roles to shared inference.
 
-        Resolve the existing active run, validate the source record and previous
+        Confirm that the server still reports the exact frozen run snapshot.
+        Then submit the role-preserving messages and any schema through the
+        dedicated action, with the run identity checked by the server. A failed,
+        rejected, or timed-out request raises instead of inventing output.
+        """
+        timeout = self.get_parameter('timeout').value
+        if timeout <= 0 or not self.parameters.wait_for_services(timeout_sec=timeout):
+            raise TimeoutError('Inference parameter services are unavailable')
+        response = self.wait(self.parameters.get_parameters(['frozen_settings_json']), timeout, 'frozen inference settings')
+        if not response.values[0].string_value or json.loads(response.values[0].string_value) != snapshot:
+            raise RuntimeError('Inference server ownership or frozen settings changed')
+        schema = settings.get('schema')
+        goal = GenerateStructuredChat.Goal(messages_json=json.dumps(messages, ensure_ascii=False),
+                                           json_schema=json.dumps(schema) if schema is not None else '',
+                                           run_id=run_id)
+        if not self.chat_client.wait_for_server(timeout_sec=timeout):
+            raise TimeoutError('Chat inference action is unavailable')
+        handle = self.wait(self.chat_client.send_goal_async(goal), timeout, 'chat inference acceptance')
+        if not handle.accepted:
+            raise RuntimeError('Chat inference goal was rejected')
+        response = self.wait(handle.get_result_async(), timeout, 'chat inference result')
+        if response.status != GoalStatus.STATUS_SUCCEEDED:
+            raise RuntimeError('Chat inference action failed')
+        return response.result.json_output
+
+    def update_beliefs(self, request):
+        """Update one active conversation run through the existing belief writer.
+
+        Validate the supplied role-preserving history, attach to its active run,
+        and require the authoritative inference snapshot recorded for that run.
+        Use the configured ontology and the server's recorded model and generation
+        settings as provenance. The existing writer owns locking, graph updates,
+        durable records and failure details; report a newly recorded failure.
+        """
+        messages = json.loads(request.messages_json)
+        if (not isinstance(messages, list) or any(not isinstance(item, dict)
+                or item.get('role') not in ('user', 'assistant')
+                or not isinstance(item.get('content'), str) for item in messages)):
+            raise ValueError('Belief history must contain user and assistant messages')
+        memory = MemoryManager.attach_active_run(self.get_parameter('memory_root').value, request.run_id)
+        snapshot = memory.metadata.get('inference')
+        if (not isinstance(snapshot, dict) or snapshot.get('run_id') != request.run_id
+                or not isinstance(snapshot.get('loading'), dict)
+                or not isinstance(snapshot.get('generation'), dict)):
+            raise RuntimeError('Conversation has no recorded frozen inference settings')
+        failures = len(memory.metadata.get('belief_failed_records', []))
+        model = dict(generate=partial(self.generate_belief, run_id=request.run_id, snapshot=snapshot),
+                     agent=dict(snapshot['loading']), settings=dict(snapshot['generation']),
+                     ontology=self.get_parameter('belief_ontology').value or None)
+        model_messages(memory, model, messages)
+        if len(memory.metadata.get('belief_failed_records', [])) != failures:
+            raise RuntimeError('Belief update failed; see the Model run record')
+
+    def execute(self, goal_handle):
+        """Generate a world model or update conversation beliefs for one active run.
+
+        For belief requests, delegate the history to the existing belief writer
+        and return after it completes. For world-model requests, resolve the active
+        run, validate the source record and previous
         snapshot as paths inside it, and reserve a durable invocation. Invoke the
         existing generator with frozen run settings, preserving its snapshot and
         provenance record. Return both paths on success. Record and abort errors
@@ -136,6 +197,13 @@ class ModelNode(Node):
         provenance = None
         try:
             request = goal_handle.request
+            capability = getattr(request, 'capability', '') or self.get_parameter('default_capability').value
+            if capability == 'belief':
+                self.update_beliefs(request)
+                goal_handle.succeed()
+                return result
+            if capability != 'model':
+                raise ValueError('Unsupported Model capability')
             with locked_run(self.get_parameter('memory_root').value, request.run_id) as directory:
                 for value, area in ((request.source_record, None), (request.previous_snapshot, 'world_model')):
                     if value:
@@ -186,12 +254,13 @@ class ModelNode(Node):
     def destroy_node(self):
         """Release this stage's action endpoints while leaving inference running.
 
-        Destroy both inference clients and the Model server before releasing the
+        Destroy the inference clients and the Model server before releasing the
         node itself. The independently owned backend is not unloaded.
         """
         self.server.destroy()
         self.text_client.destroy()
         self.structured_client.destroy()
+        self.chat_client.destroy()
         return super().destroy_node()
 
 

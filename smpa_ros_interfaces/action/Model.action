@@ -3,6 +3,7 @@ string capability
 string observation
 string source_record
 string previous_snapshot
+string messages_json
 ---
 string world_model
 string record_path
