@@ -295,6 +295,7 @@ implemented by `smpa_llm` and the SMPA endpoints by `smpa_ros`.
 | `/llm/generate` | action `GenerateText` | `string prompt` | `string text` | `string partial_text`; generate text |
 | `/llm/generate_structured` | action `GenerateStructured` | `string prompt`, `string json_schema` | `string json_output` | `string partial_text`; generate schema-constrained JSON |
 | `/llm/describe_image` | action `DescribeImage` | `sensor_msgs/Image image`, `string prompt` | `string description` | `string partial_text`; describe the supplied image |
+| `/llm/describe_structured_image` | action `DescribeStructuredImage` | `sensor_msgs/Image image`, `string prompt`, `string json_schema` | `string json_output` | `string partial_text`; describe the image with constrained JSON |
 | `/llm/load_model` | action `LoadModel` | `string model_id` | `bool success`, `string error_message` | `string stage`; load a registered alias |
 | `/llm/unload_model` | action `UnloadModel` | empty | `bool success`, `string error_message` | `string stage`; release the active backend |
 | `/llm/set_active_model` | action `SetActiveModel` | `string model_id` | `bool success`, `string error_message` | `string stage`; select and load a registered alias |

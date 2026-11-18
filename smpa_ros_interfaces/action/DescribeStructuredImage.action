@@ -1,0 +1,7 @@
+sensor_msgs/Image image
+string prompt
+string json_schema
+---
+string json_output
+---
+string partial_text

@@ -326,3 +326,44 @@ def test_catalogue_excludes_missing_local_path(server):
     assert 'qwen3_4b' not in response.model_ids
     assert 'llama3_8b' in response.model_ids
     assert not server.load_calls
+
+
+def test_structured_image_delegates_schema_and_rejects_invalid_output(server):
+    """Forward an image and actual schema to constrained vision generation.
+
+    The fake vision backend records the schema, response format and original
+    pixel without loading weights. Valid output succeeds; a schema-invalid result
+    and an invalid schema abort without claiming unconstrained generation worked.
+    """
+    from smpa_ros_interfaces.action import DescribeStructuredImage
+    from sensor_msgs.msg import Image
+    calls = []
+    output = ['{"answer":"yes"}']
+
+    def describe(image, prompt, **settings):
+        """Record image and generation settings, then return the selected fixture."""
+        calls.append((image.getpixel((0, 0)), prompt, settings))
+        return output[0]
+
+    server.replace_model('qwen3_4b')
+    server.backend.describe = describe
+    schema = '{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}'
+    image = Image(width=1, height=1, encoding='rgb8', step=3, data=[255, 0, 0])
+    goal = FakeGoal(image=image, prompt='What is visible?', json_schema=schema)
+    server.reserve(None)
+    result = server.infer(goal, action_type=DescribeStructuredImage, result_field='json_output')
+    assert result.json_output == output[0] and goal.outcome == 'succeeded'
+    assert calls[0][0] == (255, 0, 0)
+    assert calls[0][2]['schema']['required'] == ['answer']
+    assert calls[0][2]['response_format'] == 'json_schema'
+    assert not goal.feedback
+    output[0] = '{"answer":42}'
+    goal = FakeGoal(image=image, prompt='What is visible?', json_schema=schema)
+    server.reserve(None)
+    server.infer(goal, action_type=DescribeStructuredImage, result_field='json_output')
+    assert goal.outcome == 'aborted'
+    goal = FakeGoal(image=image, prompt='What is visible?', json_schema='{"type":"invalid"}')
+    before = len(calls)
+    server.reserve(None)
+    server.infer(goal, action_type=DescribeStructuredImage, result_field='json_output')
+    assert goal.outcome == 'aborted' and len(calls) == before

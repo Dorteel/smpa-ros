@@ -25,7 +25,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import yaml
 
-from smpa_ros_interfaces.action import (DescribeImage, GenerateStructured, GenerateText,
+from smpa_ros_interfaces.action import (DescribeImage, DescribeStructuredImage, GenerateStructured, GenerateText,
                                         LoadModel, SetActiveModel, UnloadModel)
 from smpa_ros_interfaces.msg import InferenceStatus
 from smpa_ros_interfaces.srv import GetModelStatus, ListModels
@@ -150,7 +150,8 @@ class InferenceServer(Node):
                 callback_group=self.group))
         for action_type, name, field in [(GenerateText, 'generate', 'text'),
                 (GenerateStructured, 'generate_structured', 'json_output'),
-                (DescribeImage, 'describe_image', 'description')]:
+                (DescribeImage, 'describe_image', 'description'),
+                (DescribeStructuredImage, 'describe_structured_image', 'json_output')]:
             self.actions.append(ActionServer(self, action_type, 'llm/' + name,
                 partial(self.infer, action_type=action_type, result_field=field),
                 goal_callback=self.reserve, cancel_callback=self.cancel,
@@ -407,7 +408,8 @@ class InferenceServer(Node):
         Require a ready backend, then capture generation controls and the immutable
         loaded identity under the state lock. Require a callable for the requested
         operation before calling the backend. Validate a structured request's schema
-        before passing it to the backend's constrained generation path. Decode images
+        before passing it to the backend's constrained generation path. Structured
+        image requests forward that schema to the existing vision backend. Decode images
         with the same converter used by legacy Sense. Never synthesize feedback.
         Existing blocking backends reject cancellation; successful completion uses
         the native success state and failures abort with a logged diagnostic because
@@ -424,7 +426,8 @@ class InferenceServer(Node):
             request = goal_handle.request
             if not request.prompt.strip():
                 raise ValueError('prompt must be nonempty')
-            if result_field != 'description' and not callable(getattr(self.backend, 'generate', None)):
+            is_image = action_type in (DescribeImage, DescribeStructuredImage)
+            if not is_image and not callable(getattr(self.backend, 'generate', None)):
                 raise ValueError('The active model does not support text generation')
             schema = json.loads(request.json_schema) if result_field == 'json_output' else None
             if result_field == 'json_output':
@@ -437,7 +440,7 @@ class InferenceServer(Node):
             if schema is not None:
                 options.update(schema=schema, response_format='json_schema')
             self.change_state('generating')
-            if result_field == 'description':
+            if is_image:
                 if not callable(getattr(self.backend, 'describe', None)) or (
                         backend_kind == 'api' and getattr(self.backend, 'modality', '') != 'vision'):
                     raise ValueError('The active model does not support images')

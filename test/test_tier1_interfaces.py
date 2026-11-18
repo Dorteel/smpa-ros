@@ -8,6 +8,7 @@ from smpa_ros_interfaces import action, msg, srv
     ('GenerateText', ['prompt'], ['text'], ['partial_text']),
     ('GenerateStructured', ['prompt', 'json_schema'], ['json_output'], ['partial_text']),
     ('DescribeImage', ['image', 'prompt'], ['description'], ['partial_text']),
+    ('DescribeStructuredImage', ['image', 'prompt', 'json_schema'], ['json_output'], ['partial_text']),
     ('LoadModel', ['model_id'], ['success', 'error_message'], ['stage']),
     ('UnloadModel', [], ['success', 'error_message'], ['stage']),
     ('SetActiveModel', ['model_id'], ['success', 'error_message'], ['stage']),
