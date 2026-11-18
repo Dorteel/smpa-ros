@@ -175,7 +175,7 @@ def test_real_action_transport_and_script_sequence(tmp_path, monkeypatch):
         rclpy.shutdown()
 
 
-def stage_process(stage, root, stop):
+def stage_process(stage, root, stop, sensing_started=None, allow_sensing=None):
     """Serve one stage in its own process with only external operations mocked.
 
     Select the named existing node, replace its external work with deterministic
@@ -187,6 +187,18 @@ def stage_process(stage, root, stop):
     import smpa_ros.plan_node as plan
     import smpa_ros.act_node as act
     sense.observe = fake_observation
+    if stage == 'sense' and sensing_started is not None:
+        def delayed_observation(*args, **kwargs):
+            """Hold one observation until the test allows the sensor to finish.
+
+            Tell the parent that a stage is active, wait for its release, and
+            then return the normal fixture observation without sensor access.
+            """
+            sensing_started.set()
+            if not allow_sensing.wait(timeout=15):
+                raise TimeoutError('Test did not release the mocked sensor')
+            return fake_observation(*args, **kwargs)
+        sense.observe = delayed_observation
     model.ModelNode.generate = fake_world_generation
     plan.PlanNode.generate = fake_plan_generation
     def dispatch(self, name, record, **context):
@@ -408,3 +420,78 @@ def test_installed_smpa_command_runs_complete_experiment(tmp_path):
                 process.terminate()
                 process.join(timeout=5)
         assert all(process.exitcode == 0 for process in processes)
+
+
+def test_installed_smpa_command_interrupts_and_releases_freeze(tmp_path):
+    """Interrupt the installed command while a mocked Sense action is active.
+
+    Wait until the real Sense action reaches a held observation, signal the
+    experiment, then allow that action to finish. Confirm the run is marked
+    interrupted, the active inference owner is released only after completion,
+    and every independently launched stage process terminates cleanly.
+    """
+    import multiprocessing
+    import os
+    from pathlib import Path
+    import signal
+    import subprocess
+    import yaml
+    from ament_index_python.packages import get_package_prefix, get_package_share_directory
+    from smpa_llm.server import InferenceServer
+
+    context = multiprocessing.get_context('spawn')
+    stop, sensing_started, allow_sensing = context.Event(), context.Event(), context.Event()
+    names = ('sense', 'model', 'plan', 'act')
+    processes = [context.Process(target=stage_process,
+        args=(name, str(tmp_path), stop, sensing_started if name == 'sense' else None, allow_sensing))
+        for name in names]
+    for process in processes:
+        process.start()
+    registry = tmp_path / 'models.yaml'
+    registry.write_text(yaml.safe_dump({'models': {'fixture': {'backend': 'transformers', 'model_id': 'fixture', 'path': 'fake'}}}))
+    configuration = yaml.safe_load((Path(get_package_share_directory('smpa_ros')) / 'config.yaml').read_text())
+    configuration['model'] = {'backend': 'api', 'provider': 'openai', 'model_id': 'fixture'}
+    configuration['sensing'] = {'vision': False, 'hear': False}
+    configuration.pop('scene_refinement', None)
+    config = tmp_path / 'config.yaml'
+    config.write_text(yaml.safe_dump(configuration))
+    rclpy.init(args=[])
+    server = InferenceServer(loader=fake_backend_loader,
+                             parameter_overrides=[Parameter('registry_file', value=str(registry))])
+    server.replace_model('fixture')
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(server)
+    thread = Thread(target=executor.spin, daemon=True)
+    thread.start()
+    executable = Path(get_package_prefix('smpa_ros')) / 'lib/smpa_ros/smpa'
+    process = None
+    try:
+        process = subprocess.Popen([str(executable), '--config', str(config), '--world-model-root', str(tmp_path),
+                                    '--max-cycles', '1', '--timeout', '15'], cwd=tmp_path,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=os.environ.copy())
+        assert sensing_started.wait(timeout=30), 'Sense action did not begin'
+        process.send_signal(signal.SIGINT)
+        allow_sensing.set()
+        stdout, stderr = process.communicate(timeout=30)
+        assert process.returncode != 0, stdout + stderr
+        metadata_path, = (tmp_path / 'runs').glob('*/metadata.yaml')
+        metadata = yaml.safe_load(metadata_path.read_text())
+        assert metadata['status'] == 'interrupted'
+        assert metadata['completed_cycles'] == 0
+        assert server.get_parameter('experiment_run_id').value == ''
+    finally:
+        allow_sensing.set()
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+        executor.shutdown(timeout_sec=10)
+        thread.join(timeout=10)
+        server.destroy_node()
+        rclpy.shutdown()
+        stop.set()
+        for child in processes:
+            child.join(timeout=10)
+            if child.is_alive():
+                child.terminate()
+                child.join(timeout=5)
+        assert all(child.exitcode == 0 for child in processes)
