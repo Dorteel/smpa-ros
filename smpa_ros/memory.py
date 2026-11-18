@@ -1,5 +1,6 @@
 """Run directories, assignment validation, and lifecycle metadata."""
 from datetime import datetime
+from contextlib import contextmanager
 from copy import deepcopy
 from urllib.parse import urlsplit
 import os
@@ -212,3 +213,45 @@ class MemoryManager:
         if self.metadata['status'] == 'running':
             self.metadata.update(status=status, completed_at=datetime.now().astimezone().isoformat())
             self.write_metadata()
+
+
+@contextmanager
+def locked_run(root, run_id):
+    """Resolve one run identity and hold its cooperative filesystem write lock.
+
+    The root is the configured memory root and run_id identifies one existing
+    run beneath its runs directory. Require a canonical UUID, locate exactly one
+    matching directory, and validate its metadata and expected subdirectories.
+    Resolve the directory before opening the lock so a caller cannot select a
+    different run by supplying a path as the identity.
+
+    Acquire an exclusive advisory lock in the run directory and validate the
+    identity again after acquiring it. Yield the validated run directory while
+    the caller reads or updates its records. Release the lock and close its file
+    descriptor even if the caller raises. All writers that share mutable files
+    must use this same lock; atomic replacement alone does not serialize them.
+    The lock does not create a run, resume an experiment, or change metadata.
+    """
+    from uuid import UUID
+    import fcntl
+
+    try:
+        identity = str(UUID(run_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError('run_id must be a canonical UUID') from error
+    if identity != run_id:
+        raise ValueError('run_id must be a canonical UUID')
+    runs = Path(root).expanduser().resolve() / 'runs'
+    matches = [path for path in runs.glob('*_' + identity)
+               if path.is_dir() and not path.is_symlink()]
+    if len(matches) != 1:
+        raise ValueError('run_id must identify exactly one existing run')
+    directory, _ = MemoryManager.assigned_run(str(matches[0].resolve()), identity)
+    descriptor = os.open(directory / '.run.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        MemoryManager.assigned_run(str(directory), identity)
+        yield directory
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
