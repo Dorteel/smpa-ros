@@ -160,3 +160,39 @@ def test_focused_refinement_persists_answer_and_queue(act_node_class, tmp_path, 
     assert entry['attempted'] and entry['status'] == 'answered' and entry['answer'] == 'red'
     assert entry['source_record'] == record['observation_record']
     assert schemas[0]['required'] == ['status', 'answer']
+
+
+def test_focused_refinement_failure_retains_attempt(act_node_class, tmp_path, monkeypatch):
+    """Retain an attempted unanswered question when image inference fails.
+
+    The action aborts and persists its failure record. The refinement queue keeps
+    the attempted question and error so a failure is not silently retried as a
+    new observation or reported as a successful answer.
+    """
+    from types import MethodType
+    from PIL import Image as PILImage
+    import smpa_ros.sense as sensing
+    pipeline = {'enabled_actions': ['observe'], 'scene_refinement': {'enabled': True, 'properties': ['color']},
+        'stage_settings': {'sense': {'temperature': 0.0, 'max_output_tokens': 32, 'reasoning_effort': None,
+                                    'seed': None, 'response_format': 'json_schema', 'output_schema': {'type': 'object'}}}}
+    memory = MemoryManager(tmp_path, goal='Find cup', configuration={'pipeline': pipeline})
+    memory.begin_cycle()
+    PILImage.new('RGB', (1, 1), (255, 0, 0)).save(memory.directory / 'observations/vision/frozen_image.png')
+    memory.write_refinement({'status': 'running', 'questions': [{'target': 'cup', 'question': 'What color?',
+                                                                  'attempted': False, 'status': 'unanswered', 'answer': None}]})
+    def fail(*args, **kwargs):
+        """Simulate a failed shared inference request without loading a model."""
+        raise RuntimeError('vision unavailable')
+    monkeypatch.setattr(sensing, 'describe_image', fail)
+    node = SimpleNamespace(get_parameter=lambda name: SimpleNamespace(value=str(tmp_path)), get_logger=lambda: Mock())
+    node.dispatch = MethodType(act_node_class.dispatch, node)
+    node.focus = MethodType(act_node_class.focus, node)
+    handle = SimpleNamespace(request=SimpleNamespace(run_id=memory.metadata['run_id'],
+        action_json=json.dumps({'action': 'observe', 'target': 'cup', 'question': 'What color?'}), source_record=''),
+        succeed=Mock(), abort=Mock())
+    act_node_class.execute(node, handle)
+    handle.abort.assert_called_once()
+    entry = json.loads((memory.directory / 'state/refinement.json').read_text())['questions'][0]
+    record = json.loads((memory.directory / 'state/cycle_000001/act.json').read_text())
+    assert entry['attempted'] and entry['status'] == 'unanswered' and 'vision unavailable' in entry['error']
+    assert record['status'] == 'failed' and not record['success']
