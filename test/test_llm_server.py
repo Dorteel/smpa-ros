@@ -579,11 +579,17 @@ def test_stage_specific_settings_are_frozen_and_forwarded(server):
         """Record the selected generation controls without contacting a model."""
         calls.append((prompt, options))
         return 'fixture response'
+    def generate_conversation(prompt, **options):
+        """Return the same recorded response through the API chat entry point."""
+        return {'response': generate(prompt, **options)}
     server.backend.generate = generate
+    server.backend.generate_conversation = generate_conversation
     updates = [Parameter('models.qwen3_4b.stages.model.max_new_tokens', value=41),
                Parameter('models.qwen3_4b.stages.model.reasoning_effort', value='low'),
+               Parameter('models.qwen3_4b.stages.model.top_p', value=0.8),
                Parameter('models.qwen3_4b.stages.plan.max_new_tokens', value=83),
-               Parameter('models.qwen3_4b.stages.plan.reasoning_effort', value='high')]
+               Parameter('models.qwen3_4b.stages.plan.reasoning_effort', value='high'),
+               Parameter('models.qwen3_4b.stages.plan.top_p', value=0.9)]
     assert server.set_parameters_atomically(updates).successful
     assert server.stage_settings('llama3_8b', 'model')['max_new_tokens'] == 128
     assert server.set_parameters_atomically([Parameter('experiment_run_id', value='run-a')]).successful
@@ -601,7 +607,9 @@ def test_stage_specific_settings_are_frozen_and_forwarded(server):
         result = server.infer(goal, action_type=GenerateText, result_field='text')
         assert goal.outcome == 'succeeded' and result.text == 'fixture response'
     assert calls[0][1]['max_new_tokens'] == 41 and calls[0][1]['reasoning_effort'] == 'low'
+    assert calls[0][1]['top_p'] == 0.8
     assert calls[1][1]['max_new_tokens'] == 83 and calls[1][1]['reasoning_effort'] == 'high'
+    assert calls[1][1]['top_p'] == 0.9
     assert server.set_parameters_atomically([Parameter('experiment_run_id', value='release:run-a')]).successful
 
 

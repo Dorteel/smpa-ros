@@ -79,13 +79,11 @@ class PlanNode(Node):
     def generate(self, prompt, *, run_id, **settings):
         """Request schema-constrained generation from the configured LLM node.
 
-        Require the inference server to match this run's saved snapshot. Check that the
-        selected server's active model has the same generation
-        controls as the frozen planning request; otherwise fail instead of
-        silently recording settings that were not used. The server also applies
-        its recorded top-p setting, which the stage configuration does not specify. Send the actual schema
-        and prompt through the existing structured-generation action. Return its
-        text only on a successful ROS action result.
+        Require the inference server to match this run's saved snapshot. Check
+        that its Plan controls match the frozen planning request, and fail if
+        they differ. The server also applies its recorded top-p setting, which
+        the stage configuration does not specify. Send the schema and prompt
+        through the structured-generation action, and return only successful output.
         """
         timeout = self.get_parameter('timeout').value
         if timeout <= 0:
