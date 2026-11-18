@@ -277,3 +277,52 @@ def test_request_snapshot_and_busy_switch_safety(server):
         worker.join(5)
     assert not worker.is_alive() and goal.outcome == 'succeeded'
     assert len(server.load_calls) == 1
+
+
+def test_unsupported_text_backend_aborts_without_inference(server):
+    """Reject text and structured requests when the loaded backend is vision-only.
+
+    A backend exposing only image description cannot generate text or enforce a
+    text schema. Both goals must abort and leave the backend available for a
+    later supported request, without trying to call a missing method.
+    """
+    from smpa_ros_interfaces.action import GenerateText, GenerateStructured
+    server.replace_model('qwen3_4b')
+    server.backend.describe = lambda *args, **kwargs: 'image'
+    for action, fields, result_field in (
+            (GenerateText, {'prompt': 'hello'}, 'text'),
+            (GenerateStructured, {'prompt': 'hello', 'json_schema': '{"type":"object"}'}, 'json_output')):
+        goal = FakeGoal(**fields)
+        server.reserve(None)
+        server.infer(goal, action_type=action, result_field=result_field)
+        assert goal.outcome == 'aborted'
+        assert server.backend is not None and not server.busy
+
+
+def test_catalogue_excludes_unsupported_backends(server):
+    """List only aliases whose current adapter can own the model lifecycle.
+
+    Keep the registered entry and its parameters available, but do not advertise
+    a specialized engine as loadable. Changing an alias to an unsupported backend
+    must be reflected in the next discovery response without loading weights.
+    """
+    assert server.set_parameters_atomically([
+        Parameter('models.qwen3_4b.backend', value='faster_whisper')]).successful
+    response = server.list_models(ListModels.Request(), ListModels.Response())
+    assert 'qwen3_4b' not in response.model_ids
+    assert 'llama3_8b' in response.model_ids
+    assert not server.load_calls
+
+
+def test_catalogue_excludes_missing_local_path(server):
+    """Exclude a local selection that lacks a path required by its loader.
+
+    Keep the other registered selection visible and avoid any model loading.
+    The blank path cannot identify a local checkpoint for this server.
+    """
+    assert server.set_parameters_atomically([
+        Parameter('models.qwen3_4b.path', value='')]).successful
+    response = server.list_models(ListModels.Request(), ListModels.Response())
+    assert 'qwen3_4b' not in response.model_ids
+    assert 'llama3_8b' in response.model_ids
+    assert not server.load_calls

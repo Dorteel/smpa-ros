@@ -280,3 +280,29 @@ Model, Plan and Act sections in the SMPA tab are placeholders.
 richer action representations, and Physical/Mental mode integration. Existing
 conversational RDF and schema-constrained single-action selection do not implement
 these broader designs.
+
+
+## Tier 1 ROS interfaces
+
+The opt-in `llm_server` exposes inference actions under `llm/` and model
+management actions and services alongside them. Generation goals carry only
+the prompt, image, or serialized JSON Schema needed for that request. Model
+loading and sampling settings live under `models.<alias>.*` ROS parameters;
+loading changes take effect on the next explicit load or switch, while each
+generation uses a snapshot of the active model's sampling settings.
+
+`load_model` and `set_active_model` currently have the same meaning: select
+and load one registered model, replacing the previous backend if necessary.
+`list_models` lists supported backend types rather than guaranteeing local
+weights, credentials, or provider availability. One operation at a time owns
+the backend. Inference action feedback is reserved for future streaming and
+is not emitted; cancellation is rejected because the existing backends cannot
+stop cooperatively. A failed inference aborts the action and logs the reason.
+
+The `smpa_control` node exposes `smpa/start`, `smpa/stop`,
+`smpa/get_status`, and `smpa/events`. It runs the existing experiment in a
+child process; Runner still owns stage order and persistent records. Startup
+and shutdown waits are bounded. If graceful shutdown does not finish, the
+control node escalates termination of its owned child, so an interrupted run
+may lack its normal final persistence when forced termination is required.
+The independent LLM server does not replace the Runner's in-process backend.

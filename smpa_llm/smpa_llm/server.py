@@ -111,7 +111,8 @@ class InferenceServer(Node):
         self.configuration_file = self.get_parameter('configuration_file').value
         self.model_root = self.get_parameter('model_root').value
         from smpa_llm.configuration import load_configuration
-        self.catalogue = registered_models(load_configuration(self.configuration_file),
+        self.configuration = load_configuration(self.configuration_file)
+        self.catalogue = registered_models(self.configuration,
                                           self.get_parameter('registry_file').value)
         self.lock = RLock()
         self.busy = False
@@ -404,7 +405,8 @@ class InferenceServer(Node):
         """Generate through the existing backend using one parameter snapshot.
 
         Require a ready backend, then capture generation controls and the immutable
-        loaded identity under the state lock. Validate a structured request's schema
+        loaded identity under the state lock. Require a callable for the requested
+        operation before calling the backend. Validate a structured request's schema
         before passing it to the backend's constrained generation path. Decode images
         with the same converter used by legacy Sense. Never synthesize feedback.
         Existing blocking backends reject cancellation; successful completion uses
@@ -422,6 +424,8 @@ class InferenceServer(Node):
             request = goal_handle.request
             if not request.prompt.strip():
                 raise ValueError('prompt must be nonempty')
+            if result_field != 'description' and not callable(getattr(self.backend, 'generate', None)):
+                raise ValueError('The active model does not support text generation')
             schema = json.loads(request.json_schema) if result_field == 'json_output' else None
             if result_field == 'json_output':
                 validate_generation(dict(response_format='json_schema', output_schema=schema))
@@ -474,10 +478,28 @@ class InferenceServer(Node):
     def list_models(self, request, response):
         """List registered aliases without checking assets or loading models.
 
-        Return catalogue order including specialized models. Selecting an engine
-        not supported by this adapter returns an explicit management error.
+        Return aliases whose current configuration uses a supported adapter and
+        supplies its essential local path or API provider and modality. Exclude
+        specialized engines and incomplete selections. Local assets, credentials,
+        and remote provider availability are checked only when loading or using
+        a model, so listing never loads weights or contacts a provider.
         """
-        response.model_ids = list(self.catalogue)
+        with self.lock:
+            response.model_ids = []
+            for alias in self.catalogue:
+                values = self.settings(alias)
+                if values['backend'] == 'transformers' and values['path'].strip():
+                    response.model_ids.append(alias)
+                elif values['backend'] == 'api':
+                    provider = self.configuration
+                    if 'base_url' not in provider:
+                        provider = provider.get(values.get('provider', 'openai'), {})
+                    modality = values.get('modality', 'text')
+                    if (isinstance(provider, dict) and modality in ('text', 'vision')
+                            and provider.get('base_url') and provider.get('api_key_env')
+                            and isinstance(provider.get('models'), dict)
+                            and provider['models'].get(modality)):
+                        response.model_ids.append(alias)
         return response
 
     def get_status(self, request, response):
