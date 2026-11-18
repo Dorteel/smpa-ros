@@ -284,25 +284,141 @@ these broader designs.
 
 ## Tier 1 ROS interfaces
 
-The opt-in `llm_server` exposes inference actions under `llm/` and model
-management actions and services alongside them. Generation goals carry only
-the prompt, image, or serialized JSON Schema needed for that request. Model
-loading and sampling settings live under `models.<alias>.*` ROS parameters;
-loading changes take effect on the next explicit load or switch, while each
-generation uses a snapshot of the active model's sampling settings.
+The independent inference node is named `/llm`; the lifecycle node is named
+`/smpa_control`. The following names assume the default ROS namespace. Names
+are relative in the implementation and gain any namespace supplied at launch.
+All types below belong to `smpa_ros_interfaces`; the inference endpoints are
+implemented by `smpa_llm` and the SMPA endpoints by `smpa_ros`.
 
-`load_model` and `set_active_model` currently have the same meaning: select
-and load one registered model, replacing the previous backend if necessary.
-`list_models` lists supported backend types rather than guaranteeing local
-weights, credentials, or provider availability. One operation at a time owns
-the backend. Inference action feedback is reserved for future streaming and
-is not emitted; cancellation is rejected because the existing backends cannot
-stop cooperatively. A failed inference aborts the action and logs the reason.
+| ROS name | Type | Goal or request | Result or response | Feedback or behavior |
+|---|---|---|---|---|
+| `/llm/generate` | action `GenerateText` | `string prompt` | `string text` | `string partial_text`; generate text |
+| `/llm/generate_structured` | action `GenerateStructured` | `string prompt`, `string json_schema` | `string json_output` | `string partial_text`; generate schema-constrained JSON |
+| `/llm/describe_image` | action `DescribeImage` | `sensor_msgs/Image image`, `string prompt` | `string description` | `string partial_text`; describe the supplied image |
+| `/llm/load_model` | action `LoadModel` | `string model_id` | `bool success`, `string error_message` | `string stage`; load a registered alias |
+| `/llm/unload_model` | action `UnloadModel` | empty | `bool success`, `string error_message` | `string stage`; release the active backend |
+| `/llm/set_active_model` | action `SetActiveModel` | `string model_id` | `bool success`, `string error_message` | `string stage`; select and load a registered alias |
+| `/llm/list_models` | service `ListModels` | empty | `string[] model_ids` | List supported configured aliases |
+| `/llm/get_model_status` | service `GetModelStatus` | empty | `string active_model`, `string state` | Return the current backend status |
+| `/llm/inference_status` | topic `InferenceStatus` | — | `string state`, `string active_model` | Retained status published on transitions |
+| `/smpa/start` | service `StartSmpa` | `string goal` | `bool accepted`, `string run_id` | Start one experiment child |
+| `/smpa/stop` | service `StopSmpa` | empty | `bool accepted` | Request interruption of the child |
+| `/smpa/get_status` | service `GetSmpaStatus` | empty | `string state`, `string run_id`, `string active_stage` | Return the latest observed lifecycle state |
+| `/smpa/events` | topic `SmpaEvent` | — | `string run_id`, `string stage`, `string event` | Report observed run and stage transitions |
 
-The `smpa_control` node exposes `smpa/start`, `smpa/stop`,
-`smpa/get_status`, and `smpa/events`. It runs the existing experiment in a
-child process; Runner still owns stage order and persistent records. Startup
-and shutdown waits are bounded. If graceful shutdown does not finish, the
-control node escalates termination of its owned child, so an interrupted run
-may lack its normal final persistence when forced termination is required.
-The independent LLM server does not replace the Runner's in-process backend.
+The legacy `Listen`, `Talk`, `DescribeScene`, `EvaluateVisualDecision`, and
+`SegmentImage` definitions remain registered.
+### Configuration and precedence
+
+Each registered alias has its own `models.<alias>.*` ROS parameter namespace.
+The loading settings are `model_id`, `path`, `backend`, `device`, `dtype`, and
+`enable_thinking`; `max_new_tokens`, `temperature`, `top_p`, and `seed` are
+request generation settings. A `seed` of `-1` leaves it unset. Setting a
+loading field stages the new value; an explicit load or switch applies it.
+Generation settings are snapshotted for each request, so subsequent parameter
+changes do not change an operation already in progress. `active_model` names
+the loaded alias and cannot be changed directly at runtime: use a model action.
+
+The installed `smpa_llm/models/model_library.yaml` supplies registered defaults.
+The `model` entry in installed `smpa_llm/config.yaml` overlays the selected
+primary alias. ROS parameter overrides take precedence over those defaults.
+`configuration_file`, `registry_file`, and `model_root` are read-only after
+node creation and can be supplied as startup overrides. `active_model` is empty
+by default; a startup override requests an initial load. The launch file reads
+`params_file` first and a nonempty `active_model` launch argument takes
+precedence over the value in that file. `use_sim_time` is the standard ROS
+clock parameter. The catalogue lists compatible adapters with essential
+configuration; it does not prove that assets or provider credentials exist.
+
+For example, `qwen3-4b` is an alias in the installed registry:
+
+```yaml
+llm:
+  ros__parameters:
+    active_model: qwen3-4b
+    models:
+      qwen3-4b:
+        model_id: Qwen/Qwen3-4B
+        path: text/qwen3-4b
+        backend: transformers
+        device: auto
+        dtype: auto
+        enable_thinking: false
+        max_new_tokens: 512
+        temperature: 0.7
+        top_p: 0.9
+        seed: 42
+```
+
+Use a local checkpoint that is actually installed before selecting it. This
+example changes generation defaults and does not download model weights.
+
+### Operation and limitations
+
+Both `load_model` and `set_active_model` currently load the selected alias;
+with one active backend there is no distinct inactive loaded model. Repeating
+an identical load reuses it. Switching releases the old backend before loading a replacement; if that
+load fails, the server enters `error` with no active model. An unknown alias
+is rejected before releasing the old model. An unload
+releases the owned backend. Management and inference share one exclusive slot;
+an overlapping action goal is rejected. The separate Runner still owns its
+existing in-process inference path, so starting this server does not redirect it.
+
+The adapter reuses existing Transformers text and vision implementations and
+configured API providers. Specialized speech, segmentation, VisualJEV, and
+remote model lifetime management are not offered by this server. Actual model
+and provider capabilities, available weights, supported controls, and API
+credentials determine whether a request succeeds. `json_schema` is the actual
+serialized JSON Schema, not a path: structured requests use the existing
+constrained generation path and validate its output. Unsupported schema
+handling fails instead of falling back to unconstrained generation.
+
+Inference result messages contain no error field: failed actions are aborted
+and details are logged by the server. Management results include an error
+message. The current blocking backends cannot cooperatively cancel or stream,
+so cancellation is rejected and inference `partial_text` feedback is not
+emitted. Model status values include `unloaded`, `loading`, `ready`,
+`generating`, `unloading`, and `error`.
+
+The lifecycle node reports `idle`, `running`, `stopping`, `completed`,
+`interrupted`, or `failed`. It delegates to the existing Runner and experiment;
+the experiment retains stage ordering and persisted records remain authoritative.
+A start can fail while initializing; the service waits at most 30 seconds for
+its initial notification before bounded child cleanup. Stop requests SIGINT and
+then escalates if the child does not exit. Forced termination can prevent normal
+final persistence. Lifecycle notifications are advisory.
+
+The lifecycle node's read-only startup parameters are `configuration_file`
+(installed `smpa_ros/config.yaml` by default), `memory_root` (`memory` under
+the current directory), `model_root` (`models` under the current directory),
+and `runner_arguments` (default `['--service', 'vision']`). Configure them at
+node startup; the goal itself is a service request, not persistent configuration.
+
+### ROS command examples
+
+Source the ROS installation and the built workspace overlay first. Start the
+independent server unloaded in one terminal:
+
+```bash
+ros2 launch smpa_llm server.launch.py
+```
+
+With the same overlay sourced in another terminal, inspect the server and use a
+locally available registered model:
+
+```bash
+ros2 service call /llm/list_models smpa_ros_interfaces/srv/ListModels '{}'
+ros2 service call /llm/get_model_status smpa_ros_interfaces/srv/GetModelStatus '{}'
+ros2 action send_goal /llm/load_model smpa_ros_interfaces/action/LoadModel "{model_id: 'qwen3-4b'}" --feedback
+ros2 param list /llm
+ros2 param get /llm models.qwen3-4b.temperature
+ros2 param set /llm models.qwen3-4b.temperature 0.7
+ros2 action send_goal /llm/generate smpa_ros_interfaces/action/GenerateText "{prompt: 'Describe a cup.'}"
+ros2 action send_goal /llm/generate_structured smpa_ros_interfaces/action/GenerateStructured '{prompt: "Return a short answer.", json_schema: "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}},\"required\":[\"answer\"]}"}'
+ros2 topic echo /llm/inference_status smpa_ros_interfaces/msg/InferenceStatus --qos-durability transient_local
+ros2 action send_goal /llm/unload_model smpa_ros_interfaces/action/UnloadModel '{}' --feedback
+```
+
+`ros2 topic echo` continues until interrupted; run it separately if the unload
+command should run while observing status. Start lifecycle services separately
+with `ros2 run smpa_ros smpa_control` when an experiment is required.
